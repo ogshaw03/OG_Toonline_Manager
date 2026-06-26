@@ -101,9 +101,14 @@ def _ensure_root():
     return ROOT
 
 
+CURV_SMOOTH_ITERS = 3   # 曲率の近傍平均スムージング回数（チクチク=トゲ状の輪郭を防ぐ）
+
+
 def _compute_curvature(shape):
     """各頂点の符号付き曲率を [-1,1] に正規化して返す（凸 > 0 / 凹 < 0）。
-    近傍平均との差（ラプラシアン/アンブレラ）を頂点法線へ投影して曲率とする。"""
+    近傍平均との差（ラプラシアン/アンブレラ）を頂点法線へ投影して曲率とする。
+    ハードエッジ（立方体など）で曲率が1頂点に集中して輪郭がトゲ状になるのを防ぐため、
+    近傍平均で数回スムージングしてから正規化する。"""
     sl = om2.MSelectionList()
     sl.add(shape)
     dag = sl.getDagPath(0)
@@ -112,10 +117,12 @@ def _compute_curvature(shape):
     nrm = mfn.getVertexNormals(False, om2.MSpace.kObject)
     n = len(pts)
     curv = [0.0] * n
+    adj = [()] * n           # 近傍頂点（スムージングで再利用）
     itv = om2.MItMeshVertex(dag)
     while not itv.isDone():
         i = itv.index()
-        conn = itv.getConnectedVertices()
+        conn = list(itv.getConnectedVertices())
+        adj[i] = conn
         m = len(conn)
         if m > 0:
             ax = ay = az = 0.0
@@ -129,6 +136,17 @@ def _compute_curvature(shape):
             # 凸面では近傍平均が法線の逆側 → 符号を反転して凸を正にする
             curv[i] = -(lx * ni.x + ly * ni.y + lz * ni.z)
         itv.next()
+    # 近傍平均によるスムージング（隣接頂点との重みの急変＝トゲを均す）
+    for _ in range(CURV_SMOOTH_ITERS):
+        sm = list(curv)
+        for i in range(n):
+            conn = adj[i]
+            if conn:
+                s = 0.0
+                for c in conn:
+                    s += curv[c]
+                sm[i] = 0.5 * curv[i] + 0.5 * (s / len(conn))
+        curv = sm
     mx = 0.0
     for c in curv:
         if abs(c) > mx:
