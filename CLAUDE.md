@@ -122,6 +122,9 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 - **末端細り** `endTaper`(0〜1, `CTRL_TAPER`): 各頂点のカーブ長手パラメータ t を
   `_taper_factors`（om2 `MFnNurbsCurve.closestPoint`）で求め、端ほど weightList を減衰
   （`weight*= (1-taper)+taper*norm`）。hull はカーブが無いので無効。UI「末端細り」スライダー。
+- **太さプロファイル** `thicknessProfile`(文字列 `CTRL_PROFILE`, "x:y,x:y,..."): 長手 t を
+  カーブでサンプルして weightList に乗算。UI は `_RampWidget`（左クリックで点追加/移動・
+  右クリック削除）。`_parse_profile`/`_sample_profile` でサンプル。末端細りと合成。edge 向け。
 - UIツリーは名前に種別サフィックス（`[背面]`/`[エッジ]`）を付けて判別表示。
 
 ### 互換性の注意

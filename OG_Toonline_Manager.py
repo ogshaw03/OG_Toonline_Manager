@@ -51,6 +51,7 @@ CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
+CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
@@ -194,6 +195,58 @@ def _taper_factors(line):
     return ts
 
 
+def _parse_profile(s):
+    """ "x:y,x:y,..." → [(x,y),...]。空/不正なら一様 [(0,1),(1,1)]。"""
+    pts = []
+    for tok in (s or "").split(","):
+        tok = tok.strip()
+        if not tok or ":" not in tok:
+            continue
+        try:
+            x, y = tok.split(":")
+            pts.append((max(0.0, min(1.0, float(x))), max(0.0, min(2.0, float(y)))))
+        except Exception:
+            pass
+    pts.sort(key=lambda p: p[0])
+    if len(pts) < 2:
+        return [(0.0, 1.0), (1.0, 1.0)]
+    return pts
+
+
+def _serialize_profile(pts):
+    return ",".join("{:.4f}:{:.4f}".format(x, y) for x, y in pts)
+
+
+def _sample_profile(pts, t):
+    if not pts:
+        return 1.0
+    if t <= pts[0][0]:
+        return pts[0][1]
+    if t >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(1, len(pts)):
+        if t <= pts[i][0]:
+            x0, y0 = pts[i - 1]
+            x1, y1 = pts[i]
+            if x1 <= x0:
+                return y1
+            return y0 + (y1 - y0) * (t - x0) / (x1 - x0)
+    return pts[-1][1]
+
+
+def _profile_of_ctrl(ctrl):
+    if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+        try:
+            return _parse_profile(cmds.getAttr(ctrl + "." + CTRL_PROFILE))
+        except Exception:
+            pass
+    return [(0.0, 1.0), (1.0, 1.0)]
+
+
+def _profile_is_flat(pts):
+    return all(abs(y - 1.0) < 1e-4 for _, y in pts)
+
+
 def _attr_key_state(plug):
     """属性プラグのアニメ状態を返す: 'none' / 'anim'（アニメ有・キー上でない）/ 'key'（現フレームがキー）。"""
     try:
@@ -306,6 +359,8 @@ def _create_line_ctrl(line, thick):
     ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
     for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0), (CTRL_TAPER, 0.0)):
         cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
+    cmds.addAttr(ctrl, ln=CTRL_PROFILE, dt="string")
+    cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
     if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
         cmds.addAttr(line, ln=CTRL_LINK, at="message")
     try:
@@ -327,10 +382,16 @@ def _ensure_line_anim(line, default_thick=0.05):
             except Exception:
                 pass
         ctrl = _create_line_ctrl(line, thick)
-    # 旧コントローラーに endTaper が無ければ追加（後方互換）
+    # 旧コントローラーに endTaper / thicknessProfile が無ければ追加（後方互換）
     if not cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
         try:
             cmds.addAttr(ctrl, ln=CTRL_TAPER, at="double", dv=0.0, keyable=True)
+        except Exception:
+            pass
+    if not cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+        try:
+            cmds.addAttr(ctrl, ln=CTRL_PROFILE, dt="string")
+            cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
         except Exception:
             pass
     # ラインコントローラーを 所属グループのコントローラー（無ければ全体コントローラー）配下へ
@@ -468,20 +529,25 @@ def _update_curv_weights(line):
     if n == 0:
         return
     weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
-    # 末端細り（エッジライン）: 長手方向 t に応じて端ほど細く
+    # 長手方向の太さ強弱（末端細り＋プロファイルカーブ）。長手 t を一度だけ算出して合成。
     taper = 0.0
     if cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
         try:
             taper = cmds.getAttr(ctrl + "." + CTRL_TAPER)
         except Exception:
             taper = 0.0
-    if taper > 0.0:
+    prof = _profile_of_ctrl(ctrl)
+    use_prof = not _profile_is_flat(prof)
+    if taper > 0.0 or use_prof:
         ts = _taper_factors(line)
         if len(ts) == n:
             for i in range(n):
-                d = ts[i] if ts[i] < 1.0 - ts[i] else 1.0 - ts[i]   # min(t,1-t): 0=端,0.5=中央
-                norm = d / 0.5                                       # 0=端,1=中央
-                weights[i] *= (1.0 - taper) + taper * norm
+                t = ts[i]
+                if taper > 0.0:
+                    d = t if t < 1.0 - t else 1.0 - t   # min(t,1-t)
+                    weights[i] *= (1.0 - taper) + taper * (d / 0.5)
+                if use_prof:
+                    weights[i] *= _sample_profile(prof, t)
     try:
         cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
     except Exception:
@@ -518,6 +584,107 @@ def _ensure_curv_jobs(line):
         except Exception:
             pass
     _CURV_JOBS[line] = jobs
+
+
+class _RampWidget(QtWidgets.QWidget):
+    """長手方向の太さプロファイルを編集するカーブ（ランプ）ウィジェット。
+    左クリック=点の追加/ドラッグ、右クリック=点の削除。y は太さ倍率(0〜2、基準1)。"""
+    valueChanged = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super(_RampWidget, self).__init__(parent)
+        self.setMinimumHeight(64)
+        self.setMinimumWidth(180)
+        self._pts = [[0.0, 1.0], [1.0, 1.0]]
+        self._drag = -1
+        self._m = 6
+        self._ymax = 2.0
+
+    def points(self):
+        return [list(p) for p in self._pts]
+
+    def set_points(self, pts):
+        if pts and len(pts) >= 2:
+            self._pts = sorted([[max(0.0, min(1.0, p[0])), max(0.0, min(self._ymax, p[1]))]
+                                for p in pts], key=lambda p: p[0])
+        else:
+            self._pts = [[0.0, 1.0], [1.0, 1.0]]
+        self.update()
+
+    def _evt_xy(self, e):
+        try:
+            pt = e.position(); return pt.x(), pt.y()       # PySide6
+        except AttributeError:
+            return float(e.x()), float(e.y())               # PySide2
+
+    def _to_px(self, x, y):
+        w = max(1, self.width() - 2 * self._m); h = max(1, self.height() - 2 * self._m)
+        return (self._m + x * w, self._m + (1.0 - y / self._ymax) * h)
+
+    def _to_norm(self, px, py):
+        w = max(1, self.width() - 2 * self._m); h = max(1, self.height() - 2 * self._m)
+        x = (px - self._m) / w
+        y = (1.0 - (py - self._m) / h) * self._ymax
+        return max(0.0, min(1.0, x)), max(0.0, min(self._ymax, y))
+
+    def _hit(self, px, py):
+        for i, (x, y) in enumerate(self._pts):
+            ax, ay = self._to_px(x, y)
+            if abs(ax - px) < 8 and abs(ay - py) < 8:
+                return i
+        return -1
+
+    def paintEvent(self, e):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.fillRect(self.rect(), QtGui.QColor(45, 45, 45))
+        p.setPen(QtGui.QColor(80, 80, 80))
+        x0, by = self._to_px(0.0, 1.0); x1, _ = self._to_px(1.0, 1.0)
+        p.drawLine(int(x0), int(by), int(x1), int(by))   # 基準 y=1
+        p.setPen(QtGui.QPen(QtGui.QColor(120, 200, 255), 2))
+        prev = None
+        for x, y in self._pts:
+            px, py = self._to_px(x, y)
+            if prev is not None:
+                p.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
+            prev = (px, py)
+        p.setPen(QtGui.QColor(20, 20, 20))
+        p.setBrush(QtGui.QColor(255, 200, 80))
+        for x, y in self._pts:
+            px, py = self._to_px(x, y)
+            p.drawEllipse(QtCore.QPointF(px, py), 4, 4)
+        p.end()
+
+    def mousePressEvent(self, e):
+        px, py = self._evt_xy(e)
+        i = self._hit(px, py)
+        if e.button() == QtCore.Qt.RightButton:
+            if 0 < i < len(self._pts) - 1:
+                del self._pts[i]
+                self.update(); self.valueChanged.emit()
+            return
+        if i < 0:
+            x, y = self._to_norm(px, py)
+            self._pts.append([x, y]); self._pts.sort(key=lambda q: q[0])
+            i = self._hit(*self._to_px(x, y))
+        self._drag = i
+
+    def mouseMoveEvent(self, e):
+        if self._drag < 0:
+            return
+        px, py = self._evt_xy(e)
+        x, y = self._to_norm(px, py)
+        if self._drag == 0:
+            x = 0.0
+        elif self._drag == len(self._pts) - 1:
+            x = 1.0
+        self._pts[self._drag] = [x, y]
+        self._pts.sort(key=lambda q: q[0])
+        self._drag = self._hit(*self._to_px(x, y))
+        self.update(); self.valueChanged.emit()
+
+    def mouseReleaseEvent(self, e):
+        self._drag = -1
 
 
 class _OutlineTree(QtWidgets.QTreeWidget):
@@ -694,6 +861,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._on_tpslider, self._on_tpspin, self._reset_taper,
             on_key=self._key_taper, tip="ライン末端ほど細くする（エッジライン向け）")
         lvl.addLayout(c4row)
+        # 太さプロファイル（長手方向のカーブで強弱）
+        prow = QtWidgets.QHBoxLayout()
+        plabel = QtWidgets.QLabel("太さプロファイル")
+        plabel.setAlignment(QtCore.Qt.AlignTop)
+        prow.addWidget(plabel)
+        self.ramp = _RampWidget()
+        self.ramp.setToolTip("長手方向の太さ強弱。左クリックで点追加/移動、右クリックで削除（エッジライン向け）")
+        self.ramp.valueChanged.connect(self._apply_profile)
+        prow.addWidget(self.ramp, 1)
+        b_rp = QtWidgets.QPushButton("↺"); b_rp.setFixedWidth(26)
+        b_rp.setToolTip("プロファイルをリセット")
+        b_rp.clicked.connect(self._reset_profile)
+        prow.addWidget(b_rp)
+        lvl.addLayout(prow)
         lay.addWidget(self.w_line)
 
         # グループ用パネル（グループ選択時のみ表示）: グループ倍率
@@ -1109,6 +1290,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     except Exception:
                         tp = None
             self._set_curv_widgets(infl, cap, tp)
+            self.ramp.set_points([list(p) for p in _profile_of_ctrl(ctrl)])
         self._update_key_colors()
 
     def _set_thickness_widgets(self, val):
@@ -1364,6 +1546,28 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _key_taper(self):
         self._key_line_attr(CTRL_TAPER)
+
+    def _apply_profile(self):
+        lines = self._selected_lines()
+        if not lines:
+            return
+        s = _serialize_profile(self.ramp.points())
+        cmds.undoInfo(openChunk=True)
+        try:
+            for line in lines:
+                ctrl = _ensure_line_anim(line, self.spin.value())
+                if cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                    try:
+                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
+                    except Exception:
+                        pass
+                _update_curv_weights(line)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def _reset_profile(self):
+        self.ramp.set_points([[0.0, 1.0], [1.0, 1.0]])
+        self._apply_profile()
 
     def _apply_curvature(self):
         lines = self._selected_lines()
