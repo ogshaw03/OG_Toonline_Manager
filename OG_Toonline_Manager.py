@@ -39,8 +39,8 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
-THICK_TYPE = "polyExtrudeFace"      # 太さ駆動ノードの型
-THICK_ATTR = "localTranslateZ"      # 法線方向の押し出し量
+THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
+THICK_ATTR = "offset"               # 法線方向への一様オフセット量（太さ）
 
 
 def _maya_main():
@@ -519,15 +519,30 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # 1) 元の outMesh（オブジェクト空間の変形後メッシュ）を inMesh に直結。
                 #    複製は元と同じトランスフォームなので、変形に追従しつつ元に重なる。
                 cmds.connectAttr(src + ".outMesh", dshape + ".inMesh", f=True)
-                # 2) polyExtrudeFacet で全面を法線方向に押し出して膨らませる。
-                #    keepFacesTogether=True なら共有頂点が平均法線で動き、全方位に均一に膨らむ
-                #    （polyMoveVertex は単一フレームで一方向にしか動かず、カプセル状になるため不可）。
-                cmds.polyExtrudeFacet(dshape + ".f[*]", keepFacesTogether=True,
-                                      localTranslateZ=thick, ch=True)
-                # 3) 法線反転（バックフェースカリングで輪郭のリムだけ見せる）
-                cmds.polyNormal(dshape, normalMode=0, ch=True)
-
+                # 2) textureDeformer の offset で全頂点を「各頂点の法線方向」へ一様に押し出す。
+                #    offset は法線方向の一様変位なので、polyMoveVertex / polyExtrude のような
+                #    単一フレーム由来の一方向(カプセル状)の歪みが出ない。strength=0 でテクスチャ
+                #    寄与は無効化し、純粋な法線オフセットだけにする。二重壁(厚み)も作らない。
+                td = cmds.textureDeformer(dshape, strength=0)
+                defm = td[0]
+                handle = td[1] if len(td) > 1 else None
+                try:
+                    cmds.setAttr(defm + "." + THICK_ATTR, thick)
+                except Exception:
+                    pass
+                if handle and cmds.objExists(handle):
+                    try:
+                        cmds.setAttr(handle + ".visibility", 0)
+                        cmds.parent(handle, dup)
+                    except Exception:
+                        pass
+                # 3) 法線反転は shape の opposite 属性で行う（ヒストリノードを足さない）。
+                #    doubleSided=0 のバックフェースカリングと合わせて輪郭のリムだけ見せる。
                 cmds.setAttr(dshape + ".doubleSided", 0)
+                try:
+                    cmds.setAttr(dshape + ".opposite", 1)
+                except Exception:
+                    pass
                 cmds.sets(dshape, e=True, forceElement=sg)
                 if not cmds.attributeQuery(TAG, node=dup, exists=True):
                     cmds.addAttr(dup, ln=TAG, at="bool", dv=True)

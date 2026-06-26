@@ -29,23 +29,28 @@ handoff §3 の「ヒストリを積んでから worldMesh を差し替える」
 
 ```
 複製は元と同じ親・同じ TRS のまま（動かさない）
-元.outMesh → polyExtrudeFacet(膨らみ) → polyNormal(反転) → ライン shape.inMesh
+元.outMesh → ライン shape.inMesh → textureDeformer.offset(法線方向に膨らみ)
+shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリング
 最後に parent でグループへ（ワールド位置保持で重なりは維持）
 ```
 
 1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
 2. 複製のヒストリを削除して inMesh を空け、**元の `outMesh`（オブジェクト空間の変形後
    メッシュ）** を inMesh に直結。複製は元と同じ TRS なので変形追従しつつ元に重なる。
-3. `cmds.polyExtrudeFacet(... f[*], keepFacesTogether=True, localTranslateZ=太さ)` で
-   全面を法線方向に膨らませ、続けて `cmds.polyNormal(normalMode=0)` で反転。
+3. `cmds.textureDeformer(dshape, strength=0)` を付け、`.offset` に太さを設定。offset は
+   **各頂点を自身の法線方向へ一様変位**させる（テクスチャ寄与は strength=0 で無効）。
+4. 法線反転は **shape の `opposite=1`** で行い（ヒストリノードを足さない）、`doubleSided=0`
+   と合わせてリムだけ表示。textureDeformer のハンドルは非表示にして dup の子に入れる。
 
-太さの実体は **polyExtrudeFace.localTranslateZ**（ライン別に setAttr して制御）。
+太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
 
-注意:
-- 膨らみに **`polyMoveVertex` は使わない**。localTranslate が選択全体で単一フレームに
-  なるため全頂点が一方向へ動き、カプセル状に歪む。`polyExtrudeFacet`(keepFacesTogether)
-  は面ごとの法線フレームで押し出すので全方位に均一に膨らむ。
-- `createNode` でも面フレームが張られず不可。コマンド形式を使う。
+注意（膨らみノードの選定でハマった経緯）:
+- `polyMoveVertex` の localTranslate は選択全体で単一フレーム → 全頂点が一方向へ動き
+  カプセル/三日月状に歪む。**使わない**。
+- `polyExtrudeFacet`(keepFacesTogether=True) も面群を剛体的に動かすため同様に一方向ずれ。
+  keepFacesTogether=False は面がバラけて隙間。ポリゴン操作系では一様な法線オフセット不可。
+- 二重壁(厚み)を作らないこと（押し出し系は厚みが出て内側が元と重なる）。
+- 法線方向の一様オフセットは textureDeformer.offset が正解。
 - worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
 - 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
   アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
