@@ -822,7 +822,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager")
         self.setMinimumWidth(380)
-        self.setMinimumHeight(600)
+        # リスト(固定高)＋スライダーパネル＋プロファイル＋下部コントロールが
+        # 重ならない高さを最小に（これより縮めるとスライダーがリストに被るため）。
+        self.setMinimumHeight(780)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）

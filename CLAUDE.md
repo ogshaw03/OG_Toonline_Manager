@@ -119,7 +119,8 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
   基準半径は `EDGE_BASE_RADIUS`(0.01)。既定 UI 0.05 → offset 0.01 + 基準 0.01 ≒ 半径0.02。
 - **UIリストは固定高さ**(`tree.setFixedHeight(240)`)。選択でスライダーパネル(w_line/w_group/
   w_profile)が表示/非表示されてもリストの大きさが変わらないようにし、余白は最下部の
-  `addStretch` が吸収する。
+  `addStretch` が吸収する。ウィンドウ最小高さは `setMinimumHeight(780)`＝固定リスト＋
+  スライダーパネル＋プロファイル＋下部コントロールが重ならない高さ（これより縮めると被る）。
 - **エッジラインの全体/グループ/ライン太さが 0 のとき消える**: 円プロファイル基準半径が
   あるため offset=0 でもチューブが残る。`_ensure_thickness_chain` で総太さ出力(mB.output)を
   `condition`(Greater Than `EDGE_VIS_EPS`=1e-4) 経由で **shape.visibility** に接続し、
