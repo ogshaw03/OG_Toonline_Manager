@@ -44,11 +44,13 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
    生成される textureDeformerHandle は **削除すると offset(太さ) が効かなくなる**ため、
    visibility=0 で dup の子に格納してアウトライナーを整理する（削除不可）。
-   ※ ハンドルは戻り値に含まれない版があるので、生成前後の `textureDeformerHandle*` 差分で特定する。
+   ※ ハンドルは戻り値に含まれない版があるので、**デフォーマに接続された transform**
+     （`listConnections(defm, type="transform")` で名前に textureDeformerHandle を含むもの）
+     として特定し、非表示で dup 配下へ格納する（削除は offset を壊すので不可）。
    曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
-   `weight[i]=1+影響度*|曲率[i]|`（曲がっている所＝太く・直線＝細く、絶対値で凸凹とも太く）。
-   曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。影響度(0〜10)はライン
-   attr `toonCurv` に保存。太さ=offset とは独立。
+   `weight[i]=min(上限, 1+影響度*|曲率[i]|)`（曲がる所＝太く・直線＝細く、上限で角の太り過ぎを抑制）。
+   曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。影響度(0〜10)/上限(1〜10)は
+   ライン attr `toonCurv`/`toonCurvCap` に保存。太さ=offset とは独立。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。

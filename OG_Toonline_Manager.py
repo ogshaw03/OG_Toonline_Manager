@@ -227,6 +227,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cspin.valueChanged.connect(self._on_cspin)
         c2row.addWidget(self.cslider)
         c2row.addWidget(self.cspin)
+        c2row.addWidget(QtWidgets.QLabel("上限"))
+        self.cap_spin = QtWidgets.QDoubleSpinBox()
+        self.cap_spin.setDecimals(1)
+        self.cap_spin.setRange(1.0, 10.0)
+        self.cap_spin.setSingleStep(0.5)
+        self.cap_spin.setValue(3.0)
+        self.cap_spin.setToolTip("起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
+        self.cap_spin.valueChanged.connect(self._on_cap)
+        c2row.addWidget(self.cap_spin)
         lay.addLayout(c2row)
 
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
@@ -456,7 +465,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 infl = cmds.getAttr(lines[0] + ".toonCurv")
             except Exception:
                 infl = 0.0
-        self._set_curv_widgets(infl)
+        cap = None
+        if cmds.attributeQuery("toonCurvCap", node=lines[0], exists=True):
+            try:
+                cap = cmds.getAttr(lines[0] + ".toonCurvCap")
+            except Exception:
+                cap = None
+        self._set_curv_widgets(infl, cap)
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -503,11 +518,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cslider.blockSignals(True); self.cslider.setValue(int(val * 100)); self.cslider.blockSignals(False)
         self._apply_curvature(val)
 
-    def _set_curv_widgets(self, val):
+    def _on_cap(self, _val):
+        # 上限変更時は現在の影響度で再適用
+        self._apply_curvature(self.cspin.value())
+
+    def _set_curv_widgets(self, val, cap=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
         self.cspin.setValue(val)
         self.cslider.setValue(int(val * 100))
         self.cslider.blockSignals(False); self.cspin.blockSignals(False)
+        if cap is not None:
+            self.cap_spin.blockSignals(True)
+            self.cap_spin.setValue(cap)
+            self.cap_spin.blockSignals(False)
 
     def _curvature_of(self, line):
         """曲率配列をキャッシュ付きで返す（元メッシュ＝deformer のベース入力から計算）。"""
@@ -537,6 +560,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lines = self._selected_lines()
         if not lines:
             return
+        cap = self.cap_spin.value()
         for line in lines:
             defm = self._thick_node_for(line)
             if not defm or not cmds.objExists(defm):
@@ -545,22 +569,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
             n = len(curv)
             if n == 0:
                 continue
-            # weight[i] = 1 + 影響度 * |曲率|（曲がっている所ほど太く・直線的な所は細く）。0 で一様。
-            weights = [max(0.0, 1.0 + influence * abs(c)) for c in curv]
+            # weight[i] = min(上限, 1 + 影響度 * |曲率|)。曲がる所ほど太く・直線は細く、
+            # 上限で角(顎など)が太くなりすぎるのを抑える。0 で一様。
+            weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
             try:
                 cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
             except Exception:
                 pass
-            # 影響度をラインに保存（選択同期・再開用）
-            if not cmds.attributeQuery("toonCurv", node=line, exists=True):
+            # 影響度・上限をラインに保存（選択同期・再開用）
+            for at, v in (("toonCurv", influence), ("toonCurvCap", cap)):
+                if not cmds.attributeQuery(at, node=line, exists=True):
+                    try:
+                        cmds.addAttr(line, ln=at, at="double", dv=0.0)
+                    except Exception:
+                        pass
                 try:
-                    cmds.addAttr(line, ln="toonCurv", at="double", dv=0.0)
+                    cmds.setAttr(line + "." + at, v)
                 except Exception:
                     pass
-            try:
-                cmds.setAttr(line + ".toonCurv", influence)
-            except Exception:
-                pass
 
     # ========== カラー ==========
     def _refresh_swatch(self):
@@ -668,20 +694,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 #    strength=0・テクスチャ無しで、純粋な法線方向の一定オフセットだけにする。
                 #    まず静的な複製に付け、その後ベース入力へ outMesh を流して追従させる
                 #    （先に inMesh へ直結すると評価が壊れて歪むので繋がない）。
-                before_h = set(cmds.ls("textureDeformerHandle*") or [])
                 td = cmds.textureDeformer(dshape, strength=0, offset=thick, direction="Normal")
                 defm = td[0]
-                # ハンドルを確実に特定（戻り値に含まれない版があるため差分で拾う）
+                # ハンドルはデフォーマに接続された transform として特定する
+                # （戻り値に含まれない版があるため接続から拾うのが確実）。
                 handle = None
-                created = [n for n in (cmds.ls("textureDeformerHandle*") or [])
-                           if n not in before_h]
-                for n in created:
-                    if cmds.objExists(n) and "transform" in (cmds.nodeType(n, inherited=True) or []):
-                        handle = n
+                for c in (cmds.listConnections(defm, source=True, destination=False,
+                                               type="transform") or []):
+                    if "textureDeformerHandle" in _short(c):
+                        handle = c
                         break
-                if handle is None and created:
-                    par = cmds.listRelatives(created[0], parent=True, type="transform", f=True)
-                    handle = par[0] if par else None
                 if handle is None and len(td) > 1:
                     handle = td[1]
 
