@@ -56,11 +56,12 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 
 ### アニメーション（ラインコントローラー）
 
-各ラインに**独立したコントローラーノード**（空 transform `<line>_ctrl`、ジオメトリ無し）を作り、
+各ラインに**独立したコントローラーノード**（`spaceLocator` `<line>_ctrl`、shape は非表示）を作り、
 **キーアブルな英語アトリビュート** `thickness`/`curvature`/`curvatureCap` を持たせる
 （`CTRL_THICK`/`CTRL_CURV`/`CTRL_CAP`）。メッシュ本体には属性を置かない。
-- コントローラーは TRS/可視をロック&非表示し3チャンネルだけ見せる。ラインの子に格納し、
-  `ctrl.message → line.toonCtrl` で関連付け（`_ctrl_of`）。ライン削除で一緒に消える。
+- コントローラーは **ROOT 直下の `toonOutline_ctrls` グループ**に格納（ラインの子にはしない）。
+  TRS/可視はロック&非表示で3チャンネルだけ見せる。`ctrl.message → line.toonCtrl` で関連付け
+  （`_ctrl_of`）。ライン削除時は `delete_selected`＋`_cleanup_orphan_ctrls` で一緒に掃除。
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。

@@ -40,6 +40,7 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 HANDLE_HOLDER = "toonOutline_handles"   # textureDeformerHandle 退避用の非表示ホルダー
+CTRL_HOLDER   = "toonOutline_ctrls"     # ラインコントローラー格納グループ（ROOT 直下）
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
 THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
 THICK_ATTR = "offset"               # 現在法線方向への一定オフセット（太さ）
@@ -171,9 +172,24 @@ def _ctrl_of(line):
     return None
 
 
+def _ensure_ctrl_holder():
+    """コントローラー格納グループ（ROOT 直下）を確保。"""
+    _ensure_root()
+    for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+        if _short(c) == CTRL_HOLDER:
+            return c
+    return cmds.group(em=True, name=CTRL_HOLDER, parent=ROOT)
+
+
 def _create_controller(line, thick):
-    """ライン用の独立コントローラー（空 transform）を作って関連付ける。"""
-    ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
+    """ライン用の独立コントローラー（ロケーター）を作り、コントローラーグループへ格納。"""
+    ctrl = cmds.spaceLocator(name=_short(line) + CTRL_SUFFIX)[0]
+    # ロケーター shape は非表示にしてビューポートを汚さない（アウトライナーでは識別可）
+    for sh in cmds.listRelatives(ctrl, shapes=True, f=True) or []:
+        try:
+            cmds.setAttr(sh + ".visibility", 0)
+        except Exception:
+            pass
     for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
         cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
     if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
@@ -182,9 +198,9 @@ def _create_controller(line, thick):
         cmds.connectAttr(ctrl + ".message", line + "." + CTRL_LINK, f=True)
     except Exception:
         pass
-    # ラインの子に格納（独立ノードだがライン削除で一緒に消える）。相対で原点のまま。
+    # コントローラーグループへ格納（独立配置。ラインの子にはしない）
     try:
-        ctrl = cmds.parent(ctrl, line, relative=True)[0]
+        ctrl = cmds.parent(ctrl, _ensure_ctrl_holder())[0]
     except Exception:
         pass
     # 標準チャンネル(TRS/可視)はロック&非表示 → 3チャンネルのみコントローラーに見せる
@@ -208,6 +224,15 @@ def _ensure_line_anim(line, default_thick=0.05):
             except Exception:
                 pass
         ctrl = _create_controller(line, thick)
+    else:
+        # 旧データ（ラインの子など）はコントローラーグループへ移す
+        holder = _ensure_ctrl_holder()
+        par = cmds.listRelatives(ctrl, parent=True, f=True) or []
+        if not par or _short(par[0]) != CTRL_HOLDER:
+            try:
+                ctrl = cmds.parent(ctrl, holder)[0]
+            except Exception:
+                pass
     if defm:
         try:
             if not cmds.isConnected(ctrl + "." + CTRL_THICK, defm + ".offset"):
@@ -598,6 +623,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.delete(HANDLE_HOLDER)
             except Exception:
                 pass
+
+    def _cleanup_orphan_ctrls(self):
+        """リンク先ラインが消えたコントローラーと、空のコントローラーグループを掃除する。"""
+        if cmds.objExists(CTRL_HOLDER):
+            for c in cmds.listRelatives(CTRL_HOLDER, children=True, type="transform", f=True) or []:
+                dest = cmds.listConnections(c + ".message", s=False, d=True) or []
+                if not any(cmds.objExists(d) for d in dest):
+                    try:
+                        cmds.delete(c)
+                    except Exception:
+                        pass
+            if not (cmds.listRelatives(CTRL_HOLDER, c=True) or []):
+                try:
+                    cmds.delete(CTRL_HOLDER)
+                except Exception:
+                    pass
 
     def _ensure_line_shader(self, line):
         """ラインの個別カラー用 surfaceShader/SG を確保。"""
@@ -1163,11 +1204,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         nodes = self._selected_nodes()
         if not nodes:
             cmds.warning("削除する項目をツリーで選択してください"); return
+        # 削除対象ライン（選択ライン＋選択グループ配下ライン）のコントローラーも巻き込む
+        victims = set(nodes)
+        for n in list(nodes):
+            if cmds.attributeQuery(TAG, node=n, exists=True):
+                c = _ctrl_of(n)
+                if c:
+                    victims.add(c)
+            if cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
+                for d in cmds.listRelatives(n, ad=True, type="transform", f=True) or []:
+                    if cmds.attributeQuery(TAG, node=d, exists=True):
+                        c2 = _ctrl_of(d)
+                        if c2:
+                            victims.add(c2)
         cmds.undoInfo(openChunk=True)
         try:
-            cmds.delete(nodes)
-            # 変形ノードが消えて孤立したハンドル／空ホルダーを掃除
+            cmds.delete(list(victims))
+            # 孤立したハンドル／コントローラー／空ホルダーを掃除
             self._cleanup_orphan_handles()
+            self._cleanup_orphan_ctrls()
             # 空になった ROOT は片付ける
             if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
                 cmds.delete(ROOT)
