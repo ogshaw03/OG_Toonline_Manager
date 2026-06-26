@@ -23,6 +23,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 """
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
+import maya.api.OpenMaya as om2
 
 # ---- PySide6 / PySide2 両対応 ----
 try:
@@ -39,8 +40,8 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
-THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
-THICK_ATTR = "offset"               # 法線方向への一様オフセット量（太さ）
+THICK_TYPE = "blendShape"           # 太さ駆動ノードの型
+THICK_ATTR = "weight[0]"            # 法線方向ターゲットへのウェイト（太さ）
 
 
 def _maya_main():
@@ -65,6 +66,22 @@ def _ensure_root():
     if not cmds.objExists(ROOT):
         cmds.group(em=True, name=ROOT)
     return ROOT
+
+
+def _push_along_normals(shape, dist):
+    """shape の各頂点を、自身の頂点法線方向に dist だけ移動（オブジェクト空間）。"""
+    sl = om2.MSelectionList()
+    sl.add(shape)
+    dag = sl.getDagPath(0)
+    mfn = om2.MFnMesh(dag)
+    normals = mfn.getVertexNormals(False, om2.MSpace.kObject)  # 頂点ごとの平均法線
+    pts = mfn.getPoints(om2.MSpace.kObject)
+    for i in range(len(pts)):
+        n = normals[i]
+        pts[i] = om2.MPoint(pts[i].x + n.x * dist,
+                            pts[i].y + n.y * dist,
+                            pts[i].z + n.z * dist)
+    mfn.setPoints(pts, om2.MSpace.kObject)
 
 
 class _GroupRow(QtWidgets.QWidget):
@@ -519,23 +536,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # 1) 元の outMesh（オブジェクト空間の変形後メッシュ）を inMesh に直結。
                 #    複製は元と同じトランスフォームなので、変形に追従しつつ元に重なる。
                 cmds.connectAttr(src + ".outMesh", dshape + ".inMesh", f=True)
-                # 2) textureDeformer の offset で全頂点を「各頂点の法線方向」へ一様に押し出す。
-                #    offset は法線方向の一様変位なので、polyMoveVertex / polyExtrude のような
-                #    単一フレーム由来の一方向(カプセル状)の歪みが出ない。strength=0 でテクスチャ
-                #    寄与は無効化し、純粋な法線オフセットだけにする。二重壁(厚み)も作らない。
-                td = cmds.textureDeformer(dshape, strength=0)
-                defm = td[0]
-                handle = td[1] if len(td) > 1 else None
+
+                # 2) 「各頂点を自分の法線方向へ +1 だけ押した」ターゲットを作り blendShape。
+                #    太さ = blendShape ウェイト（ライブ）。頂点ごとに自分の法線で動くので、
+                #    一方向のずれ（カプセル/上方向オフセット）も二重壁の厚みも出ない。
+                pushT = cmds.duplicate(obj, name=_short(obj) + "_outlineTGT", rr=True)[0]
+                for k in cmds.listRelatives(pushT, children=True, type="transform", f=True) or []:
+                    cmds.delete(k)
+                cmds.delete(pushT, constructionHistory=True)
+                ptShape = cmds.listRelatives(pushT, shapes=True, type="mesh", ni=True, f=True)[0]
+                _push_along_normals(ptShape, 1.0)
+                bs = cmds.blendShape(pushT, dshape, name=_short(dup) + "_push")[0]
+                cmds.setAttr(bs + "." + THICK_ATTR, thick)
+                # ターゲットは隠してラインの子に格納（blendShape のライブ入力として保持）
                 try:
-                    cmds.setAttr(defm + "." + THICK_ATTR, thick)
+                    cmds.setAttr(pushT + ".visibility", 0)
+                    cmds.parent(pushT, dup)
                 except Exception:
                     pass
-                if handle and cmds.objExists(handle):
-                    try:
-                        cmds.setAttr(handle + ".visibility", 0)
-                        cmds.parent(handle, dup)
-                    except Exception:
-                        pass
+
                 # 3) 法線反転は shape の opposite 属性で行う（ヒストリノードを足さない）。
                 #    doubleSided=0 のバックフェースカリングと合わせて輪郭のリムだけ見せる。
                 cmds.setAttr(dshape + ".doubleSided", 0)

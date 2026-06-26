@@ -29,7 +29,8 @@ handoff §3 の「ヒストリを積んでから worldMesh を差し替える」
 
 ```
 複製は元と同じ親・同じ TRS のまま（動かさない）
-元.outMesh → ライン shape.inMesh → textureDeformer.offset(法線方向に膨らみ)
+元.outMesh → ライン shape.inMesh
+法線方向に +1 押したターゲット → blendShape（ウェイト=太さ）で膨らませる
 shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリング
 最後に parent でグループへ（ワールド位置保持で重なりは維持）
 ```
@@ -37,20 +38,22 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
 2. 複製のヒストリを削除して inMesh を空け、**元の `outMesh`（オブジェクト空間の変形後
    メッシュ）** を inMesh に直結。複製は元と同じ TRS なので変形追従しつつ元に重なる。
-3. `cmds.textureDeformer(dshape, strength=0)` を付け、`.offset` に太さを設定。offset は
-   **各頂点を自身の法線方向へ一様変位**させる（テクスチャ寄与は strength=0 で無効）。
-4. 法線反転は **shape の `opposite=1`** で行い（ヒストリノードを足さない）、`doubleSided=0`
-   と合わせてリムだけ表示。textureDeformer のハンドルは非表示にして dup の子に入れる。
+3. 膨らみは **blendShape** で行う。OpenMaya(`om2`) で各頂点を**自分の頂点法線方向へ +1**
+   だけ動かしたターゲットメッシュを作り、`cmds.blendShape(target, dshape)` で適用。
+   太さ = `blendShape.weight[0]`（ライブ）。ターゲットは visibility=0 で dup の子に保持。
+4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
-太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
+太さの実体は **blendShape.weight[0]**（ライン別に setAttr して制御）。`_push_along_normals`
+が `om2.MFnMesh.getVertexNormals`/`getPoints`/`setPoints` でターゲットを生成する。
 
-注意（膨らみノードの選定でハマった経緯）:
+注意（膨らみノードの選定でハマった経緯。**全て一方向にずれて失敗した**）:
 - `polyMoveVertex` の localTranslate は選択全体で単一フレーム → 全頂点が一方向へ動き
-  カプセル/三日月状に歪む。**使わない**。
-- `polyExtrudeFacet`(keepFacesTogether=True) も面群を剛体的に動かすため同様に一方向ずれ。
-  keepFacesTogether=False は面がバラけて隙間。ポリゴン操作系では一様な法線オフセット不可。
-- 二重壁(厚み)を作らないこと（押し出し系は厚みが出て内側が元と重なる）。
-- 法線方向の一様オフセットは textureDeformer.offset が正解。
+  カプセル/三日月状に歪む。
+- `polyExtrudeFacet`(keepFacesTogether=True) も面群を剛体的に動かすため一方向ずれ。
+  keepFacesTogether=False は面がバラけて隙間。
+- `textureDeformer.offset` はハンドル軸（既定 +Y）方向へ一様移動で、法線方向ではない。
+- → これらは使わず、**各頂点法線へ押したターゲット + blendShape** が正解（頂点ごとに
+  正しい方向へ動く・二重壁の厚みも出ない）。
 - worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
 - 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
   アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
