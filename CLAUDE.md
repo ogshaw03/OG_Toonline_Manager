@@ -41,6 +41,10 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 3. 膨らみは **blendShape** で行う。OpenMaya(`om2`) で各頂点を**自分の頂点法線方向へ +1**
    だけ動かしたターゲットメッシュを作り、`cmds.blendShape(target, dshape)` で適用。
    太さ = `blendShape.weight[0]`（ライブ）。ターゲットは visibility=0 で dup の子に保持。
+   ※ Edit Mesh > Transform をノーマル方向に使ったのと同じ「頂点ごとの法線オフセット」。
+     `polyMoveVertex`（=Transform の実体）は単一方向にしか動かせずスクリプト化不可。
+3b. 変形追従は **outMesh を blendShape のベース入力 `input[0].inputGeometry` に接続**して
+    行う（先に inMesh へ直結すると評価が壊れて歪むので不可）。失敗しても静的な正しい形は残る。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **blendShape.weight[0]**（ライン別に setAttr して制御）。`_push_along_normals`

@@ -533,13 +533,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.delete(dup, constructionHistory=True)
 
                 # --- inverted hull を構築 ---
-                # 1) 元の outMesh（オブジェクト空間の変形後メッシュ）を inMesh に直結。
-                #    複製は元と同じトランスフォームなので、変形に追従しつつ元に重なる。
-                cmds.connectAttr(src + ".outMesh", dshape + ".inMesh", f=True)
-
-                # 2) 「各頂点を自分の法線方向へ +1 だけ押した」ターゲットを作り blendShape。
-                #    太さ = blendShape ウェイト（ライブ）。頂点ごとに自分の法線で動くので、
-                #    一方向のずれ（カプセル/上方向オフセット）も二重壁の厚みも出ない。
+                # 1) まず静的な複製のまま blendShape で「法線方向の膨らみ」を確定させる。
+                #    「各頂点を自分の法線方向へ +1 だけ押した」ターゲットを作って blendShape。
+                #    頂点ごとに自分の法線で動くので、一方向ずれ・カプセル・二重壁が出ない。
+                #    （outMesh を inMesh に先に直結すると評価が壊れて歪むので、ここでは繋がない）
                 pushT = cmds.duplicate(obj, name=_short(obj) + "_outlineTGT", rr=True)[0]
                 for k in cmds.listRelatives(pushT, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
@@ -548,6 +545,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 _push_along_normals(ptShape, 1.0)
                 bs = cmds.blendShape(pushT, dshape, name=_short(dup) + "_push")[0]
                 cmds.setAttr(bs + "." + THICK_ATTR, thick)
+
+                # 2) 変形追従: blendShape のベース入力に 元の outMesh を流し込む。
+                #    こうすると「ライブ変形メッシュ + ウェイト*法線デルタ」になり、
+                #    形を壊さずに元メッシュの変形へ追従する。失敗しても静的な正しい形は残る。
+                try:
+                    cmds.connectAttr(src + ".outMesh", bs + ".input[0].inputGeometry", f=True)
+                except Exception:
+                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
+
                 # ターゲットは隠してラインの子に格納（blendShape のライブ入力として保持）
                 try:
                     cmds.setAttr(pushT + ".visibility", 0)
