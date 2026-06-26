@@ -194,9 +194,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spin.valueChanged.connect(self._on_spin)
         trow.addWidget(self.slider)
         trow.addWidget(self.spin)
+        b_rt = QtWidgets.QPushButton("↺")
+        b_rt.setFixedWidth(26); b_rt.setToolTip("太さをリセット (0.05)")
+        b_rt.clicked.connect(self._reset_thickness)
+        trow.addWidget(b_rt)
         lay.addLayout(trow)
 
-        # 曲率起伏（元メッシュの曲率に応じて太さに起伏。0=一様 / 凸ほど太く・凹ほど細く）
+        # 曲率起伏（元メッシュの曲率に応じて太さに起伏。0=一様 / 曲がる所ほど太く）
         c2row = QtWidgets.QHBoxLayout()
         c2row.addWidget(QtWidgets.QLabel("曲率起伏"))
         self.cslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -211,6 +215,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cspin.valueChanged.connect(self._on_cspin)
         c2row.addWidget(self.cslider)
         c2row.addWidget(self.cspin)
+        b_rc = QtWidgets.QPushButton("↺")
+        b_rc.setFixedWidth(26); b_rc.setToolTip("曲率起伏をリセット (0.0)")
+        b_rc.clicked.connect(self._reset_curv)
+        c2row.addWidget(b_rc)
         lay.addLayout(c2row)
 
         # 曲率起伏の上限（最大倍率）。角(顎など)が太くなりすぎないよう制限。
@@ -229,6 +237,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cap_spin.valueChanged.connect(self._on_cap_spin)
         c3row.addWidget(self.cap_slider)
         c3row.addWidget(self.cap_spin)
+        b_rcap = QtWidgets.QPushButton("↺")
+        b_rcap.setFixedWidth(26); b_rcap.setToolTip("曲率上限をリセット (3.0)")
+        b_rcap.clicked.connect(self._reset_cap)
+        c3row.addWidget(b_rcap)
         lay.addLayout(c3row)
 
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
@@ -521,6 +533,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spin.setValue(val)
         self.slider.setValue(int(val * 1000))
         self.slider.blockSignals(False); self.spin.blockSignals(False)
+
+    # ========== リセット ==========
+    def _reset_thickness(self):
+        self.spin.setValue(0.05)   # spin の valueChanged が適用＋slider同期する
+
+    def _reset_curv(self):
+        self.cspin.setValue(0.0)
+
+    def _reset_cap(self):
+        self.cap_spin.setValue(3.0)
 
     # ========== 太さ（選択ラインのみ） ==========
     def _on_slider(self, v):
