@@ -51,6 +51,7 @@ CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
+MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
@@ -557,6 +558,9 @@ def _update_curv_weights(line):
                     weights[i] *= (1.0 - taper) + taper * (d / 0.5)
                 if use_prof:
                     weights[i] *= _sample_profile(prof, t)
+    # 末端細り/プロファイルでウェイトが 0 まで落ちるとチューブが基準半径(点)に潰れて
+    # スピンドル状に尖る（場合により反転して -値に見える）。下限を入れて潰れを防ぐ。
+    weights = [w if w > MIN_WEIGHT else MIN_WEIGHT for w in weights]
     try:
         cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
     except Exception:

@@ -125,6 +125,9 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 - **太さプロファイル** `thicknessProfile`(文字列 `CTRL_PROFILE`, "x:y,x:y,..."): 長手 t を
   カーブでサンプルして weightList に乗算。UI は `_RampWidget`（左クリックで点追加/移動・
   右クリック削除）。`_parse_profile`/`_sample_profile` でサンプル。末端細りと合成。edge 向け。
+  ※ 末端細り/プロファイルで weightList が 0 まで落ちるとチューブが基準半径(≈点)へ潰れて
+    スピンドル状に尖る（反転して -値に見える）ため、`_update_curv_weights` 末尾で
+    全 weight を `MIN_WEIGHT`(=0.05) で下限クランプして潰れを防ぐ。
 - UIツリーは名前に種別サフィックス（`[背面]`/`[エッジ]`）を付けて判別表示。
 
 ### 互換性の注意
