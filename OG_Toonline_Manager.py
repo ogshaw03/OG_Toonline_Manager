@@ -23,7 +23,6 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 """
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
-import maya.api.OpenMaya as om2
 
 # ---- PySide6 / PySide2 両対応 ----
 try:
@@ -40,8 +39,8 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
-THICK_TYPE = "blendShape"           # 太さ駆動ノードの型
-THICK_ATTR = "weight[0]"            # 法線方向ターゲットへのウェイト（太さ）
+THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
+THICK_ATTR = "offset"               # 現在法線方向への一定オフセット（太さ）
 
 
 def _maya_main():
@@ -66,22 +65,6 @@ def _ensure_root():
     if not cmds.objExists(ROOT):
         cmds.group(em=True, name=ROOT)
     return ROOT
-
-
-def _push_along_normals(shape, dist):
-    """shape の各頂点を、自身の頂点法線方向に dist だけ移動（オブジェクト空間）。"""
-    sl = om2.MSelectionList()
-    sl.add(shape)
-    dag = sl.getDagPath(0)
-    mfn = om2.MFnMesh(dag)
-    normals = mfn.getVertexNormals(False, om2.MSpace.kObject)  # 頂点ごとの平均法線
-    pts = mfn.getPoints(om2.MSpace.kObject)
-    for i in range(len(pts)):
-        n = normals[i]
-        pts[i] = om2.MPoint(pts[i].x + n.x * dist,
-                            pts[i].y + n.y * dist,
-                            pts[i].z + n.z * dist)
-    mfn.setPoints(pts, om2.MSpace.kObject)
 
 
 class _GroupRow(QtWidgets.QWidget):
@@ -533,33 +516,37 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.delete(dup, constructionHistory=True)
 
                 # --- inverted hull を構築 ---
-                # 1) まず静的な複製のまま blendShape で「法線方向の膨らみ」を確定させる。
-                #    「各頂点を自分の法線方向へ +1 だけ押した」ターゲットを作って blendShape。
-                #    頂点ごとに自分の法線で動くので、一方向ずれ・カプセル・二重壁が出ない。
-                #    （outMesh を inMesh に先に直結すると評価が壊れて歪むので、ここでは繋がない）
-                pushT = cmds.duplicate(obj, name=_short(obj) + "_outlineTGT", rr=True)[0]
-                for k in cmds.listRelatives(pushT, children=True, type="transform", f=True) or []:
-                    cmds.delete(k)
-                cmds.delete(pushT, constructionHistory=True)
-                ptShape = cmds.listRelatives(pushT, shapes=True, type="mesh", ni=True, f=True)[0]
-                _push_along_normals(ptShape, 1.0)
-                bs = cmds.blendShape(pushT, dshape, name=_short(dup) + "_push")[0]
-                cmds.setAttr(bs + "." + THICK_ATTR, thick)
-
-                # 2) 変形追従: blendShape のベース入力に 元の outMesh を流し込む。
-                #    こうすると「ライブ変形メッシュ + ウェイト*法線デルタ」になり、
-                #    形を壊さずに元メッシュの変形へ追従する。失敗しても静的な正しい形は残る。
+                # 1) textureDeformer で各頂点を「現在のサーフェス法線」方向へ一定距離オフセット。
+                #    法線は変形後メッシュから毎フレーム再計算されるので、元メッシュを変形しても
+                #    太さ（法線方向の距離）は一定に保たれる（blendShape はバインド時固定デルタで
+                #    変形すると太さが変わるため不使用）。接線空間の Z = サーフェス法線を使う。
+                #    まず静的な複製に付け、その後ベース入力へ outMesh を流して追従させる
+                #    （先に inMesh へ直結すると評価が壊れて歪むので繋がない）。
+                td = cmds.textureDeformer(dshape, strength=0)
+                defm = td[0]
+                handle = td[1] if len(td) > 1 else None
                 try:
-                    cmds.connectAttr(src + ".outMesh", bs + ".input[0].inputGeometry", f=True)
+                    cmds.setAttr(defm + ".vectorSpace", 2)        # 0=Object 1=World 2=Tangent
+                    cmds.setAttr(defm + ".vectorStrengthX", 0)
+                    cmds.setAttr(defm + ".vectorStrengthY", 0)
+                    cmds.setAttr(defm + ".vectorStrengthZ", 1)    # Z = サーフェス法線
+                    cmds.setAttr(defm + "." + THICK_ATTR, thick)  # offset = 太さ
+                except Exception:
+                    cmds.warning("textureDeformer の設定に失敗しました")
+
+                # 2) 変形追従: deformer のベース入力に 元の outMesh を流し込む。
+                try:
+                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
                 except Exception:
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
 
-                # ターゲットは隠してラインの子に格納（blendShape のライブ入力として保持）
-                try:
-                    cmds.setAttr(pushT + ".visibility", 0)
-                    cmds.parent(pushT, dup)
-                except Exception:
-                    pass
+                # deformer ハンドルは隠してラインの子に格納
+                if handle and cmds.objExists(handle):
+                    try:
+                        cmds.setAttr(handle + ".visibility", 0)
+                        cmds.parent(handle, dup)
+                    except Exception:
+                        pass
 
                 # 3) 法線反転は shape の opposite 属性で行う（ヒストリノードを足さない）。
                 #    doubleSided=0 のバックフェースカリングと合わせて輪郭のリムだけ見せる。

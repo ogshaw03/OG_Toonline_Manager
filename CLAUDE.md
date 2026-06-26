@@ -29,35 +29,31 @@ handoff §3 の「ヒストリを積んでから worldMesh を差し替える」
 
 ```
 複製は元と同じ親・同じ TRS のまま（動かさない）
-元.outMesh → ライン shape.inMesh
-法線方向に +1 押したターゲット → blendShape（ウェイト=太さ）で膨らませる
+ライン shape に textureDeformer（接線Z=法線方向に offset=太さ）
+変形追従は textureDeformer のベース入力 input[0].inputGeometry に 元.outMesh を接続
 shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリング
 最後に parent でグループへ（ワールド位置保持で重なりは維持）
 ```
 
 1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
-2. 複製のヒストリを削除して inMesh を空け、**元の `outMesh`（オブジェクト空間の変形後
-   メッシュ）** を inMesh に直結。複製は元と同じ TRS なので変形追従しつつ元に重なる。
-3. 膨らみは **blendShape** で行う。OpenMaya(`om2`) で各頂点を**自分の頂点法線方向へ +1**
-   だけ動かしたターゲットメッシュを作り、`cmds.blendShape(target, dshape)` で適用。
-   太さ = `blendShape.weight[0]`（ライブ）。ターゲットは visibility=0 で dup の子に保持。
-   ※ Edit Mesh > Transform をノーマル方向に使ったのと同じ「頂点ごとの法線オフセット」。
-     `polyMoveVertex`（=Transform の実体）は単一方向にしか動かせずスクリプト化不可。
-3b. 変形追従は **outMesh を blendShape のベース入力 `input[0].inputGeometry` に接続**して
-    行う（先に inMesh へ直結すると評価が壊れて歪むので不可）。失敗しても静的な正しい形は残る。
+2. 膨らみは **textureDeformer** で行う。`vectorSpace=2(Tangent)`、`vectorStrength=(0,0,1)`
+   で**接線空間 Z＝サーフェス法線**方向に、`offset` を太さとして一定距離オフセット。
+   法線は**変形後メッシュから毎フレーム再計算**されるので、元を変形させても太さは一定。
+3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
+   先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
+   ハンドルは visibility=0 で dup の子に格納。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
-太さの実体は **blendShape.weight[0]**（ライン別に setAttr して制御）。`_push_along_normals`
-が `om2.MFnMesh.getVertexNormals`/`getPoints`/`setPoints` でターゲットを生成する。
+太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
 
-注意（膨らみノードの選定でハマった経緯。**全て一方向にずれて失敗した**）:
-- `polyMoveVertex` の localTranslate は選択全体で単一フレーム → 全頂点が一方向へ動き
-  カプセル/三日月状に歪む。
-- `polyExtrudeFacet`(keepFacesTogether=True) も面群を剛体的に動かすため一方向ずれ。
-  keepFacesTogether=False は面がバラけて隙間。
-- `textureDeformer.offset` はハンドル軸（既定 +Y）方向へ一様移動で、法線方向ではない。
-- → これらは使わず、**各頂点法線へ押したターゲット + blendShape** が正解（頂点ごとに
-  正しい方向へ動く・二重壁の厚みも出ない）。
+注意（膨らみノードの選定でハマった経緯。**全て一方向にずれ／太さ変動で失敗した**）:
+- `polyMoveVertex` localTranslate / `polyExtrudeFacet` は選択全体を単一フレームで動かす
+  → 一方向（カプセル/三日月）に歪む。
+- `textureDeformer` を既定のまま使うとハンドル軸(+Y)方向。**接線Z(法線)に設定**が必須。
+- **blendShape** はバインド時の固定デルタを足すため、元メッシュを変形させると**太さが
+  変わってしまう**（歪みは出ないが太さ非一定）。よって不使用。
+- → 変形でも太さ一定にするには、**法線を毎フレーム再計算する deformer（textureDeformer
+  の法線オフセット）** が正解。
 - worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
 - 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
   アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
