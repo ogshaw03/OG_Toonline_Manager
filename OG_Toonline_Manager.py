@@ -1028,6 +1028,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_hint.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_hint)
 
+        # 選択物のすべての値を初期値に戻す（実行前に確認ダイアログ）
+        self.btn_reset_all = QtWidgets.QPushButton("選択をすべてリセット")
+        self.btn_reset_all.setToolTip("選択したライン/グループの全パラメータを初期値に戻します（確認あり）")
+        self.btn_reset_all.clicked.connect(self.reset_selected)
+        lay.addWidget(self.btn_reset_all)
+
         # カラー
         clrow = QtWidgets.QHBoxLayout()
         clrow.addWidget(QtWidgets.QLabel("共通カラー"))
@@ -1193,11 +1199,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_toggle_hide_handles(self, state):
         """UIチェックでハンドルの hiddenInOutliner を一括切替。"""
         hide = 1 if state else 0
-        for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
-            try:
-                cmds.setAttr(h + ".hiddenInOutliner", hide)
-            except Exception:
-                pass
+        cmds.undoInfo(openChunk=True)
+        try:
+            for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
+                try:
+                    cmds.setAttr(h + ".hiddenInOutliner", hide)
+                except Exception:
+                    pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
         try:
             import maya.mel as _mel
             _mel.eval("AEdagNodeCommonRefreshOutliners();")
@@ -1232,8 +1242,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_toggle_lock_select(self, state):
         """UIチェックで全ラインのビューポート選択可否を一括切替。"""
         lock = bool(state)
-        for line in self._all_lines():
-            self._apply_line_selectable(line, lock)
+        cmds.undoInfo(openChunk=True)
+        try:
+            for line in self._all_lines():
+                self._apply_line_selectable(line, lock)
+        finally:
+            cmds.undoInfo(closeChunk=True)
 
     def _stash_loose_handles(self):
         """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
@@ -2198,11 +2212,81 @@ class ToonOutlineUI(QtWidgets.QDialog):
         name = (name or "").strip()
         if not ok or not name:
             return
-        self._ensure_group(name)
+        cmds.undoInfo(openChunk=True)
+        try:
+            self._ensure_group(name)
+        finally:
+            cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
         idx = self.group_combo.findText(name)
         if idx >= 0:
             self.group_combo.setCurrentIndex(idx)
+
+    def reset_selected(self):
+        """選択中のライン/グループの値をすべて初期値に戻す（実行前に確認ダイアログ）。"""
+        nodes = self._selected_nodes()
+        lines = [n for n in nodes if cmds.attributeQuery(TAG, node=n, exists=True)]
+        groups = [n for n in nodes if cmds.attributeQuery(GROUP_TAG, node=n, exists=True)]
+        if not lines and not groups:
+            cmds.warning("リセットする項目をツリーで選択してください"); return
+        # 忠告（確認ダイアログ）。Py2/Py3 両対応のため静的メソッドの warning を使う。
+        res = QtWidgets.QMessageBox.warning(
+            self, "選択をすべてリセット",
+            "選択したライン/グループの値（太さ・曲率起伏・曲率上限・末端細り・"
+            "プロファイル／グループ倍率）をすべて初期値に戻します。\n"
+            "現在の調整値は失われます（Undo で元に戻せます）。\n\nよろしいですか？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        if res != QtWidgets.QMessageBox.Yes:
+            return
+        cmds.undoInfo(openChunk=True)
+        try:
+            for line in lines:
+                ctrl = _ensure_line_anim(line, DEFAULT_THICK)
+                is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
+                thick = DEFAULT_EDGE_THICK if is_edge else DEFAULT_THICK
+                for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, DEFAULT_CURV),
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                    if cmds.attributeQuery(at, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + at, dv)
+                        except Exception:
+                            pass
+                if cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                    try:
+                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
+                    except Exception:
+                        pass
+                _update_curv_weights(line)
+            for g in groups:
+                gc = _ctrl_of(g)
+                if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
+                    try:
+                        cmds.setAttr(gc + "." + GMULT, 1.0)
+                    except Exception:
+                        pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        # ツリーの太さ列を更新（選択は保持したまま）
+        self._populating = True
+        for it in self.tree.selectedItems():
+            n = it.data(0, QtCore.Qt.UserRole)
+            if not n:
+                continue
+            if cmds.attributeQuery(TAG, node=n, exists=True):
+                t = self._thickness_of(n)
+                it.setText(1, "" if t is None else "{:.3f}".format(t))
+            elif cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
+                gc = _ctrl_of(n)
+                gm = 1.0
+                if gc:
+                    try:
+                        gm = cmds.getAttr(gc + "." + GMULT)
+                    except Exception:
+                        pass
+                it.setText(1, "x{:.2f}".format(gm))
+        self._populating = False
+        self._on_tree_selection()   # スライダー類を初期値表示へ同期
 
     def delete_selected(self):
         nodes = self._selected_nodes()

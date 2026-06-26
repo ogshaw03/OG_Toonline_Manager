@@ -83,6 +83,13 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
   再計算。タイムライン再生でも追従（高密度メッシュは負荷大・バッチレンダーでは不可）。
 - 各スライダー行に **K ボタン**（その値だけ現フレームにキー）。一括キーボタンは廃止。
 - 削除は **Delete キー**（`_OutlineTree.keyPressEvent`→`delete_selected`）。削除ボタンは廃止。
+- **「選択をすべてリセット」ボタン**（`reset_selected`）: 選択ライン/グループの全パラメータ
+  （太さ/曲率起伏/曲率上限/末端細り/プロファイル、グループは倍率）を初期値に戻す。実行前に
+  `QMessageBox.warning`（Yes/No、既定 No）で**確認ダイアログ**を出す。undo チャンクで1操作。
+- **Undo**: 生成/削除/各値変更/キー/色/リネーム/移動に加え、ハンドル隠しトグル
+  (`_on_toggle_hide_handles`)・選択不可トグル(`_on_toggle_lock_select`)・新規グループ
+  (`new_group`)も openChunk/closeChunk で1 Undo にまとめている。スライダードラッグは
+  `_begin_drag`/`_end_drag`＋`_dragging` フラグでドラッグ全体を1チャンク化。
 - 上部に 生成／新規グループ／再取得 ボタンを配置。
 - ノード名・属性名は全て英語（日本語混入による不具合回避）。UIラベルは日本語のまま。
 
