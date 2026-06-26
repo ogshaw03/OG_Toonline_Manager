@@ -57,7 +57,8 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 ### アニメーション（ラインコントローラー）
 
 各ラインに**独立したコントローラーノード**（素の `transform` `<line>_ctrl`、シェイプ無し。
-ドローイングオーバーライド色=イエローでアウトライナー上を色付き表示にし識別しやすく）を作り、
+`useOutlinerColor`/`outlinerColor`=黄でアウトライナーの文字を色付き表示にし識別しやすく。
+※ `overrideColor` はビューポート用でアウトライナーには効かないので使わない）を作り、
 **キーアブルな英語アトリビュート** `thickness`/`curvature`/`curvatureCap` を持たせる
 （`CTRL_THICK`/`CTRL_CURV`/`CTRL_CAP`）。メッシュ本体には属性を置かない。
 - コントローラーは **ROOT 直下の `toonOutline_ctrls` グループ**に格納（ラインの子にはしない）。
@@ -66,8 +67,11 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。
-- **太さ**: `ctrl.thickness → textureDeformer.offset` を `connectAttr` で直結。DG評価なので
-  キー/再生/レンダーまで完全にアニメ可能（軽量）。UIスライダーは `ctrl.thickness` を setAttr。
+- **太さ**: `offset = ctrl.thickness × group.thicknessMult × ROOT.thicknessMult` を
+  `multDoubleLinear` 2段（`<ctrl>_thkA`/`_thkB`）で構成し `textureDeformer.offset` へ接続。
+  ライン値・グループ倍率（`GMULT` on group）・全体倍率（`GMULT` on ROOT）の乗算で、全て DG・
+  アニメ可能。`_ensure_thickness_chain` が構築（D&D移動・再取得でグループ入力を張り直す）。
+  UIは「太さ」=ctrl.thickness、「グループ倍率」「全体倍率」=各 thicknessMult を setAttr。
 - **曲率起伏/曲率上限**: 頂点ウェイトは Python 計算が必要なため、`curvature`/`curvatureCap` の
   attributeChange を監視する `scriptJob`（`_ensure_curv_jobs`）で `_update_curv_weights` を呼び
   再計算。タイムライン再生でも追従（高密度メッシュは負荷大・バッチレンダーでは不可）。

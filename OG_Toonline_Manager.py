@@ -51,6 +51,7 @@ CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
+GMULT       = "thicknessMult"        # グループ/全体(ROOT) の太さ倍率アトリビュート
 
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
@@ -183,12 +184,12 @@ def _ensure_ctrl_holder():
 
 def _create_controller(line, thick):
     """ライン用の独立コントローラー（ロケーター）を作り、コントローラーグループへ格納。"""
-    # シェイプ無しの素の transform。ドローイングオーバーライドで色を付け、
-    # アウトライナーで色付き表示にして識別しやすくする（ビューポートには何も出ない）。
+    # シェイプ無しの素の transform。アウトライナーの文字色（useOutlinerColor/outlinerColor）
+    # を付けて識別しやすくする（ビューポートには何も出ない）。
     ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
     try:
-        cmds.setAttr(ctrl + ".overrideEnabled", 1)
-        cmds.setAttr(ctrl + ".overrideColor", 17)   # 17=イエロー
+        cmds.setAttr(ctrl + ".useOutlinerColor", 1)
+        cmds.setAttr(ctrl + ".outlinerColor", 1.0, 0.8, 0.0, type="double3")  # 黄
     except Exception:
         pass
     for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
@@ -234,14 +235,72 @@ def _ensure_line_anim(line, default_thick=0.05):
                 ctrl = cmds.parent(ctrl, holder)[0]
             except Exception:
                 pass
-    if defm:
-        try:
-            if not cmds.isConnected(ctrl + "." + CTRL_THICK, defm + ".offset"):
-                cmds.connectAttr(ctrl + "." + CTRL_THICK, defm + ".offset", f=True)
-        except Exception:
-            pass
+    _ensure_thickness_chain(line)
     _ensure_curv_jobs(line)
     return ctrl
+
+
+def _ensure_mult_attr(node):
+    if node and cmds.objExists(node) and not cmds.attributeQuery(GMULT, node=node, exists=True):
+        try:
+            cmds.addAttr(node, ln=GMULT, at="double", dv=1.0, min=0.0, keyable=True)
+        except Exception:
+            pass
+
+
+def _line_group(line):
+    par = cmds.listRelatives(line, parent=True, f=True) or []
+    if par and cmds.attributeQuery(GROUP_TAG, node=par[0], exists=True):
+        return par[0]
+    return None
+
+
+def _ensure_thickness_chain(line):
+    """offset = ctrl.thickness * group.thicknessMult * ROOT.thicknessMult を DG で構築。
+    ライン値・グループ倍率・全体倍率を乗算し、すべてアニメ可能に保つ。"""
+    defm = _line_deformer(line)
+    ctrl = _ctrl_of(line)
+    if not defm or not ctrl:
+        return
+    _ensure_root()
+    _ensure_mult_attr(ROOT)
+    grp = _line_group(line)
+    if grp:
+        _ensure_mult_attr(grp)
+    base = _short(ctrl)
+    mA = base + "_thkA"
+    mB = base + "_thkB"
+    if not cmds.objExists(mA):
+        mA = cmds.createNode("multDoubleLinear", name=mA)
+    if not cmds.objExists(mB):
+        mB = cmds.createNode("multDoubleLinear", name=mB)
+    # mA = ctrl.thickness * groupMult
+    try:
+        cmds.connectAttr(ctrl + "." + CTRL_THICK, mA + ".input1", f=True)
+    except Exception:
+        pass
+    for p in (cmds.listConnections(mA + ".input2", s=True, d=False, p=True) or []):
+        try:
+            cmds.disconnectAttr(p, mA + ".input2")
+        except Exception:
+            pass
+    if grp:
+        try:
+            cmds.connectAttr(grp + "." + GMULT, mA + ".input2", f=True)
+        except Exception:
+            pass
+    else:
+        try:
+            cmds.setAttr(mA + ".input2", 1.0)
+        except Exception:
+            pass
+    # mB = mA * globalMult → offset
+    try:
+        cmds.connectAttr(mA + ".output", mB + ".input1", f=True)
+        cmds.connectAttr(ROOT + "." + GMULT, mB + ".input2", f=True)
+        cmds.connectAttr(mB + ".output", defm + ".offset", f=True)
+    except Exception:
+        pass
 
 
 def _update_curv_weights(line):
@@ -455,6 +514,54 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_rcap.clicked.connect(self._reset_cap)
         c3row.addWidget(b_rcap)
         lay.addLayout(c3row)
+
+        # グループ倍率（選択中グループの全ラインに乗算）
+        grow = QtWidgets.QHBoxLayout()
+        grow.addWidget(QtWidgets.QLabel("グループ倍率"))
+        self.grpslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.grpslider.setRange(0, 500)   # /100 = 0.0〜5.0
+        self.grpslider.setValue(100)
+        self.grpspin = QtWidgets.QDoubleSpinBox()
+        self.grpspin.setDecimals(2)
+        self.grpspin.setRange(0.0, 5.0)
+        self.grpspin.setSingleStep(0.05)
+        self.grpspin.setValue(1.0)
+        self.grpspin.setToolTip("選択ラインの所属グループ（またはグループ選択時はそのグループ）の太さ倍率")
+        self.grpslider.valueChanged.connect(self._on_grpslider)
+        self.grpslider.sliderPressed.connect(self._begin_drag)
+        self.grpslider.sliderReleased.connect(self._end_drag)
+        self.grpspin.valueChanged.connect(self._on_grpspin)
+        grow.addWidget(self.grpslider)
+        grow.addWidget(self.grpspin)
+        b_rg = QtWidgets.QPushButton("↺")
+        b_rg.setFixedWidth(26); b_rg.setToolTip("グループ倍率をリセット (1.0)")
+        b_rg.clicked.connect(self._reset_grpmult)
+        grow.addWidget(b_rg)
+        lay.addLayout(grow)
+
+        # 全体倍率（全ラインに乗算）
+        arow = QtWidgets.QHBoxLayout()
+        arow.addWidget(QtWidgets.QLabel("全体倍率"))
+        self.gslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.gslider.setRange(0, 500)
+        self.gslider.setValue(100)
+        self.gspin = QtWidgets.QDoubleSpinBox()
+        self.gspin.setDecimals(2)
+        self.gspin.setRange(0.0, 5.0)
+        self.gspin.setSingleStep(0.05)
+        self.gspin.setValue(1.0)
+        self.gspin.setToolTip("全アウトラインの太さ倍率")
+        self.gslider.valueChanged.connect(self._on_gslider)
+        self.gslider.sliderPressed.connect(self._begin_drag)
+        self.gslider.sliderReleased.connect(self._end_drag)
+        self.gspin.valueChanged.connect(self._on_gspin)
+        arow.addWidget(self.gslider)
+        arow.addWidget(self.gspin)
+        b_ra = QtWidgets.QPushButton("↺")
+        b_ra.setFixedWidth(26); b_ra.setToolTip("全体倍率をリセット (1.0)")
+        b_ra.clicked.connect(self._reset_gmult)
+        arow.addWidget(b_ra)
+        lay.addLayout(arow)
 
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
@@ -780,6 +887,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.select(ctrls, r=True)
             except Exception:
                 pass
+        self._set_mult_widgets()
         self._update_key_colors()
 
     def _set_thickness_widgets(self, val):
@@ -807,6 +915,97 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _reset_cap(self):
         self.cap_spin.setValue(3.0)
+
+    def _reset_grpmult(self):
+        self.grpspin.setValue(1.0)
+
+    def _reset_gmult(self):
+        self.gspin.setValue(1.0)
+
+    # ========== 太さ倍率（グループ / 全体） ==========
+    def _target_group(self):
+        """倍率の対象グループ: グループ選択中はそれ、ライン選択中はその所属グループ。"""
+        for n in self._selected_nodes():
+            if cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
+                return n
+        for n in self._selected_nodes():
+            if cmds.attributeQuery(TAG, node=n, exists=True):
+                g = _line_group(n)
+                if g:
+                    return g
+        return None
+
+    def _on_grpslider(self, v):
+        val = v / 100.0
+        self.grpspin.blockSignals(True); self.grpspin.setValue(val); self.grpspin.blockSignals(False)
+        self._apply_group_mult(val)
+
+    def _on_grpspin(self, val):
+        self.grpslider.blockSignals(True); self.grpslider.setValue(int(val * 100)); self.grpslider.blockSignals(False)
+        self._apply_group_mult(val)
+
+    def _apply_group_mult(self, val):
+        grp = self._target_group()
+        if not grp:
+            return
+        chunk = not self._dragging
+        if chunk:
+            cmds.undoInfo(openChunk=True)
+        try:
+            _ensure_mult_attr(grp)
+            try:
+                cmds.setAttr(grp + "." + GMULT, val)
+            except Exception:
+                pass
+        finally:
+            if chunk:
+                cmds.undoInfo(closeChunk=True)
+
+    def _on_gslider(self, v):
+        val = v / 100.0
+        self.gspin.blockSignals(True); self.gspin.setValue(val); self.gspin.blockSignals(False)
+        self._apply_global_mult(val)
+
+    def _on_gspin(self, val):
+        self.gslider.blockSignals(True); self.gslider.setValue(int(val * 100)); self.gslider.blockSignals(False)
+        self._apply_global_mult(val)
+
+    def _apply_global_mult(self, val):
+        _ensure_root()
+        _ensure_mult_attr(ROOT)
+        chunk = not self._dragging
+        if chunk:
+            cmds.undoInfo(openChunk=True)
+        try:
+            try:
+                cmds.setAttr(ROOT + "." + GMULT, val)
+            except Exception:
+                pass
+        finally:
+            if chunk:
+                cmds.undoInfo(closeChunk=True)
+
+    def _set_mult_widgets(self):
+        """選択に応じてグループ倍率・全体倍率スライダーを現在値へ同期。"""
+        g = 1.0
+        if cmds.objExists(ROOT) and cmds.attributeQuery(GMULT, node=ROOT, exists=True):
+            try:
+                g = cmds.getAttr(ROOT + "." + GMULT)
+            except Exception:
+                g = 1.0
+        self.gspin.blockSignals(True); self.gslider.blockSignals(True)
+        self.gspin.setValue(g); self.gslider.setValue(int(g * 100))
+        self.gspin.blockSignals(False); self.gslider.blockSignals(False)
+        grp = self._target_group()
+        gm = 1.0
+        if grp and cmds.attributeQuery(GMULT, node=grp, exists=True):
+            try:
+                gm = cmds.getAttr(grp + "." + GMULT)
+            except Exception:
+                gm = 1.0
+        self.grpspin.blockSignals(True); self.grpslider.blockSignals(True)
+        self.grpspin.setValue(gm); self.grpslider.setValue(int(gm * 100))
+        self.grpspin.blockSignals(False); self.grpslider.blockSignals(False)
 
     # ========== 太さ（選択ラインのみ） ==========
     def _on_slider(self, v):
@@ -1205,19 +1404,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         nodes = self._selected_nodes()
         if not nodes:
             cmds.warning("削除する項目をツリーで選択してください"); return
-        # 削除対象ライン（選択ライン＋選択グループ配下ライン）のコントローラーも巻き込む
+        # 削除対象ライン（選択ライン＋選択グループ配下ライン）のコントローラー・乗算ノードも巻き込む
+        def _gather(line):
+            c = _ctrl_of(line)
+            if c:
+                victims.add(c)
+                for s in ("_thkA", "_thkB"):
+                    n2 = _short(c) + s
+                    if cmds.objExists(n2):
+                        victims.add(n2)
+
         victims = set(nodes)
         for n in list(nodes):
             if cmds.attributeQuery(TAG, node=n, exists=True):
-                c = _ctrl_of(n)
-                if c:
-                    victims.add(c)
+                _gather(n)
             if cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
                 for d in cmds.listRelatives(n, ad=True, type="transform", f=True) or []:
                     if cmds.attributeQuery(TAG, node=d, exists=True):
-                        c2 = _ctrl_of(d)
-                        if c2:
-                            victims.add(c2)
+                        _gather(d)
         cmds.undoInfo(openChunk=True)
         try:
             cmds.delete(list(victims))
