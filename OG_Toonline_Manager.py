@@ -23,6 +23,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 """
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
+import maya.api.OpenMaya as om2
 
 # ---- PySide6 / PySide2 両対応 ----
 try:
@@ -65,6 +66,43 @@ def _ensure_root():
     if not cmds.objExists(ROOT):
         cmds.group(em=True, name=ROOT)
     return ROOT
+
+
+def _compute_curvature(shape):
+    """各頂点の符号付き曲率を [-1,1] に正規化して返す（凸 > 0 / 凹 < 0）。
+    近傍平均との差（ラプラシアン/アンブレラ）を頂点法線へ投影して曲率とする。"""
+    sl = om2.MSelectionList()
+    sl.add(shape)
+    dag = sl.getDagPath(0)
+    mfn = om2.MFnMesh(dag)
+    pts = mfn.getPoints(om2.MSpace.kObject)
+    nrm = mfn.getVertexNormals(False, om2.MSpace.kObject)
+    n = len(pts)
+    curv = [0.0] * n
+    itv = om2.MItMeshVertex(dag)
+    while not itv.isDone():
+        i = itv.index()
+        conn = itv.getConnectedVertices()
+        m = len(conn)
+        if m > 0:
+            ax = ay = az = 0.0
+            for c in conn:
+                p = pts[c]
+                ax += p.x; ay += p.y; az += p.z
+            ax /= m; ay /= m; az /= m
+            pi = pts[i]
+            lx = ax - pi.x; ly = ay - pi.y; lz = az - pi.z
+            ni = nrm[i]
+            # 凸面では近傍平均が法線の逆側 → 符号を反転して凸を正にする
+            curv[i] = -(lx * ni.x + ly * ni.y + lz * ni.z)
+        itv.next()
+    mx = 0.0
+    for c in curv:
+        if abs(c) > mx:
+            mx = abs(c)
+    if mx > 1e-9:
+        curv = [c / mx for c in curv]
+    return curv
 
 
 class _GroupRow(QtWidgets.QWidget):
@@ -126,6 +164,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.setMinimumHeight(460)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
+        self._curv_cache = {}          # line名 -> 正規化曲率リスト
         self._build()
         self.refresh_tree()
 
@@ -172,7 +211,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         trow.addWidget(self.slider)
         trow.addWidget(self.spin)
         lay.addLayout(trow)
-        self.lbl_hint = QtWidgets.QLabel("※ 太さ・個別カラーはツリーで選択したラインに適用されます")
+
+        # 曲率起伏（元メッシュの曲率に応じて太さに起伏。0=一様 / 凸ほど太く・凹ほど細く）
+        c2row = QtWidgets.QHBoxLayout()
+        c2row.addWidget(QtWidgets.QLabel("曲率起伏"))
+        self.cslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.cslider.setRange(0, 200)
+        self.cslider.setValue(0)
+        self.cspin = QtWidgets.QDoubleSpinBox()
+        self.cspin.setDecimals(2)
+        self.cspin.setRange(0.0, 2.0)
+        self.cspin.setSingleStep(0.05)
+        self.cspin.setValue(0.0)
+        self.cslider.valueChanged.connect(self._on_cslider)
+        self.cspin.valueChanged.connect(self._on_cspin)
+        c2row.addWidget(self.cslider)
+        c2row.addWidget(self.cspin)
+        lay.addLayout(c2row)
+
+        self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_hint)
 
@@ -393,6 +450,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         t = self._thickness_of(lines[0])
         if t is not None:
             self._set_thickness_widgets(t)
+        infl = 0.0
+        if cmds.attributeQuery("toonCurv", node=lines[0], exists=True):
+            try:
+                infl = cmds.getAttr(lines[0] + ".toonCurv")
+            except Exception:
+                infl = 0.0
+        self._set_curv_widgets(infl)
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -428,6 +492,75 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if n and cmds.attributeQuery(TAG, node=n, exists=True):
                 it.setText(1, "{:.3f}".format(val))
         self._populating = False
+
+    # ========== 曲率起伏（選択ラインのみ） ==========
+    def _on_cslider(self, v):
+        val = v / 100.0
+        self.cspin.blockSignals(True); self.cspin.setValue(val); self.cspin.blockSignals(False)
+        self._apply_curvature(val)
+
+    def _on_cspin(self, val):
+        self.cslider.blockSignals(True); self.cslider.setValue(int(val * 100)); self.cslider.blockSignals(False)
+        self._apply_curvature(val)
+
+    def _set_curv_widgets(self, val):
+        self.cslider.blockSignals(True); self.cspin.blockSignals(True)
+        self.cspin.setValue(val)
+        self.cslider.setValue(int(val * 100))
+        self.cslider.blockSignals(False); self.cspin.blockSignals(False)
+
+    def _curvature_of(self, line):
+        """曲率配列をキャッシュ付きで返す（元メッシュ＝deformer のベース入力から計算）。"""
+        curv = self._curv_cache.get(line)
+        if curv is not None:
+            return curv
+        defm = self._thick_node_for(line)
+        src = None
+        if defm:
+            conn = cmds.listConnections(defm + ".input[0].inputGeometry",
+                                        s=True, d=False, sh=True) or []
+            if conn:
+                src = conn[0]
+        if not src:
+            src = self._shape_of(line)
+        curv = []
+        if src:
+            try:
+                curv = _compute_curvature(src)
+            except Exception:
+                cmds.warning("曲率の計算に失敗しました: {}".format(_short(line)))
+                curv = []
+        self._curv_cache[line] = curv
+        return curv
+
+    def _apply_curvature(self, influence):
+        lines = self._selected_lines()
+        if not lines:
+            return
+        for line in lines:
+            defm = self._thick_node_for(line)
+            if not defm or not cmds.objExists(defm):
+                continue
+            curv = self._curvature_of(line)
+            n = len(curv)
+            if n == 0:
+                continue
+            # weight[i] = 1 + 影響度 * 曲率（凸ほど太く / 凹ほど細く）。0 で一様。
+            weights = [max(0.0, 1.0 + influence * c) for c in curv]
+            try:
+                cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
+            except Exception:
+                pass
+            # 影響度をラインに保存（選択同期・再開用）
+            if not cmds.attributeQuery("toonCurv", node=line, exists=True):
+                try:
+                    cmds.addAttr(line, ln="toonCurv", at="double", dv=0.0)
+                except Exception:
+                    pass
+            try:
+                cmds.setAttr(line + ".toonCurv", influence)
+            except Exception:
+                pass
 
     # ========== カラー ==========
     def _refresh_swatch(self):
@@ -545,10 +678,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
 
-                # deformer ハンドルは direction="Normal" では不要なので削除する
+                # deformer ハンドルは direction="Normal" では見た目に不要だが、削除すると
+                # offset(太さ) が効かなくなるため、非表示にしてラインの子へ格納し整理する。
                 if handle and cmds.objExists(handle):
                     try:
-                        cmds.delete(handle)
+                        cmds.setAttr(handle + ".visibility", 0)
+                        cmds.parent(handle, dup)
                     except Exception:
                         pass
 

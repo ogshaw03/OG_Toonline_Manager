@@ -42,7 +42,11 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
    法線は**変形後メッシュから毎フレーム再計算**されるので、元を変形させても太さは一定。
 3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
-   生成される textureDeformerHandle は direction="Normal" では不要なので削除する。
+   生成される textureDeformerHandle は **削除すると offset(太さ) が効かなくなる**ため、
+   visibility=0 で dup の子に格納してアウトライナーを整理する（削除不可）。
+   曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
+   `weight[i]=1+影響度*曲率[i]`（凸>0/凹<0）。曲率は `_compute_curvature`（近傍平均との差を
+   法線へ投影、om2）。影響度はライン attr `toonCurv` に保存。太さ=offset とは独立。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
