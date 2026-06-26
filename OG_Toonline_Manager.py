@@ -53,7 +53,8 @@ CTRL_CAP    = "curvatureCap"
 DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
 DEFAULT_EDGE_THICK = 0.05             # 新規エッジライン生成時の初期太さ(UI表示値)
 EDGE_THICK_SCALE = 0.2               # エッジは UI 太さ×この係数を offset に流す（見た目を細く）
-EDGE_BASE_RADIUS = 0.01              # エッジチューブ円プロファイルの基準半径
+EDGE_BASE_SCALE = 0.2                # エッジ円プロファイル半径 = UI 太さ×この係数（太さに比例して細る）
+EDGE_BASE_RADIUS = 0.01              # 生成直後の初期半径（直後に太さチェーンで駆動される）
 EDGE_VIS_EPS = 1e-4                   # 総太さがこれ以下ならエッジチューブを非表示にする閾値
 DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
 DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
@@ -170,6 +171,14 @@ def _line_curve(line):
     """エッジラインのカーブ shape（polyToCurve のカーブ）を返す。無ければ None。"""
     for s in cmds.listRelatives(line, allDescendents=True, type="nurbsCurve", f=True) or []:
         return s
+    return None
+
+
+def _line_circle_node(line):
+    """エッジラインの円プロファイル(makeNurbCircle)を履歴から返す。無ければ None。"""
+    for n in (cmds.listHistory(line) or []):
+        if cmds.nodeType(n) == "makeNurbCircle":
+            return n
     return None
 
 
@@ -572,6 +581,19 @@ def _ensure_thickness_chain(line):
         except Exception:
             pass
         _connect(mS + ".output", target)
+        # 円プロファイルの基準半径も太さに比例させ、細くするとチューブ全体が細る
+        # （固定半径だと細くしても基準半径分の太さが残ってしまうため）。
+        circ = _line_circle_node(line)
+        if circ:
+            mR = base + "_radScale"
+            if not cmds.objExists(mR):
+                mR = cmds.createNode("multDoubleLinear", name=mR)
+            _connect(mB + ".output", mR + ".input1")
+            try:
+                cmds.setAttr(mR + ".input2", EDGE_BASE_SCALE)
+            except Exception:
+                pass
+            _connect(mR + ".output", circ + ".radius")
     else:
         _connect(mB + ".output", target)
 

@@ -115,8 +115,12 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
   プロファイル=フラット を `setAttr` してから生成。リセット(↺)も同じ定数・edge/hull 出し分け。
 - **エッジは UI 太さと実太さを分離**: UI 値(=ctrl.thickness)は hull と同じ 0.05 を既定にしつつ、
   実際の offset は `EDGE_THICK_SCALE`(0.2) を掛けて細くする（`_ensure_thickness_chain` が
-  edge のとき `mB.output × EDGE_THICK_SCALE`(=`<ctrl>_thkScale`) を offset へ）。円プロファイル
-  基準半径は `EDGE_BASE_RADIUS`(0.01)。既定 UI 0.05 → offset 0.01 + 基準 0.01 ≒ 半径0.02。
+  edge のとき `mB.output × EDGE_THICK_SCALE`(=`<ctrl>_thkScale`) を offset へ）。
+- **円プロファイル半径も太さに比例**: 固定半径だと細くしても基準半径分の太さが残るため、
+  `makeNurbCircle.radius` を `mB.output × EDGE_BASE_SCALE`(0.2)(=`<ctrl>_radScale`) で駆動し
+  （`_line_circle_node` で履歴から円ノードを取得）、太さに比例してチューブ全体が細る。
+  既定 UI 0.05 → offset 0.01 + 半径 0.01 ≒ 半径0.02。太さ→0 で半径も offset も 0（可視は
+  `EDGE_VIS_EPS` 条件で非表示）。生成直後の初期半径は `EDGE_BASE_RADIUS`(0.01)。
 - **UIリストの大きさを選択で変えない**: リスト(tree)は stretch=1 でウィンドウの伸縮分を
   吸収（＝下に余分な余白を出さない）。選択で切り替わるスライダーパネルは固定高さの
   コンテナ `w_panels`(`setFixedHeight(200)`、中に w_line/w_group)に収めるため、ライン/
