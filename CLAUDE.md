@@ -114,6 +114,11 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 → 円プロファイル `circle` を `extrude` でカーブに沿わせ → `nurbsToPoly` でチューブ poly 化。
 - `EDGE_TAG`(`isToonEdgeLine`) で識別。中間ノード(カーブ/円/NURBS面)はラインの子に隠して保持。
   円プロファイルは細い固定半径(0.01)で、実太さはチューブ表面の **textureDeformer** で出す。
+  ※ extrude の向き次第でチューブ法線が**内向き**になると textureDeformer が内側へ押し込み、
+    offset が基準半径(0.01)を超えるとチューブが軸を貫通して**反転**する。生成直後に
+    `_tube_normals_outward`（中心カーブ最近接点→頂点への向きと頂点法線の内積を多数決）で
+    外向きか判定し、内向きなら `polyNormal(normalMode=0)` を **textureDeformer の前**に積んで
+    必ず外向き＝膨らむ向きにする。
 - 新規生成時は UI の現在値ではなく **初期値で生成**（太さ=`DEFAULT_EDGE_THICK`(0.025)/曲率起伏=0/
   曲率上限=3/末端細り=0/プロファイル=フラット）。生成後は **アウトライナーで選択しない**
   （`cmds.select(clear=True)`）。hull(`create_outlines`)は従来どおり現在値で生成・選択する。

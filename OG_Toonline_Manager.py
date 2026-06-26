@@ -200,6 +200,41 @@ def _taper_factors(line):
     return ts
 
 
+def _tube_normals_outward(lshape, curve):
+    """チューブ poly の頂点法線が外向き（中心カーブから離れる向き）かを多数決で判定。
+    extrude の向き次第で法線が内向きになると textureDeformer(direction="Normal") が
+    内側へ押し込み、offset が基準半径を超えるとチューブが軸を貫通して反転するため、
+    生成直後に外向きかどうか調べて内向きなら反転させる。"""
+    try:
+        sl = om2.MSelectionList()
+        sl.add(lshape); sl.add(curve)
+        mfn = om2.MFnMesh(sl.getDagPath(0))
+        mcrv = om2.MFnNurbsCurve(sl.getDagPath(1))
+        pts = mfn.getPoints(om2.MSpace.kWorld)
+        n = len(pts)
+        if n == 0:
+            return True
+        step = max(1, n // 12)
+        votes = 0
+        count = 0
+        for i in range(0, n, step):
+            p = pts[i]
+            try:
+                nrm = mfn.getVertexNormal(i, False, om2.MSpace.kWorld)
+                cp, _ = mcrv.closestPoint(p, space=om2.MSpace.kWorld)
+            except Exception:
+                continue
+            ox, oy, oz = p.x - cp.x, p.y - cp.y, p.z - cp.z
+            if ox * nrm.x + oy * nrm.y + oz * nrm.z >= 0.0:
+                votes += 1
+            count += 1
+        if count == 0:
+            return True
+        return votes * 2 >= count
+    except Exception:
+        return True
+
+
 def _parse_profile(s):
     """ "x:y,x:y,..." → [(x,y),...]。空/不正なら一様 [(0,1),(1,1)]。"""
     pts = []
@@ -1882,6 +1917,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                     uType=3, uNumber=1, vType=3, vNumber=1)[0]
             line = cmds.rename(line, "edgeLine1")
             lshape = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)[0]
+
+            # チューブの法線が内向きだと textureDeformer が内側へ押し込み、offset が基準半径を
+            # 超えるとチューブが反転する。生成直後に外向きか調べ、内向きなら法線反転を履歴に積む
+            # （textureDeformer の前に積むことで、deformer が外向き法線を読んで必ず膨らむ）。
+            if not _tube_normals_outward(lshape, curve):
+                try:
+                    cmds.polyNormal(lshape, normalMode=0, ch=True)
+                except Exception:
+                    pass
 
             # hull ラインと同じく textureDeformer で太さ(offset)＋曲率起伏(weightList)を出す
             td = cmds.textureDeformer(lshape, strength=0, offset=thick, direction="Normal")
