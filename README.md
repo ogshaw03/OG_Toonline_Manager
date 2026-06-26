@@ -18,22 +18,11 @@ Maya 用の輪郭線（トゥーンアウトライン）生成・管理ツール
 
 ## インストール / 起動
 
-1. `OG_Toonline_Manager.py` を任意のフォルダに置きます。
+1. `OG_Toonline_Manager.py` を Maya の標準スクリプトフォルダ（`scripts` フォルダ）に置きます。
 2. Maya の **スクリプトエディタ（Python タブ）** に以下を貼り付けて実行します。
-   `フォルダのパス` は `OG_Toonline_Manager.py` を置いた場所に書き換えてください。
 
 ```python
-import sys
-sys.path.append(r"C:/path/to/folder")   # OG_Toonline_Manager.py を置いたフォルダ
-
 import OG_Toonline_Manager
-# すでに読み込み済みのときに最新へ更新する場合（任意）
-try:
-    import importlib
-    importlib.reload(OG_Toonline_Manager)
-except Exception:
-    pass
-
 OG_Toonline_Manager.show()
 ```
 
