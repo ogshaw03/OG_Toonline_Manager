@@ -90,11 +90,19 @@ class _GroupRow(QtWidgets.QWidget):
         h.addWidget(self.lbl, 1)
 
         if group_node:
+            self.btn_ren = QtWidgets.QPushButton("✎")
+            self.btn_ren.setFixedWidth(26)
+            self.btn_ren.setToolTip("グループ名をリネーム")
+            self.btn_ren.clicked.connect(self._on_rename)
+            h.addWidget(self.btn_ren)
             self.btn = QtWidgets.QPushButton("＋追加")
             self.btn.setFixedWidth(58)
             self.btn.setToolTip("選択メッシュから、このグループにラインを生成")
             self.btn.clicked.connect(self._on_add)
             h.addWidget(self.btn)
+
+    def _on_rename(self):
+        self.ui.rename_node(self.group)
 
     def _on_vis(self, state):
         if self.group and cmds.objExists(self.group):
@@ -145,6 +153,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
         lay.addWidget(self.tree, 1)
 
         # 太さ（選択中ラインに適用）
@@ -188,13 +197,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         mrow = QtWidgets.QHBoxLayout()
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_mov = QtWidgets.QPushButton("選択を対象グループへ")
+        b_ren = QtWidgets.QPushButton("リネーム")
         b_del = QtWidgets.QPushButton("削除")
         b_ref = QtWidgets.QPushButton("再取得")
         b_grp.clicked.connect(self.new_group)
         b_mov.clicked.connect(self.move_selected_to_group)
+        b_ren.clicked.connect(self.rename_selected)
         b_del.clicked.connect(self.delete_selected)
         b_ref.clicked.connect(self.refresh_tree)
-        for b in (b_grp, b_mov, b_del, b_ref):
+        for b in (b_grp, b_mov, b_ren, b_del, b_ref):
             mrow.addWidget(b)
         lay.addLayout(mrow)
 
@@ -534,11 +545,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
 
-                # deformer ハンドルは隠してラインの子に格納
+                # deformer ハンドルは direction="Normal" では不要なので削除する
                 if handle and cmds.objExists(handle):
                     try:
-                        cmds.setAttr(handle + ".visibility", 0)
-                        cmds.parent(handle, dup)
+                        cmds.delete(handle)
                     except Exception:
                         pass
 
@@ -562,6 +572,35 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.undoInfo(closeChunk=True)
 
         self.refresh_tree()
+
+    # ========== リネーム ==========
+    def rename_node(self, node):
+        """ライン／グループのノードをリネームする。"""
+        if not node or not cmds.objExists(node):
+            return
+        old = _short(node)
+        new, ok = QtWidgets.QInputDialog.getText(self, "リネーム", "新しい名前:", text=old)
+        new = (new or "").strip()
+        if not ok or not new or new == old:
+            return
+        try:
+            cmds.rename(node, new)
+        except Exception:
+            cmds.warning("リネームに失敗しました: {}".format(new))
+        self.refresh_tree()
+
+    def rename_selected(self):
+        """ツリーで選択中のライン（1つ）をリネーム。グループは行の ✎ から。"""
+        lines = self._selected_lines()
+        if len(lines) != 1:
+            cmds.warning("リネームするラインを1つだけ選択してください（グループは行の ✎ ボタン）")
+            return
+        self.rename_node(lines[0])
+
+    def _on_double_click(self, item, column):
+        node = item.data(0, QtCore.Qt.UserRole)
+        if node and cmds.objExists(node) and cmds.attributeQuery(TAG, node=node, exists=True):
+            self.rename_node(node)
 
     # ========== グループ管理 ==========
     def new_group(self):

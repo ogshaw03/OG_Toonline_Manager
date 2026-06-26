@@ -42,7 +42,7 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
    法線は**変形後メッシュから毎フレーム再計算**されるので、元を変形させても太さは一定。
 3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
-   ハンドルは visibility=0 で dup の子に格納。
+   生成される textureDeformerHandle は direction="Normal" では不要なので削除する。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
