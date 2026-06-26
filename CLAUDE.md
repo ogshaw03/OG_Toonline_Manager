@@ -36,8 +36,9 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 ```
 
 1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
-2. 膨らみは **textureDeformer** で行う。`vectorSpace=2(Tangent)`、`vectorStrength=(0,0,1)`
-   で**接線空間 Z＝サーフェス法線**方向に、`offset` を太さとして一定距離オフセット。
+2. 膨らみは **textureDeformer** で行う。`cmds.textureDeformer(dshape, strength=0,
+   offset=太さ, direction="Normal")`。**direction="Normal" が必須**（既定 "Handle" だと
+   ハンドル軸=Y方向にしか動かない）。offset がサーフェス法線方向の一定距離オフセットになり、
    法線は**変形後メッシュから毎フレーム再計算**されるので、元を変形させても太さは一定。
 3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
@@ -49,7 +50,7 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 注意（膨らみノードの選定でハマった経緯。**全て一方向にずれ／太さ変動で失敗した**）:
 - `polyMoveVertex` localTranslate / `polyExtrudeFacet` は選択全体を単一フレームで動かす
   → 一方向（カプセル/三日月）に歪む。
-- `textureDeformer` を既定のまま使うとハンドル軸(+Y)方向。**接線Z(法線)に設定**が必須。
+- `textureDeformer` を既定のまま使うとハンドル軸(+Y)方向。**direction="Normal" 指定**が必須。
 - **blendShape** はバインド時の固定デルタを足すため、元メッシュを変形させると**太さが
   変わってしまう**（歪みは出ないが太さ非一定）。よって不使用。
 - → 変形でも太さ一定にするには、**法線を毎フレーム再計算する deformer（textureDeformer

@@ -516,23 +516,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.delete(dup, constructionHistory=True)
 
                 # --- inverted hull を構築 ---
-                # 1) textureDeformer で各頂点を「現在のサーフェス法線」方向へ一定距離オフセット。
-                #    法線は変形後メッシュから毎フレーム再計算されるので、元メッシュを変形しても
-                #    太さ（法線方向の距離）は一定に保たれる（blendShape はバインド時固定デルタで
-                #    変形すると太さが変わるため不使用）。接線空間の Z = サーフェス法線を使う。
+                # 1) textureDeformer(direction="Normal") で各頂点を「現在のサーフェス法線」方向へ
+                #    一定距離(offset)オフセット。direction 既定の "Handle" だとハンドル軸(Y)にしか
+                #    動かないため必ず "Normal" を指定する。法線は変形後メッシュから毎フレーム
+                #    再計算されるので、元メッシュを変形しても太さ(offset 距離)は一定に保たれる
+                #    （blendShape はバインド時固定デルタで変形すると太さが変わるため不使用）。
+                #    strength=0・テクスチャ無しで、純粋な法線方向の一定オフセットだけにする。
                 #    まず静的な複製に付け、その後ベース入力へ outMesh を流して追従させる
                 #    （先に inMesh へ直結すると評価が壊れて歪むので繋がない）。
-                td = cmds.textureDeformer(dshape, strength=0)
+                td = cmds.textureDeformer(dshape, strength=0, offset=thick, direction="Normal")
                 defm = td[0]
                 handle = td[1] if len(td) > 1 else None
-                try:
-                    cmds.setAttr(defm + ".vectorSpace", 2)        # 0=Object 1=World 2=Tangent
-                    cmds.setAttr(defm + ".vectorStrengthX", 0)
-                    cmds.setAttr(defm + ".vectorStrengthY", 0)
-                    cmds.setAttr(defm + ".vectorStrengthZ", 1)    # Z = サーフェス法線
-                    cmds.setAttr(defm + "." + THICK_ATTR, thick)  # offset = 太さ
-                except Exception:
-                    cmds.warning("textureDeformer の設定に失敗しました")
 
                 # 2) 変形追従: deformer のベース入力に 元の outMesh を流し込む。
                 try:
