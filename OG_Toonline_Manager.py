@@ -227,16 +227,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cspin.valueChanged.connect(self._on_cspin)
         c2row.addWidget(self.cslider)
         c2row.addWidget(self.cspin)
-        c2row.addWidget(QtWidgets.QLabel("上限"))
+        lay.addLayout(c2row)
+
+        # 起伏の上限（最大倍率）。角(顎など)が太くなりすぎないよう制限。
+        c3row = QtWidgets.QHBoxLayout()
+        c3row.addWidget(QtWidgets.QLabel("上限"))
+        self.cap_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.cap_slider.setRange(100, 1000)   # /100 = 1.0〜10.0
+        self.cap_slider.setValue(300)
         self.cap_spin = QtWidgets.QDoubleSpinBox()
         self.cap_spin.setDecimals(1)
         self.cap_spin.setRange(1.0, 10.0)
         self.cap_spin.setSingleStep(0.5)
         self.cap_spin.setValue(3.0)
         self.cap_spin.setToolTip("起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
-        self.cap_spin.valueChanged.connect(self._on_cap)
-        c2row.addWidget(self.cap_spin)
-        lay.addLayout(c2row)
+        self.cap_slider.valueChanged.connect(self._on_cap_slider)
+        self.cap_spin.valueChanged.connect(self._on_cap_spin)
+        c3row.addWidget(self.cap_slider)
+        c3row.addWidget(self.cap_spin)
+        lay.addLayout(c3row)
 
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
@@ -518,8 +527,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cslider.blockSignals(True); self.cslider.setValue(int(val * 100)); self.cslider.blockSignals(False)
         self._apply_curvature(val)
 
-    def _on_cap(self, _val):
-        # 上限変更時は現在の影響度で再適用
+    def _on_cap_slider(self, v):
+        val = v / 100.0
+        self.cap_spin.blockSignals(True); self.cap_spin.setValue(val); self.cap_spin.blockSignals(False)
+        self._apply_curvature(self.cspin.value())
+
+    def _on_cap_spin(self, val):
+        self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
         self._apply_curvature(self.cspin.value())
 
     def _set_curv_widgets(self, val, cap=None):
@@ -528,9 +542,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cslider.setValue(int(val * 100))
         self.cslider.blockSignals(False); self.cspin.blockSignals(False)
         if cap is not None:
-            self.cap_spin.blockSignals(True)
+            self.cap_spin.blockSignals(True); self.cap_slider.blockSignals(True)
             self.cap_spin.setValue(cap)
-            self.cap_spin.blockSignals(False)
+            self.cap_slider.setValue(int(cap * 100))
+            self.cap_spin.blockSignals(False); self.cap_slider.blockSignals(False)
 
     def _curvature_of(self, line):
         """曲率配列をキャッシュ付きで返す（元メッシュ＝deformer のベース入力から計算）。"""
