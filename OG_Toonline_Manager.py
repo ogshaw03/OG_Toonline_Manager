@@ -50,6 +50,7 @@ THICK_ATTR = "offset"               # 現在法線方向への一定オフセッ
 CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
+CTRL_CMIN   = "curvatureMin"          # 曲率下限（曲率が小さい所＝平らな所の太さ倍率の下限）
 DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
 DEFAULT_EDGE_THICK = 0.05             # 新規エッジライン生成時の初期太さ(UI表示値)
 EDGE_THICK_SCALE = 0.2               # エッジは UI 太さ×この係数を offset に流す（見た目を細く）
@@ -58,6 +59,7 @@ EDGE_BASE_RADIUS = 0.01              # 生成直後の初期半径（直後に�
 EDGE_VIS_EPS = 1e-4                   # 総太さがこれ以下ならエッジチューブを非表示にする閾値
 DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
 DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
+DEFAULT_CMIN  = 1.0                   # 〃 初期曲率下限（1.0=平らな所を細くしない）
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
@@ -101,9 +103,14 @@ def _ensure_root():
     return ROOT
 
 
+CURV_SMOOTH_ITERS = 3   # 曲率の近傍平均スムージング回数（チクチク=トゲ状の輪郭を防ぐ）
+
+
 def _compute_curvature(shape):
     """各頂点の符号付き曲率を [-1,1] に正規化して返す（凸 > 0 / 凹 < 0）。
-    近傍平均との差（ラプラシアン/アンブレラ）を頂点法線へ投影して曲率とする。"""
+    近傍平均との差（ラプラシアン/アンブレラ）を頂点法線へ投影して曲率とする。
+    ハードエッジ（立方体など）で曲率が1頂点に集中して輪郭がトゲ状になるのを防ぐため、
+    近傍平均で数回スムージングしてから正規化する。"""
     sl = om2.MSelectionList()
     sl.add(shape)
     dag = sl.getDagPath(0)
@@ -112,10 +119,12 @@ def _compute_curvature(shape):
     nrm = mfn.getVertexNormals(False, om2.MSpace.kObject)
     n = len(pts)
     curv = [0.0] * n
+    adj = [()] * n           # 近傍頂点（スムージングで再利用）
     itv = om2.MItMeshVertex(dag)
     while not itv.isDone():
         i = itv.index()
-        conn = itv.getConnectedVertices()
+        conn = list(itv.getConnectedVertices())
+        adj[i] = conn
         m = len(conn)
         if m > 0:
             ax = ay = az = 0.0
@@ -129,6 +138,17 @@ def _compute_curvature(shape):
             # 凸面では近傍平均が法線の逆側 → 符号を反転して凸を正にする
             curv[i] = -(lx * ni.x + ly * ni.y + lz * ni.z)
         itv.next()
+    # 近傍平均によるスムージング（隣接頂点との重みの急変＝トゲを均す）
+    for _ in range(CURV_SMOOTH_ITERS):
+        sm = list(curv)
+        for i in range(n):
+            conn = adj[i]
+            if conn:
+                s = 0.0
+                for c in conn:
+                    s += curv[c]
+                sm[i] = 0.5 * curv[i] + 0.5 * (s / len(conn))
+        curv = sm
     mx = 0.0
     for c in curv:
         if abs(c) > mx:
@@ -419,7 +439,8 @@ def _ensure_group_ctrl(group):
 def _create_line_ctrl(line, thick):
     """ライン用コントローラー（黄）を作成し、line と message で関連付ける（親子付けは呼び出し側）。"""
     ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
-    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0), (CTRL_TAPER, 0.0)):
+    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0),
+                   (CTRL_CMIN, DEFAULT_CMIN), (CTRL_TAPER, 0.0)):
         cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
     cmds.addAttr(ctrl, ln=CTRL_PROFILE, dt="string")
     cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
@@ -444,10 +465,15 @@ def _ensure_line_anim(line, default_thick=0.05):
             except Exception:
                 pass
         ctrl = _create_line_ctrl(line, thick)
-    # 旧コントローラーに endTaper / thicknessProfile が無ければ追加（後方互換）
+    # 旧コントローラーに endTaper / thicknessProfile / curvatureMin が無ければ追加（後方互換）
     if not cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
         try:
             cmds.addAttr(ctrl, ln=CTRL_TAPER, at="double", dv=0.0, keyable=True)
+        except Exception:
+            pass
+    if not cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
+        try:
+            cmds.addAttr(ctrl, ln=CTRL_CMIN, at="double", dv=DEFAULT_CMIN, keyable=True)
         except Exception:
             pass
     if not cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
@@ -638,11 +664,19 @@ def _update_curv_weights(line):
         cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
     except Exception:
         return
+    # 曲率下限: 曲率が小さい所（平らな所）の太さ倍率の基準。1.0=細くしない、<1.0で細く。
+    cmin = DEFAULT_CMIN
+    if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
+        try:
+            cmin = cmds.getAttr(ctrl + "." + CTRL_CMIN)
+        except Exception:
+            cmin = DEFAULT_CMIN
     curv = _line_curvature(line)
     n = len(curv)
     if n == 0:
         return
-    weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
+    # 平らな所=cmin、曲がっている所ほど influence で増えて cap で頭打ち
+    weights = [min(cap, max(0.0, cmin + influence * abs(c))) for c in curv]
     # 長手方向の太さ強弱（末端細り＋プロファイルカーブ）。長手 t を一度だけ算出して合成。
     taper = 0.0
     if cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
@@ -691,7 +725,7 @@ def _ensure_curv_jobs(line):
             except Exception:
                 pass
     jobs = []
-    for at in (CTRL_CURV, CTRL_CAP, CTRL_TAPER):
+    for at in (CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER):
         if not cmds.attributeQuery(at, node=ctrl, exists=True):
             continue
         try:
@@ -852,7 +886,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
-        self.setMinimumHeight(620)
+        self.setMinimumHeight(650)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -986,6 +1020,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._on_cap_slider, self._on_cap_spin, self._reset_cap,
             on_key=self._key_cap, tip="起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
         lvl.addLayout(c3row)
+        c4row, self.cmin_slider, self.cmin_spin = self._slider_spin_row(
+            "曲率下限", 0, 100, 100, 2, 0.0, 1.0, 0.05, 1.0,
+            self._on_cmin_slider, self._on_cmin_spin, self._reset_cmin,
+            on_key=self._key_cmin, tip="曲率が小さい所（平らな所）の太さ倍率の下限。"
+                                       "下げると細い所をより細くできる")
+        lvl.addLayout(c4row)
         # 太さプロファイル（長手方向のカーブで強弱）。エッジライン選択時のみ表示。
         # （末端細りはプロファイルで代替できるため UI スライダーは廃止。互換のため
         #   endTaper 属性自体は残し、既存シーンの値があれば _update_curv_weights が反映する）
@@ -1021,7 +1061,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         pvl.addWidget(self.w_line)
         pvl.addWidget(self.w_group)
         pvl.addStretch(1)
-        self.w_panels.setFixedHeight(200)   # 太さ/曲率/曲率上限+プロファイルが収まる高さ
+        self.w_panels.setFixedHeight(230)   # 太さ/曲率/曲率上限/曲率下限+プロファイルが収まる高さ
         lay.addWidget(self.w_panels)
 
         self.lbl_hint = QtWidgets.QLabel("※ 値はツリーで選択したライン/グループに適用されます")
@@ -1470,7 +1510,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             t = self._thickness_of(lines[0])
             if t is not None:
                 self._set_thickness_widgets(t)
-            infl, cap = 0.0, None
+            infl, cap, cmin = 0.0, None, None
             if ctrl:
                 try:
                     infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
@@ -1480,7 +1520,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
                 except Exception:
                     cap = None
-            self._set_curv_widgets(infl, cap)
+                if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
+                    try:
+                        cmin = cmds.getAttr(ctrl + "." + CTRL_CMIN)
+                    except Exception:
+                        cmin = None
+            self._set_curv_widgets(infl, cap, cmin)
             self.ramp.set_points([list(p) for p in _profile_of_ctrl(ctrl)])
         self._update_key_colors()
 
@@ -1516,6 +1561,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _reset_cap(self):
         self.cap_spin.setValue(DEFAULT_CAP)
+
+    def _reset_cmin(self):
+        self.cmin_spin.setValue(DEFAULT_CMIN)
 
     def _reset_grpmult(self):
         self.grpspin.setValue(1.0)
@@ -1693,7 +1741,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
         self._apply_curvature()
 
-    def _set_curv_widgets(self, infl, cap=None):
+    def _on_cmin_slider(self, v):
+        val = v / 100.0
+        self.cmin_spin.blockSignals(True); self.cmin_spin.setValue(val); self.cmin_spin.blockSignals(False)
+        self._apply_curvature()
+
+    def _on_cmin_spin(self, val):
+        self.cmin_slider.blockSignals(True); self.cmin_slider.setValue(int(val * 100)); self.cmin_slider.blockSignals(False)
+        self._apply_curvature()
+
+    def _set_curv_widgets(self, infl, cap=None, cmin=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
         self.cspin.setValue(infl)
         self.cslider.setValue(int(infl * 100))
@@ -1703,6 +1760,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self.cap_spin.setValue(cap)
             self.cap_slider.setValue(int(cap * 100))
             self.cap_spin.blockSignals(False); self.cap_slider.blockSignals(False)
+        if cmin is not None:
+            self.cmin_spin.blockSignals(True); self.cmin_slider.blockSignals(True)
+            self.cmin_spin.setValue(cmin)
+            self.cmin_slider.setValue(int(cmin * 100))
+            self.cmin_spin.blockSignals(False); self.cmin_slider.blockSignals(False)
 
     def _apply_profile(self):
         lines = self._selected_lines()
@@ -1732,17 +1794,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         influence = self.cspin.value()
         cap = self.cap_spin.value()
+        cmin = self.cmin_spin.value()
         chunk = not self._dragging   # ドラッグ中は _begin/_end_drag のチャンクに含める
         if chunk:
             cmds.undoInfo(openChunk=True)
         try:
             for line in lines:
-                # コントローラー属性 curvature / curvatureCap を設定 → scriptJob で頂点
-                #   ウェイトが再計算されるが、即時反映のため明示的にも更新する。
+                # コントローラー属性 curvature / curvatureCap / curvatureMin を設定 → scriptJob
+                #   で頂点ウェイトが再計算されるが、即時反映のため明示的にも更新する。
                 ctrl = _ensure_line_anim(line, self.spin.value())
                 try:
                     cmds.setAttr(ctrl + "." + CTRL_CURV, influence)
                     cmds.setAttr(ctrl + "." + CTRL_CAP, cap)
+                    if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
+                        cmds.setAttr(ctrl + "." + CTRL_CMIN, cmin)
                 except Exception:
                     pass
                 _update_curv_weights(line)
@@ -1776,6 +1841,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _key_cap(self):
         self._key_line_attr(CTRL_CAP)
+
+    def _key_cmin(self):
+        self._key_line_attr(CTRL_CMIN)
 
     def _key_grpmult(self):
         grp = self._target_group()
@@ -1827,7 +1895,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lines = self._selected_lines()
         lctrl = _ctrl_of(lines[0]) if lines else None
         for spin, at in ((self.spin, CTRL_THICK), (self.cspin, CTRL_CURV),
-                         (self.cap_spin, CTRL_CAP)):
+                         (self.cap_spin, CTRL_CAP), (self.cmin_spin, CTRL_CMIN)):
             state = "none"
             if lctrl and cmds.attributeQuery(at, node=lctrl, exists=True):
                 state = _attr_key_state(lctrl + "." + at)
@@ -1855,7 +1923,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self._set_thickness_widgets(t)   # blockSignals 済み → 適用は走らない
             ctrl = _ctrl_of(lines[0])
             if ctrl:
-                infl = cap = None
+                infl = cap = cmin = None
                 try:
                     infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
                 except Exception:
@@ -1864,8 +1932,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
                 except Exception:
                     pass
+                if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
+                    try:
+                        cmin = cmds.getAttr(ctrl + "." + CTRL_CMIN)
+                    except Exception:
+                        pass
                 if infl is not None:
-                    self._set_curv_widgets(infl, cap)
+                    self._set_curv_widgets(infl, cap, cmin)
         # グループ/全体倍率の値・キー色もラインと同様に追従
         self._set_mult_widgets()
         self._update_mult_labels()
@@ -2023,7 +2096,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 ctrl = _ensure_line_anim(dup, thick)
                 # 各項目を初期値で生成（太さ/曲率起伏/曲率上限/末端細り）
                 for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
-                               (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                               (CTRL_TAPER, 0.0)):
                     if cmds.attributeQuery(at, node=ctrl, exists=True):
                         try:
                             cmds.setAttr(ctrl + "." + at, dv)
@@ -2110,7 +2184,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             ctrl = _ensure_line_anim(line, thick)
             # 各項目を初期値で生成（太さ/曲率起伏/曲率上限/末端細り/プロファイル）
             for at, dv in ((CTRL_THICK, DEFAULT_EDGE_THICK), (CTRL_CURV, DEFAULT_CURV),
-                           (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                           (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                           (CTRL_TAPER, 0.0)):
                 if cmds.attributeQuery(at, node=ctrl, exists=True):
                     try:
                         cmds.setAttr(ctrl + "." + at, dv)
@@ -2232,8 +2307,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # 忠告（確認ダイアログ）。Py2/Py3 両対応のため静的メソッドの warning を使う。
         res = QtWidgets.QMessageBox.warning(
             self, "選択をすべてリセット",
-            "選択したライン/グループの値（太さ・曲率起伏・曲率上限・末端細り・"
-            "プロファイル／グループ倍率）をすべて初期値に戻します。\n"
+            "選択したライン/グループの値（太さ・曲率起伏・曲率上限・曲率下限・"
+            "末端細り・プロファイル／グループ倍率）をすべて初期値に戻します。\n"
             "現在の調整値は失われます（Undo で元に戻せます）。\n\nよろしいですか？",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No)
@@ -2246,7 +2321,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
                 thick = DEFAULT_EDGE_THICK if is_edge else DEFAULT_THICK
                 for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, DEFAULT_CURV),
-                               (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                               (CTRL_TAPER, 0.0)):
                     if cmds.attributeQuery(at, node=ctrl, exists=True):
                         try:
                             cmds.setAttr(ctrl + "." + at, dv)

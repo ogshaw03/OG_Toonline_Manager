@@ -51,8 +51,12 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
      名前に textureDeformerHandle を含むものとして特定。`_stash_loose_handles` が全ハンドルを
      隠し、旧 `toonOutline_handles` グループがあれば解体。孤立分は `_cleanup_orphan_handles`。
    曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
-   `weight[i]=min(曲率上限, 1+影響度*|曲率[i]|)`（曲がる所＝太く・直線＝細く、曲率上限で角の
-   太り過ぎを抑制）。曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。
+   `weight[i]=min(曲率上限, max(0, 曲率下限+影響度*|曲率[i]|))`（曲がる所＝太く・直線＝細く、
+   曲率上限で角の太り過ぎを抑制、**曲率下限**(`curvatureMin`/`CTRL_CMIN`, 0〜1, 既定1.0)で平らな所
+   ＝曲率の小さい所の太さを下げて細くできる）。曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。
+   ※ ハードエッジ（立方体等）で曲率が1頂点に集中すると隣接頂点との重み差で輪郭が
+     トゲ状（チクチク）になるため、`_compute_curvature` で曲率を近傍平均で
+     `CURV_SMOOTH_ITERS`(=3)回スムージングしてから正規化する。
    影響度(0〜10)/曲率上限(1〜10)はライン attr `toonCurv`/`toonCurvCap` に保存。太さ=offset とは独立。
 
 ### アニメーション（ラインコントローラー）
