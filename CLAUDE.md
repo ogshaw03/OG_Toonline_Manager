@@ -23,16 +23,22 @@ Maya 用の輪郭線生成ツール「OG Toonline Manager」。
 
 handoff §3 の「ヒストリを積んでから worldMesh を差し替える」方式は、
 差し替えが output に伝播せず輪郭が原点に生成される不具合が再発した。
-現行の `create_outlines()` は **ノードと接続を明示的に手で構築する方式** に変更済み:
+現行の `create_outlines()` の正しい手順:
 
 ```
 元.worldMesh[0] → polyMoveVertex(押し出し) → polyNormal(反転) → ライン shape.inMesh
 ```
 
-`createNode` で `polyMoveVertex` / `polyNormal` を作り、`connectAttr` で
-上記チェーンを直接張る（Maya のヒストリ自動挿入に頼らない）。
-ライン側トランスフォームは T0/R0/S1、shape の inMesh は事前に空にする。
-この方式は静的キャッシュへフォールバックしないため原点に落ちない。
+1. ライン側トランスフォームを T0/R0/S1、shape のヒストリを削除して inMesh を空ける。
+2. **先に `worldMesh[0]` を shape の inMesh に直結**してライブ追従を確立（原点バグ回避）。
+3. その後 **コマンド形式** `cmds.polyMoveVertex(...)` / `cmds.polyNormal(...)` で
+   押し出し→反転を挿入。コマンドは追従チェーンを保ったまま挿入する。
+
+注意: `createNode("polyMoveVertex")` で手動構築すると **頂点ごとの法線フレームが
+張られず localTranslateZ が法線方向に膨らまない**（元メッシュと重なって z-fighting で
+表示が乱れる）。必ずコマンド形式 `cmds.polyMoveVertex` を使うこと。
+また連結順は「追加した順に shape 側へ積まれる」ため、push を先・reverse を後に追加して
+`worldMesh → push → reverse → shape` の順にする（逆だと内側に縮む）。
 
 ### 互換性の注意
 

@@ -376,24 +376,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.setAttr("{}.s{}".format(dup, ax), 1)
 
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
-                # 複製に付いてきたヒストリを除去し inMesh を空にする
+                # 複製のヒストリを除去して inMesh を空ける
                 cmds.delete(dup, constructionHistory=True)
 
-                # --- inverted hull のヒストリを「明示的に」構築 ---
-                #   元.worldMesh[0] → polyMoveVertex(押し出し) → polyNormal(反転) → dshape.inMesh
-                #   ※ ヒストリ自動挿入に頼らず全接続を手動で張るので原点に落ちない。
-                #     worldMesh はワールド空間、ライン側トランスフォームは単位なので元に重なる。
-                pmv = cmds.createNode("polyMoveVertex", name=_short(dup) + "_push")
-                cmds.setAttr(pmv + ".inputComponents", 1, "vtx[*]", type="componentList")
-                cmds.setAttr(pmv + ".localTranslateZ", thick)
-                pn = cmds.createNode("polyNormal", name=_short(dup) + "_reverse")
-                # 反転対象の面を明示（未設定だと "Can't perform ... on selection" 警告）
-                cmds.setAttr(pn + ".inputComponents", 1, "f[*]", type="componentList")
-                cmds.setAttr(pn + ".normalMode", 0)   # 0 = 法線反転
-
-                cmds.connectAttr(src + ".worldMesh[0]", pmv + ".inputPolymesh", f=True)
-                cmds.connectAttr(pmv + ".output", pn + ".inputPolymesh", f=True)
-                cmds.connectAttr(pn + ".output", dshape + ".inMesh", f=True)
+                # --- inverted hull を構築 ---
+                # 1) 先に 元.worldMesh[0] を inMesh に直結してライブ追従を確立。
+                #    worldMesh はワールド空間、ライン側は T0/R0/S1 なので元に重なる
+                #    （shape の inMesh を直接駆動するので静的キャッシュに落ちず原点バグも出ない）。
+                cmds.connectAttr(src + ".worldMesh[0]", dshape + ".inMesh", f=True)
+                # 2) コマンド形式で 押し出し→法線反転 を挿入。コマンドは頂点ごとの法線フレームを
+                #    張るので localTranslateZ が法線方向の膨らみになる（createNode だと膨らまず
+                #    z-fighting で表示が乱れる）。追加順に shape 側へ積まれるので
+                #    最終チェーンは worldMesh → push → reverse → shape。
+                cmds.polyMoveVertex(dshape + ".vtx[*]", localTranslateZ=thick, ch=True)
+                cmds.polyNormal(dshape, normalMode=0, ch=True)   # 0 = 法線反転
 
                 # バックフェースカリング + シェーダ + タグ
                 cmds.setAttr(dshape + ".doubleSided", 0)
