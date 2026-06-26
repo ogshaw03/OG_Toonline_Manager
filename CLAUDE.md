@@ -111,9 +111,13 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
 
 - **新規生成は常に初期値**（UIの現在スライダー値を引き継がない）。hull/エッジとも
   `create_outlines`/`create_edge_line` で太さ=`DEFAULT_THICK`(hull 0.05)/`DEFAULT_EDGE_THICK`
-  (edge 0.025)・曲率起伏=`DEFAULT_CURV`(0)・曲率上限=`DEFAULT_CAP`(3)・末端細り=0・
+  (edge 0.05)・曲率起伏=`DEFAULT_CURV`(0)・曲率上限=`DEFAULT_CAP`(3)・末端細り=0・
   プロファイル=フラット を `setAttr` してから生成。リセット(↺)も同じ定数・edge/hull 出し分け。
-- **エッジラインの全体/グループ/ライン太さが 0 のとき消える**: 円プロファイル基準半径(0.01)が
+- **エッジは UI 太さと実太さを分離**: UI 値(=ctrl.thickness)は hull と同じ 0.05 を既定にしつつ、
+  実際の offset は `EDGE_THICK_SCALE`(0.1) を掛けて細くする（`_ensure_thickness_chain` が
+  edge のとき `mB.output × EDGE_THICK_SCALE`(=`<ctrl>_thkScale`) を offset へ）。円プロファイル
+  基準半径は `EDGE_BASE_RADIUS`(0.005)。既定 UI 0.05 → offset 0.005 + 基準 0.005 ≒ 半径0.01。
+- **エッジラインの全体/グループ/ライン太さが 0 のとき消える**: 円プロファイル基準半径が
   あるため offset=0 でもチューブが残る。`_ensure_thickness_chain` で総太さ出力(mB.output)を
   `condition`(Greater Than `EDGE_VIS_EPS`=1e-4) 経由で **shape.visibility** に接続し、
   総太さ ~0 で非表示にする（shape 可視を駆動。手動表示/非表示は transform 可視なので競合しない）。

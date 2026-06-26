@@ -51,7 +51,9 @@ CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
-DEFAULT_EDGE_THICK = 0.025            # 新規エッジライン生成時の初期太さ
+DEFAULT_EDGE_THICK = 0.05             # 新規エッジライン生成時の初期太さ(UI表示値)
+EDGE_THICK_SCALE = 0.1               # エッジは UI 太さ×この係数を offset に流す（見た目を細く）
+EDGE_BASE_RADIUS = 0.005             # エッジチューブ円プロファイルの基準半径
 EDGE_VIS_EPS = 1e-4                   # 総太さがこれ以下ならエッジチューブを非表示にする閾値
 DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
 DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
@@ -554,12 +556,26 @@ def _ensure_thickness_chain(line):
             cmds.setAttr(mA + ".input2", 1.0)
         except Exception:
             pass
-    # mB = mA * globalCtrl.thicknessMult → 太さ出力先
+    # mB = mA * globalCtrl.thicknessMult → 総太さ（UI 表示値ベース）
     _connect(mA + ".output", mB + ".input1")
     _connect(gctrl + "." + GMULT, mB + ".input2")
-    _connect(mB + ".output", target)
 
-    # エッジラインは円プロファイルの基準半径(0.01)があるため、太さ(offset)が 0 でも
+    is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
+    if is_edge:
+        # エッジは UI 太さ×EDGE_THICK_SCALE を offset に流す（同じ数値でも細く見せる）
+        mS = base + "_thkScale"
+        if not cmds.objExists(mS):
+            mS = cmds.createNode("multDoubleLinear", name=mS)
+        _connect(mB + ".output", mS + ".input1")
+        try:
+            cmds.setAttr(mS + ".input2", EDGE_THICK_SCALE)
+        except Exception:
+            pass
+        _connect(mS + ".output", target)
+    else:
+        _connect(mB + ".output", target)
+
+    # エッジラインは円プロファイルの基準半径があるため、太さ(offset)が 0 でも
     # チューブが残る。総太さ(mB.output)が ~0 のときシェイプ可視を 0 にして消す。
     # （シェイプ可視を駆動。手動表示/非表示はトランスフォーム可視なので競合しない）
     if cmds.attributeQuery(EDGE_TAG, node=line, exists=True):
@@ -1988,7 +2004,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             # エッジ → カーブ（履歴付き＝メッシュ変形/移動に追従）
             curve = cmds.polyToCurve(form=2, degree=1, ch=True)[0]
             # 細い円プロファイル（実太さは textureDeformer.offset で出す）
-            circ = cmds.circle(radius=0.01, normal=(0, 1, 0), ch=True)
+            circ = cmds.circle(radius=EDGE_BASE_RADIUS, normal=(0, 1, 0), ch=True)
             circ_x = circ[0]
             # カーブに沿って押し出し → NURBS チューブ
             surf = cmds.extrude(circ_x, curve, et=2, fixedPath=True, useComponentPivot=1,
