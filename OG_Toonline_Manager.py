@@ -7,8 +7,8 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 元メッシュの変形に自動追従し、ライン単位で太さ・色・表示／非表示を管理できる。
 
 主な機能:
-    - 選択メッシュにアウトライン（ライン）を生成（生成ボタン／グループ欄の + ボタン）
-    - ライン／グループをツリーで一覧表示（グループは枠付きで強調）
+    - 選択メッシュにアウトライン（ライン）を生成（生成ボタン／各グループ行の +追加）
+    - ライン／グループをツリーで一覧表示（グループ行はバー表示）
     - ライン単位の太さ調整（選択したラインだけに適用）
     - カラー: 基本は共通ブラック。ラインごとに個別カラーも指定可
     - グループ単位／ライン単位の表示・非表示
@@ -39,8 +39,8 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
-
-GROUP_ROLE = QtCore.Qt.UserRole + 1  # ツリー項目がグループかどうか
+THICK_TYPE = "polyExtrudeFace"      # 太さ駆動ノードの型
+THICK_ATTR = "localTranslateZ"      # 法線方向の押し出し量
 
 
 def _maya_main():
@@ -67,18 +67,44 @@ def _ensure_root():
     return ROOT
 
 
-class _GroupBorderDelegate(QtWidgets.QStyledItemDelegate):
-    """グループ行に枠を描いて視認性を上げるデリゲート。"""
-    def paint(self, painter, option, index):
-        super(_GroupBorderDelegate, self).paint(painter, option, index)
-        if index.data(GROUP_ROLE):
-            painter.save()
-            pen = QtGui.QPen(QtGui.QColor("#8ab4d8"))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            r = option.rect.adjusted(1, 1, -2, -2)
-            painter.drawRoundedRect(r, 3, 3)
-            painter.restore()
+class _GroupRow(QtWidgets.QWidget):
+    """グループ行に置くバー型ウィジェット（表示チェック / 名前バー / +追加）。"""
+    def __init__(self, ui, group_node, visible, parent=None):
+        super(_GroupRow, self).__init__(parent)
+        self.ui = ui
+        self.group = group_node
+        h = QtWidgets.QHBoxLayout(self)
+        h.setContentsMargins(2, 1, 2, 1)
+        h.setSpacing(4)
+
+        self.chk = QtWidgets.QCheckBox()
+        self.chk.setChecked(bool(visible))
+        self.chk.setToolTip("グループの表示／非表示")
+        self.chk.toggled.connect(self._on_vis)
+        h.addWidget(self.chk)
+
+        self.lbl = QtWidgets.QLabel(_short(group_node) if group_node else "(未分類)")
+        self.lbl.setStyleSheet(
+            "QLabel{background:#5a6470; color:#eee; border:1px solid #2b2b2b;"
+            " border-radius:4px; padding:2px 10px; font-weight:bold;}")
+        h.addWidget(self.lbl, 1)
+
+        if group_node:
+            self.btn = QtWidgets.QPushButton("＋追加")
+            self.btn.setFixedWidth(58)
+            self.btn.setToolTip("選択メッシュから、このグループにラインを生成")
+            self.btn.clicked.connect(self._on_add)
+            h.addWidget(self.btn)
+
+    def _on_vis(self, state):
+        if self.group and cmds.objExists(self.group):
+            try:
+                cmds.setAttr(self.group + ".visibility", bool(state))
+            except Exception:
+                cmds.warning("グループの表示属性を変更できません")
+
+    def _on_add(self):
+        self.ui.create_outlines(target_group=self.group)
 
 
 class ToonOutlineUI(QtWidgets.QDialog):
@@ -99,7 +125,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
 
-        # 生成 + 対象グループ（+ ボタンでも生成できる）
+        # 生成 + 対象グループ
         crow = QtWidgets.QHBoxLayout()
         self.btn_create = QtWidgets.QPushButton("選択メッシュに輪郭を生成")
         self.btn_create.clicked.connect(self.create_outlines)
@@ -108,11 +134,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.group_combo = QtWidgets.QComboBox()
         self.group_combo.setMinimumWidth(110)
         crow.addWidget(self.group_combo)
-        self.btn_plus = QtWidgets.QPushButton("+")
-        self.btn_plus.setFixedWidth(28)
-        self.btn_plus.setToolTip("選択メッシュから、上のグループにラインを生成")
-        self.btn_plus.clicked.connect(self.create_outlines)
-        crow.addWidget(self.btn_plus)
         lay.addLayout(crow)
 
         # ライン／グループ ツリー（チェック=表示、色列=個別カラー）
@@ -122,7 +143,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.tree.setColumnWidth(1, 60)
         self.tree.setColumnWidth(2, 40)
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.tree.setItemDelegate(_GroupBorderDelegate(self.tree))
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         lay.addWidget(self.tree, 1)
@@ -211,16 +231,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)
         return sh[0] if sh else None
 
-    def _pmv_for(self, line):
-        """ラインの太さ駆動ノード（polyMoveVertex）を返す。"""
-        pmvs = cmds.ls(cmds.listHistory(line) or [], type="polyMoveVertex")
-        return pmvs[0] if pmvs else None
+    def _thick_node_for(self, line):
+        """ラインの太さ駆動ノード（polyExtrudeFace）を返す。"""
+        nodes = cmds.ls(cmds.listHistory(line) or [], type=THICK_TYPE)
+        return nodes[0] if nodes else None
 
     def _thickness_of(self, line):
-        pmv = self._pmv_for(line)
-        if pmv and cmds.objExists(pmv):
+        node = self._thick_node_for(line)
+        if node and cmds.objExists(node):
             try:
-                return cmds.getAttr(pmv + ".localTranslateZ")
+                return cmds.getAttr(node + "." + THICK_ATTR)
             except Exception:
                 pass
         return None
@@ -288,41 +308,32 @@ class ToonOutlineUI(QtWidgets.QDialog):
         parent_item.addChild(it)
         return it
 
+    def _add_group_item(self, group_node, lines, visible):
+        """バー型ウィジェット付きのグループ行を追加する。"""
+        gi = QtWidgets.QTreeWidgetItem(["", "", ""])
+        if group_node:
+            gi.setData(0, QtCore.Qt.UserRole, group_node)
+        gi.setFirstColumnSpanned(True)
+        self.tree.addTopLevelItem(gi)
+        self.tree.setItemWidget(gi, 0, _GroupRow(self, group_node, visible))
+        for line in lines:
+            self._add_line_item(gi, line)
+        gi.setExpanded(True)
+        return gi
+
     def refresh_tree(self):
         self._populating = True
         self.tree.clear()
-        # グループ
         for g in self._managed_groups():
-            gi = QtWidgets.QTreeWidgetItem(["▸ " + _short(g), "", ""])
-            gi.setData(0, QtCore.Qt.UserRole, g)
-            gi.setData(0, GROUP_ROLE, True)
-            gi.setFlags(gi.flags() | QtCore.Qt.ItemIsUserCheckable)
-            gi.setFirstColumnSpanned(True)
-            f = gi.font(0); f.setBold(True); gi.setFont(0, f)
-            gi.setBackground(0, QtGui.QBrush(QtGui.QColor(58, 68, 80)))
             gvis = True
             try:
                 gvis = bool(cmds.getAttr(g + ".visibility"))
             except Exception:
                 pass
-            gi.setCheckState(0, QtCore.Qt.Checked if gvis else QtCore.Qt.Unchecked)
-            self.tree.addTopLevelItem(gi)
-            for line in self._lines_in(g):
-                self._add_line_item(gi, line)
-            gi.setExpanded(True)
-        # グループ未所属のライン
+            self._add_group_item(g, self._lines_in(g), gvis)
         loose = self._loose_lines()
         if loose:
-            gi = QtWidgets.QTreeWidgetItem(["▸ (未分類)", "", ""])
-            gi.setData(0, GROUP_ROLE, True)
-            gi.setFlags(gi.flags() & ~QtCore.Qt.ItemIsUserCheckable)
-            gi.setFirstColumnSpanned(True)
-            f = gi.font(0); f.setBold(True); gi.setFont(0, f)
-            gi.setBackground(0, QtGui.QBrush(QtGui.QColor(58, 68, 80)))
-            self.tree.addTopLevelItem(gi)
-            for line in loose:
-                self._add_line_item(gi, line)
-            gi.setExpanded(True)
+            self._add_group_item(None, loose, True)
         self._populating = False
         self._refresh_group_combo()
 
@@ -351,7 +362,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return [n for n in self._selected_nodes()
                 if cmds.attributeQuery(TAG, node=n, exists=True)]
 
-    # ---- 表示・非表示（チェックボックス） ----
+    # ---- 表示・非表示（ライン項目のチェックボックス） ----
     def _on_item_changed(self, item, column):
         if self._populating or column != 0:
             return
@@ -393,10 +404,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not lines:
             return
         for line in lines:
-            pmv = self._pmv_for(line)
-            if pmv and cmds.objExists(pmv):
+            node = self._thick_node_for(line)
+            if node and cmds.objExists(node):
                 try:
-                    cmds.setAttr(pmv + ".localTranslateZ", val)
+                    cmds.setAttr(node + "." + THICK_ATTR, val)
                 except Exception:
                     pass
         # ツリーの太さ表示を更新
@@ -472,13 +483,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
 
     # ========== 生成 ==========
-    def create_outlines(self):
+    def create_outlines(self, *args, **kwargs):
+        # target_group が来ればそのグループへ、無ければコンボの対象グループへ
+        target_group = kwargs.get("target_group", None)
         sel = cmds.ls(sl=True, long=True, type="transform")
         if not sel:
             cmds.warning("メッシュを選択してください"); return
         thick = self.spin.value()
         _, sg = _ensure_shader(self._color)
-        grp = self._current_group()
+        if target_group and cmds.objExists(target_group):
+            grp = target_group
+        else:
+            grp = self._current_group()
 
         cmds.undoInfo(openChunk=True)
         made = []
@@ -503,13 +519,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # 1) 元の outMesh（オブジェクト空間の変形後メッシュ）を inMesh に直結。
                 #    複製は元と同じトランスフォームなので、変形に追従しつつ元に重なる。
                 cmds.connectAttr(src + ".outMesh", dshape + ".inMesh", f=True)
-                # 2) コマンド形式で 押し出し→法線反転 を挿入（頂点ごとの法線フレームが張られ、
-                #    localTranslateZ が法線方向の膨らみになる）。追加順に shape 側へ積まれ、
-                #    最終チェーンは outMesh → push → reverse → shape。
-                cmds.polyMoveVertex(dshape + ".vtx[*]", localTranslateZ=thick, ch=True)
-                cmds.polyNormal(dshape, normalMode=0, ch=True)   # 0 = 法線反転
+                # 2) polyExtrudeFacet で全面を法線方向に押し出して膨らませる。
+                #    keepFacesTogether=True なら共有頂点が平均法線で動き、全方位に均一に膨らむ
+                #    （polyMoveVertex は単一フレームで一方向にしか動かず、カプセル状になるため不可）。
+                cmds.polyExtrudeFacet(dshape + ".f[*]", keepFacesTogether=True,
+                                      localTranslateZ=thick, ch=True)
+                # 3) 法線反転（バックフェースカリングで輪郭のリムだけ見せる）
+                cmds.polyNormal(dshape, normalMode=0, ch=True)
 
-                # バックフェースカリング + 共通シェーダ + タグ
                 cmds.setAttr(dshape + ".doubleSided", 0)
                 cmds.sets(dshape, e=True, forceElement=sg)
                 if not cmds.attributeQuery(TAG, node=dup, exists=True):

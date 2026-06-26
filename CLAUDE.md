@@ -29,20 +29,23 @@ handoff §3 の「ヒストリを積んでから worldMesh を差し替える」
 
 ```
 複製は元と同じ親・同じ TRS のまま（動かさない）
-元.outMesh → polyMoveVertex(押し出し) → polyNormal(反転) → ライン shape.inMesh
+元.outMesh → polyExtrudeFacet(膨らみ) → polyNormal(反転) → ライン shape.inMesh
 最後に parent でグループへ（ワールド位置保持で重なりは維持）
 ```
 
 1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
 2. 複製のヒストリを削除して inMesh を空け、**元の `outMesh`（オブジェクト空間の変形後
    メッシュ）** を inMesh に直結。複製は元と同じ TRS なので変形追従しつつ元に重なる。
-3. **コマンド形式** `cmds.polyMoveVertex` / `cmds.polyNormal` で押し出し→反転を挿入。
+3. `cmds.polyExtrudeFacet(... f[*], keepFacesTogether=True, localTranslateZ=太さ)` で
+   全面を法線方向に膨らませ、続けて `cmds.polyNormal(normalMode=0)` で反転。
+
+太さの実体は **polyExtrudeFace.localTranslateZ**（ライン別に setAttr して制御）。
 
 注意:
-- `createNode("polyMoveVertex")` だと頂点ごとの法線フレームが張られず膨らまない
-  （z-fighting で乱れる）。必ずコマンド形式を使う。
-- 追加順に shape 側へ積まれるため push を先・reverse を後 → `outMesh → push → reverse
-  → shape`（逆だと内側に縮む）。
+- 膨らみに **`polyMoveVertex` は使わない**。localTranslate が選択全体で単一フレームに
+  なるため全頂点が一方向へ動き、カプセル状に歪む。`polyExtrudeFacet`(keepFacesTogether)
+  は面ごとの法線フレームで押し出すので全方位に均一に膨らむ。
+- `createNode` でも面フレームが張られず不可。コマンド形式を使う。
 - worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
 - 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
   アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
