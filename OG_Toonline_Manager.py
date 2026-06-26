@@ -2128,12 +2128,30 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         cmds.undoInfo(openChunk=True)
         try:
-            cmds.rename(node, new)
+            # コントローラーはリネーム前に取得（message リンクで特定。名前依存しない）
+            ctrl = _ctrl_of(node)
+            newpath = cmds.rename(node, new)
+            # コントローラー名もラインに合わせて変更（アウトライナーの見た目を一致させる）
+            if ctrl and cmds.objExists(ctrl):
+                try:
+                    cmds.rename(ctrl, _short(newpath) + CTRL_SUFFIX)
+                except Exception:
+                    pass
         except Exception:
             cmds.warning("リネームに失敗しました: {}".format(new))
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
+        # 環境によってはスクリプトの rename がアウトライナーに即時反映されないため明示更新
+        self._refresh_outliner()
+
+    def _refresh_outliner(self):
+        """アウトライナーパネルの表示を強制更新する。"""
+        try:
+            import maya.mel as _mel
+            _mel.eval("AEdagNodeCommonRefreshOutliners();")
+        except Exception:
+            pass
 
     def _on_double_click(self, item, column):
         """ライン・グループともダブルクリックでリネーム。"""
