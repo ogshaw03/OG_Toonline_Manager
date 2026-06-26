@@ -80,7 +80,9 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 - **曲率起伏/曲率上限**: 頂点ウェイトは Python 計算が必要なため、`curvature`/`curvatureCap` の
   attributeChange を監視する `scriptJob`（`_ensure_curv_jobs`）で `_update_curv_weights` を呼び
   再計算。タイムライン再生でも追従（高密度メッシュは負荷大・バッチレンダーでは不可）。
-- UIの「現フレームにキー」ボタンで選択ラインの3属性（コントローラー）へ `setKeyframe`。
+- 各スライダー行に **K ボタン**（その値だけ現フレームにキー）。一括キーボタンは廃止。
+- 削除は **Delete キー**（`_OutlineTree.keyPressEvent`→`delete_selected`）。削除ボタンは廃止。
+- 上部に 生成／新規グループ／再取得 ボタンを配置。
 - ノード名・属性名は全て英語（日本語混入による不具合回避）。UIラベルは日本語のまま。
 
 UI: グループは展開式（プルダウン）のツリー項目。ライン/グループともダブルクリックでリネーム。

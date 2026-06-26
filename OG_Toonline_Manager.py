@@ -428,6 +428,13 @@ class _OutlineTree(QtWidgets.QTreeWidget):
         super(_OutlineTree, self).__init__(parent)
         self.ui = ui
 
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+            self.ui.delete_selected()
+            event.accept()
+            return
+        super(_OutlineTree, self).keyPressEvent(event)
+
     def dropEvent(self, event):
         # ドロップ先のグループを解決し、選択ライン群を Maya 側で親子付けし直す。
         try:
@@ -478,8 +485,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     # ========== UI 構築 ==========
     def _slider_spin_row(self, label, smin, smax, sval, dec, rmin, rmax, step, rval,
-                         on_slider, on_spin, on_reset, tip=""):
-        """ラベル+スライダー+スピン+リセットの1行を作って (layout, slider, spin) を返す。"""
+                         on_slider, on_spin, on_reset, on_key=None, tip=""):
+        """ラベル+スライダー+スピン+[キー]+[リセット]の1行を作り (layout, slider, spin) を返す。"""
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel(label))
         sld = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -493,6 +500,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sld.sliderReleased.connect(self._end_drag)
         spn.valueChanged.connect(on_spin)
         row.addWidget(sld); row.addWidget(spn)
+        if on_key:
+            bk = QtWidgets.QPushButton("K"); bk.setFixedWidth(22)
+            bk.setToolTip("この値を現フレームにキー")
+            bk.clicked.connect(on_key)
+            row.addWidget(bk)
         b = QtWidgets.QPushButton("↺"); b.setFixedWidth(26); b.setToolTip("リセット")
         b.clicked.connect(on_reset)
         row.addWidget(b)
@@ -506,20 +518,31 @@ class ToonOutlineUI(QtWidgets.QDialog):
         gl = QtWidgets.QVBoxLayout(self.w_global); gl.setContentsMargins(0, 0, 0, 0)
         arow, self.gslider, self.gspin = self._slider_spin_row(
             "全体倍率", 0, 500, 100, 2, 0.0, 5.0, 0.05, 1.0,
-            self._on_gslider, self._on_gspin, self._reset_gmult, "全アウトラインの太さ倍率")
+            self._on_gslider, self._on_gspin, self._reset_gmult,
+            on_key=self._key_gmult, tip="全アウトラインの太さ倍率")
         gl.addLayout(arow)
         lay.addWidget(self.w_global)
 
-        # 生成 + 対象グループ
+        # 生成 / 新規グループ / 再取得（上部）
         crow = QtWidgets.QHBoxLayout()
         self.btn_create = QtWidgets.QPushButton("選択メッシュに輪郭を生成")
         self.btn_create.clicked.connect(self.create_outlines)
         crow.addWidget(self.btn_create, 1)
-        crow.addWidget(QtWidgets.QLabel("グループ"))
+        b_grp = QtWidgets.QPushButton("新規グループ")
+        b_grp.clicked.connect(self.new_group)
+        crow.addWidget(b_grp)
+        b_ref = QtWidgets.QPushButton("再取得")
+        b_ref.clicked.connect(self.refresh_tree)
+        crow.addWidget(b_ref)
+        lay.addLayout(crow)
+
+        # 対象グループ（生成先）
+        crow2 = QtWidgets.QHBoxLayout()
+        crow2.addWidget(QtWidgets.QLabel("対象グループ"))
         self.group_combo = QtWidgets.QComboBox()
         self.group_combo.setMinimumWidth(110)
-        crow.addWidget(self.group_combo)
-        lay.addLayout(crow)
+        crow2.addWidget(self.group_combo, 1)
+        lay.addLayout(crow2)
 
         # ライン／グループ ツリー（チェック=表示、色列=個別カラー、D&Dでグループ移動）
         self.tree = _OutlineTree(self)
@@ -546,16 +569,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lvl = QtWidgets.QVBoxLayout(self.w_line); lvl.setContentsMargins(0, 0, 0, 0)
         trow, self.slider, self.spin = self._slider_spin_row(
             "太さ", 0, 2000, 50, 3, 0.0, 2.0, 0.01, 0.05,
-            self._on_slider, self._on_spin, self._reset_thickness)
+            self._on_slider, self._on_spin, self._reset_thickness,
+            on_key=self._key_thickness)
         lvl.addLayout(trow)
         c2row, self.cslider, self.cspin = self._slider_spin_row(
             "曲率起伏", 0, 1000, 0, 2, 0.0, 10.0, 0.1, 0.0,
-            self._on_cslider, self._on_cspin, self._reset_curv)
+            self._on_cslider, self._on_cspin, self._reset_curv,
+            on_key=self._key_curv)
         lvl.addLayout(c2row)
         c3row, self.cap_slider, self.cap_spin = self._slider_spin_row(
             "曲率上限", 100, 1000, 300, 1, 1.0, 10.0, 0.5, 3.0,
             self._on_cap_slider, self._on_cap_spin, self._reset_cap,
-            "起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
+            on_key=self._key_cap, tip="起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
         lvl.addLayout(c3row)
         lay.addWidget(self.w_line)
 
@@ -565,7 +590,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         grow, self.grpslider, self.grpspin = self._slider_spin_row(
             "グループ倍率", 0, 500, 100, 2, 0.0, 5.0, 0.05, 1.0,
             self._on_grpslider, self._on_grpspin, self._reset_grpmult,
-            "選択グループの太さ倍率")
+            on_key=self._key_grpmult, tip="選択グループの太さ倍率")
         gvl.addLayout(grow)
         lay.addWidget(self.w_group)
 
@@ -590,25 +615,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         clrow.addWidget(b_scol)
         lay.addLayout(clrow)
 
-        # キー（選択ラインの thickness/curvature/curvatureCap を現フレームにキー）
-        krow = QtWidgets.QHBoxLayout()
-        self.btn_key = QtWidgets.QPushButton("現フレームにキー（選択ライン）")
-        self.btn_key.setToolTip("選択ラインの太さ・曲率起伏・曲率上限を現在フレームにキー")
-        self.btn_key.clicked.connect(self.key_selected)
-        krow.addWidget(self.btn_key)
-        lay.addLayout(krow)
-
-        # 管理ボタン
-        mrow = QtWidgets.QHBoxLayout()
-        b_grp = QtWidgets.QPushButton("新規グループ")
-        b_del = QtWidgets.QPushButton("削除")
-        b_ref = QtWidgets.QPushButton("再取得")
-        b_grp.clicked.connect(self.new_group)
-        b_del.clicked.connect(self.delete_selected)
-        b_ref.clicked.connect(self.refresh_tree)
-        for b in (b_grp, b_del, b_ref):
-            mrow.addWidget(b)
-        lay.addLayout(mrow)
+        self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
+        self.lbl_del.setStyleSheet("color:#888;")
+        lay.addWidget(self.lbl_del)
 
     # ========== シーン走査ヘルパ ==========
     def _ensure_line_holder(self):
@@ -738,21 +747,34 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
         return h
 
-    def _stash_loose_handles(self):
-        """トップレベル（ワールド直下）に残った textureDeformerHandle をホルダーへ退避。"""
-        loose = []
-        for h in cmds.ls("textureDeformerHandle*", type="transform", long=True) or []:
-            if not (cmds.listRelatives(h, parent=True) or []):
-                loose.append(h)
-        if not loose:
+    def _tuck_handle(self, h):
+        """ハンドルをアウトライナーから隠す＋非表示＋ホルダーへ退避（各処理は独立）。"""
+        if not (h and cmds.objExists(h)):
             return
         holder = self._ensure_handle_holder()
-        for h in loose:
+        for fn in (
+            lambda: cmds.setAttr(h + ".hiddenInOutliner", 1),
+            lambda: cmds.setAttr(h + ".visibility", 0),
+            lambda: cmds.parent(h, holder),
+        ):
             try:
-                cmds.setAttr(h + ".visibility", 0)
-                cmds.parent(h, holder)
+                fn()
             except Exception:
                 pass
+
+    def _stash_loose_handles(self):
+        """ホルダー外の textureDeformerHandle を退避＆アウトライナーから隠す。"""
+        for h in cmds.ls("textureDeformerHandle*", type="transform", long=True) or []:
+            par = cmds.listRelatives(h, parent=True) or []
+            if par and _short(par[0]) == HANDLE_HOLDER:
+                continue
+            self._tuck_handle(h)
+        # アウトライナーを更新して hiddenInOutliner を反映
+        try:
+            import maya.mel as _mel
+            _mel.eval("AEdagNodeCommonRefreshOutliners();")
+        except Exception:
+            pass
 
     def _cleanup_orphan_handles(self):
         """どの textureDeformer にも繋がっていないハンドルとホルダーを掃除する。"""
@@ -882,6 +904,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             except Exception:
                 pass
         self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
+        self._stash_loose_handles()   # はみ出したハンドルを退避
         self._populating = False
         self._refresh_group_combo()
 
@@ -1200,8 +1223,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._update_key_colors()
 
     # ========== キー（アニメーション） ==========
-    def key_selected(self):
-        """選択ラインのコントローラー属性を現フレームにキーする。"""
+    def _key_line_attr(self, attr):
         lines = self._selected_lines()
         if not lines:
             cmds.warning("キーを打つラインをツリーで選択してください"); return
@@ -1209,11 +1231,46 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             for line in lines:
                 ctrl = _ensure_line_anim(line, self.spin.value())
-                for at in (CTRL_THICK, CTRL_CURV, CTRL_CAP):
-                    try:
-                        cmds.setKeyframe(ctrl + "." + at)
-                    except Exception:
-                        pass
+                try:
+                    cmds.setKeyframe(ctrl + "." + attr)
+                except Exception:
+                    pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
+
+    def _key_thickness(self):
+        self._key_line_attr(CTRL_THICK)
+
+    def _key_curv(self):
+        self._key_line_attr(CTRL_CURV)
+
+    def _key_cap(self):
+        self._key_line_attr(CTRL_CAP)
+
+    def _key_grpmult(self):
+        grp = self._target_group()
+        if not grp:
+            cmds.warning("キーを打つグループをツリーで選択してください"); return
+        gctrl = _ensure_group_ctrl(grp)
+        cmds.undoInfo(openChunk=True)
+        try:
+            try:
+                cmds.setKeyframe(gctrl + "." + GMULT)
+            except Exception:
+                pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
+
+    def _key_gmult(self):
+        gc = _ensure_global_ctrl()
+        cmds.undoInfo(openChunk=True)
+        try:
+            try:
+                cmds.setKeyframe(gc + "." + GMULT)
+            except Exception:
+                pass
         finally:
             cmds.undoInfo(closeChunk=True)
         self._update_key_colors()
@@ -1229,14 +1286,26 @@ class ToonOutlineUI(QtWidgets.QDialog):
         spin.setStyleSheet(css)
 
     def _update_key_colors(self):
-        pairs = ((self.spin, CTRL_THICK), (self.cspin, CTRL_CURV), (self.cap_spin, CTRL_CAP))
         lines = self._selected_lines()
-        ctrl = _ctrl_of(lines[0]) if lines else None
-        for spin, at in pairs:
+        lctrl = _ctrl_of(lines[0]) if lines else None
+        for spin, at in ((self.spin, CTRL_THICK), (self.cspin, CTRL_CURV), (self.cap_spin, CTRL_CAP)):
             state = "none"
-            if ctrl and cmds.attributeQuery(at, node=ctrl, exists=True):
-                state = _attr_key_state(ctrl + "." + at)
+            if lctrl and cmds.attributeQuery(at, node=lctrl, exists=True):
+                state = _attr_key_state(lctrl + "." + at)
             self._style_spin(spin, state)
+        # グループ倍率
+        grp = self._target_group()
+        grpctrl = _ctrl_of(grp) if grp else None
+        st = "none"
+        if grpctrl and cmds.attributeQuery(GMULT, node=grpctrl, exists=True):
+            st = _attr_key_state(grpctrl + "." + GMULT)
+        self._style_spin(self.grpspin, st)
+        # 全体倍率
+        gc = _find_global_ctrl()
+        st = "none"
+        if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
+            st = _attr_key_state(gc + "." + GMULT)
+        self._style_spin(self.gspin, st)
 
     def _on_time_changed(self):
         """フレーム変更時：選択ラインの現在値をスライダーへ反映し、キー色を更新。"""
@@ -1389,15 +1458,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
 
-                # deformer ハンドルは direction="Normal" では見た目に不要だが、削除すると
-                # offset(太さ) が効かなくなるため、非表示にして ROOT 直下のホルダーへ退避する
-                # （変形対象メッシュ＝dup の配下には親子付けできないため）。
-                if handle and cmds.objExists(handle):
-                    try:
-                        cmds.setAttr(handle + ".visibility", 0)
-                        cmds.parent(handle, self._ensure_handle_holder())
-                    except Exception:
-                        pass
+                # deformer ハンドルは direction="Normal" では不要だが削除すると offset が
+                # 効かなくなるため、アウトライナーから隠してホルダーへ退避する。
+                self._tuck_handle(handle)
 
                 # 3) 法線反転は shape の opposite 属性で行う（ヒストリノードを足さない）。
                 #    doubleSided=0 のバックフェースカリングと合わせて輪郭のリムだけ見せる。
