@@ -216,12 +216,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         c2row = QtWidgets.QHBoxLayout()
         c2row.addWidget(QtWidgets.QLabel("曲率起伏"))
         self.cslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.cslider.setRange(0, 200)
+        self.cslider.setRange(0, 1000)
         self.cslider.setValue(0)
         self.cspin = QtWidgets.QDoubleSpinBox()
         self.cspin.setDecimals(2)
-        self.cspin.setRange(0.0, 2.0)
-        self.cspin.setSingleStep(0.05)
+        self.cspin.setRange(0.0, 10.0)
+        self.cspin.setSingleStep(0.1)
         self.cspin.setValue(0.0)
         self.cslider.valueChanged.connect(self._on_cslider)
         self.cspin.valueChanged.connect(self._on_cspin)
@@ -545,8 +545,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             n = len(curv)
             if n == 0:
                 continue
-            # weight[i] = 1 + 影響度 * 曲率（凸ほど太く / 凹ほど細く）。0 で一様。
-            weights = [max(0.0, 1.0 + influence * c) for c in curv]
+            # weight[i] = 1 + 影響度 * |曲率|（曲がっている所ほど太く・直線的な所は細く）。0 で一様。
+            weights = [max(0.0, 1.0 + influence * abs(c)) for c in curv]
             try:
                 cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
             except Exception:
@@ -668,9 +668,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 #    strength=0・テクスチャ無しで、純粋な法線方向の一定オフセットだけにする。
                 #    まず静的な複製に付け、その後ベース入力へ outMesh を流して追従させる
                 #    （先に inMesh へ直結すると評価が壊れて歪むので繋がない）。
+                before_h = set(cmds.ls("textureDeformerHandle*") or [])
                 td = cmds.textureDeformer(dshape, strength=0, offset=thick, direction="Normal")
                 defm = td[0]
-                handle = td[1] if len(td) > 1 else None
+                # ハンドルを確実に特定（戻り値に含まれない版があるため差分で拾う）
+                handle = None
+                created = [n for n in (cmds.ls("textureDeformerHandle*") or [])
+                           if n not in before_h]
+                for n in created:
+                    if cmds.objExists(n) and "transform" in (cmds.nodeType(n, inherited=True) or []):
+                        handle = n
+                        break
+                if handle is None and created:
+                    par = cmds.listRelatives(created[0], parent=True, type="transform", f=True)
+                    handle = par[0] if par else None
+                if handle is None and len(td) > 1:
+                    handle = td[1]
 
                 # 2) 変形追従: deformer のベース入力に 元の outMesh を流し込む。
                 try:
