@@ -39,6 +39,7 @@ ROOT      = "toonOutlines_grp"      # 全ライン／グループの親
 TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
+HANDLE_HOLDER = "toonOutline_handles"   # textureDeformerHandle 退避用の非表示ホルダー
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
 THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
 THICK_ATTR = "offset"               # 現在法線方向への一定オフセット（太さ）
@@ -361,6 +362,34 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _current_group(self):
         name = self.group_combo.currentText().strip() if self.group_combo.count() else ""
         return self._ensure_group(name or DEFAULT_GROUP)
+
+    def _ensure_handle_holder(self):
+        """textureDeformerHandle を格納する ROOT 直下の非表示ホルダー。
+        ハンドルは変形対象メッシュの配下に親子付けできないため、ここへ退避する。"""
+        _ensure_root()
+        for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+            if _short(c) == HANDLE_HOLDER:
+                return c
+        h = cmds.group(em=True, name=HANDLE_HOLDER, parent=ROOT)
+        try:
+            cmds.setAttr(h + ".visibility", 0)
+        except Exception:
+            pass
+        return h
+
+    def _cleanup_orphan_handles(self):
+        """どの textureDeformer にも繋がっていないハンドルとホルダーを掃除する。"""
+        for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
+            if not (cmds.listConnections(h, type="textureDeformer") or []):
+                try:
+                    cmds.delete(h)
+                except Exception:
+                    pass
+        if cmds.objExists(HANDLE_HOLDER) and not (cmds.listRelatives(HANDLE_HOLDER, c=True) or []):
+            try:
+                cmds.delete(HANDLE_HOLDER)
+            except Exception:
+                pass
 
     def _ensure_line_shader(self, line):
         """ラインの個別カラー用 surfaceShader/SG を確保。"""
@@ -729,11 +758,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
 
                 # deformer ハンドルは direction="Normal" では見た目に不要だが、削除すると
-                # offset(太さ) が効かなくなるため、非表示にしてラインの子へ格納し整理する。
+                # offset(太さ) が効かなくなるため、非表示にして ROOT 直下のホルダーへ退避する
+                # （変形対象メッシュ＝dup の配下には親子付けできないため）。
                 if handle and cmds.objExists(handle):
                     try:
                         cmds.setAttr(handle + ".visibility", 0)
-                        cmds.parent(handle, dup)
+                        cmds.parent(handle, self._ensure_handle_holder())
                     except Exception:
                         pass
 
@@ -820,6 +850,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         try:
             cmds.delete(nodes)
+            # 変形ノードが消えて孤立したハンドル／空ホルダーを掃除
+            self._cleanup_orphan_handles()
             # 空になった ROOT は片付ける
             if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
                 cmds.delete(ROOT)

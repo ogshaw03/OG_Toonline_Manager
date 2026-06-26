@@ -46,7 +46,9 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
    visibility=0 で dup の子に格納してアウトライナーを整理する（削除不可）。
    ※ ハンドルは戻り値に含まれない版があるので、**デフォーマに接続された transform**
      （`listConnections(defm, type="transform")` で名前に textureDeformerHandle を含むもの）
-     として特定し、非表示で dup 配下へ格納する（削除は offset を壊すので不可）。
+     として特定する。削除は offset を壊すので不可。また**変形対象メッシュ(dup)配下には
+     親子付けできない**ため、ROOT 直下の非表示ホルダー `toonOutline_handles` へ退避する。
+     ライン削除時は `_cleanup_orphan_handles` で孤立ハンドルと空ホルダーを掃除。
    曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
    `weight[i]=min(上限, 1+影響度*|曲率[i]|)`（曲がる所＝太く・直線＝細く、上限で角の太り過ぎを抑制）。
    曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。影響度(0〜10)/上限(1〜10)は
