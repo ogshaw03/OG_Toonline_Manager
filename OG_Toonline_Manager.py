@@ -53,6 +53,8 @@ CTRL_CAP    = "curvatureCap"
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
+EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
+PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -298,9 +300,11 @@ def _ensure_line_anim(line, default_thick=0.05):
     _set_outliner_color(ctrl, COL_LINE)
     _lock_trs(ctrl)
     _ensure_thickness_chain(line)
-    _ensure_follow(line)
-    _ensure_smooth_link(line)
-    _ensure_curv_jobs(line)
+    # エッジライン（チューブ）は polyToCurve 経由で元に追従するので拘束/曲率/スムース連動は不要
+    if not cmds.attributeQuery(EDGE_TAG, node=line, exists=True):
+        _ensure_follow(line)
+        _ensure_smooth_link(line)
+        _ensure_curv_jobs(line)
     return ctrl
 
 
@@ -350,11 +354,32 @@ def _connect(src, dst):
         pass
 
 
-def _ensure_thickness_chain(line):
-    """offset = lineCtrl.thickness * groupCtrl.thicknessMult * globalCtrl.thicknessMult を DG で構築。"""
+def _profile_of(line):
+    """エッジラインの円プロファイル（makeNurbCircle）を返す。"""
+    if cmds.objExists(line) and cmds.attributeQuery(PROFILE_LINK, node=line, exists=True):
+        c = cmds.listConnections(line + "." + PROFILE_LINK) or []
+        if c and cmds.objExists(c[0]):
+            return c[0]
+    return None
+
+
+def _thick_target(line):
+    """太さを流し込む先のプラグ。hull ライン=deformer.offset / エッジライン=circle.radius。"""
     defm = _line_deformer(line)
+    if defm:
+        return defm + ".offset"
+    prof = _profile_of(line)
+    if prof:
+        return prof + ".radius"
+    return None
+
+
+def _ensure_thickness_chain(line):
+    """太さ = lineCtrl.thickness * groupCtrl.thicknessMult * globalCtrl.thicknessMult を DG で構築。
+    出力先は hull ラインなら textureDeformer.offset、エッジラインなら円プロファイル半径。"""
+    target = _thick_target(line)
     ctrl = _ctrl_of(line)
-    if not defm or not ctrl:
+    if not target or not ctrl:
         return
     gctrl = _ensure_global_ctrl()
     grp = _line_group(line)
@@ -386,10 +411,10 @@ def _ensure_thickness_chain(line):
             cmds.setAttr(mA + ".input2", 1.0)
         except Exception:
             pass
-    # mB = mA * globalCtrl.thicknessMult → offset
+    # mB = mA * globalCtrl.thicknessMult → 太さ出力先
     _connect(mA + ".output", mB + ".input1")
     _connect(gctrl + "." + GMULT, mB + ".input2")
-    _connect(mB + ".output", defm + ".offset")
+    _connect(mB + ".output", target)
 
 
 def _update_curv_weights(line):
@@ -558,6 +583,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_create = QtWidgets.QPushButton("選択メッシュに輪郭を生成")
         self.btn_create.clicked.connect(self.create_outlines)
         crow.addWidget(self.btn_create, 1)
+        self.btn_edge = QtWidgets.QPushButton("選択エッジにライン")
+        self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
+        self.btn_edge.clicked.connect(self.create_edge_line)
+        crow.addWidget(self.btn_edge)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -1537,6 +1566,67 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.select(made, r=True)
             # 取りこぼしたハンドルがあればトップから退避（確実化）
             self._stash_loose_handles()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+        self.refresh_tree()
+
+    # ========== エッジライン（チューブ） ==========
+    def create_edge_line(self, *args):
+        """選択ポリゴンエッジに沿ってチューブ状のラインを追加（太さ調整可・元に追従）。"""
+        sel = cmds.ls(sl=True, fl=True) or []
+        edges = cmds.filterExpand(sel, sm=32) or []
+        if not edges:
+            cmds.warning("メッシュのエッジを選択してください"); return
+        thick = self.spin.value()
+        _, sg = _ensure_shader(self._color)
+        grp = self._current_group()
+
+        cmds.undoInfo(openChunk=True)
+        line = None
+        try:
+            cmds.select(edges, r=True)
+            # エッジ → カーブ（履歴付き＝メッシュ変形/移動に追従）
+            curve = cmds.polyToCurve(form=2, degree=1, ch=True)[0]
+            # 円プロファイル（太さ=半径）
+            circ = cmds.circle(radius=max(thick, 1e-4), normal=(0, 1, 0), ch=True)
+            circ_x, circ_node = circ[0], circ[1]
+            # カーブに沿って押し出し → NURBS チューブ
+            surf = cmds.extrude(circ_x, curve, et=2, fixedPath=True, useComponentPivot=1,
+                                useProfileNormal=True, reverseSurfaceIfPathReversed=True,
+                                ch=True)[0]
+            # ポリゴン化（履歴付き）
+            line = cmds.nurbsToPoly(surf, ch=True, polygonType=1, format=2,
+                                    uType=3, uNumber=1, vType=3, vNumber=1)[0]
+            line = cmds.rename(line, "edgeLine1")
+            lshape = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)[0]
+            cmds.sets(lshape, e=True, forceElement=sg)
+            for at in (TAG, EDGE_TAG):
+                if not cmds.attributeQuery(at, node=line, exists=True):
+                    cmds.addAttr(line, ln=at, at="bool", dv=True)
+            # 太さ制御用に円プロファイル(makeNurbCircle)をリンク
+            if not cmds.attributeQuery(PROFILE_LINK, node=line, exists=True):
+                cmds.addAttr(line, ln=PROFILE_LINK, at="message")
+            try:
+                cmds.connectAttr(circ_node + ".message", line + "." + PROFILE_LINK, f=True)
+            except Exception:
+                pass
+            # 中間ノード（カーブ/円/NURBS面）はラインの子に隠して格納（履歴は保持）
+            for n in (curve, circ_x, surf):
+                if n and cmds.objExists(n):
+                    try:
+                        cmds.setAttr(n + ".visibility", 0)
+                        cmds.setAttr(n + ".hiddenInOutliner", 1)
+                        cmds.parent(n, line)
+                    except Exception:
+                        pass
+            line = cmds.parent(line, grp)[0]
+            ctrl = _ensure_line_anim(line, thick)
+            try:
+                cmds.setAttr(ctrl + "." + CTRL_THICK, thick)
+            except Exception:
+                pass
+            cmds.select(line, r=True)
         finally:
             cmds.undoInfo(closeChunk=True)
 

@@ -107,6 +107,18 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
 ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。
 
+### エッジライン（チューブ・追加機能）
+
+inverted hull とは別に、**選択ポリゴンエッジに沿ったチューブ状ライン**を追加できる
+（`create_edge_line`、ボタン「選択エッジにライン」）。`polyToCurve`(履歴付=変形/移動追従)
+→ 円プロファイル `circle` を `extrude` でカーブに沿わせ → `nurbsToPoly` でチューブ poly 化。
+- `EDGE_TAG`(`isToonEdgeLine`) で識別。中間ノード(カーブ/円/NURBS面)はラインの子に隠して保持。
+- 太さは **円プロファイル `makeNurbCircle.radius`** を太さ乗算チェーンで駆動（`_thick_target`
+  が hull=textureDeformer.offset / エッジ=circle.radius を出し分け）。グループ/全体倍率も適用。
+- エッジラインは polyToCurve が世界空間で追従するため、parentConstraint/曲率/スムース連動は
+  付けない（`_ensure_line_anim` で EDGE_TAG をスキップ）。グループ/カラー/コントローラー/
+  キーは hull ラインと共通。
+
 ### 互換性の注意
 
 PySide2 系の旧 Maya（2019/2020）は Python 2.7。
