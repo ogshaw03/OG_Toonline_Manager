@@ -183,9 +183,14 @@ def _ensure_ctrl_holder():
 
 def _create_controller(line, thick):
     """ライン用の独立コントローラー（ロケーター）を作り、コントローラーグループへ格納。"""
-    # ロケーターはシェイプを持つので、空 transform より識別しやすい（textureDeformerHandle 系）。
-    # シェイプは表示のまま（アウトライナーでロケーターとして判別できる）。
-    ctrl = cmds.spaceLocator(name=_short(line) + CTRL_SUFFIX)[0]
+    # シェイプ無しの素の transform。ドローイングオーバーライドで色を付け、
+    # アウトライナーで色付き表示にして識別しやすくする（ビューポートには何も出ない）。
+    ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
+    try:
+        cmds.setAttr(ctrl + ".overrideEnabled", 1)
+        cmds.setAttr(ctrl + ".overrideColor", 17)   # 17=イエロー
+    except Exception:
+        pass
     for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
         cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
     if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
@@ -199,7 +204,7 @@ def _create_controller(line, thick):
         ctrl = cmds.parent(ctrl, _ensure_ctrl_holder())[0]
     except Exception:
         pass
-    # 標準チャンネル(TRS/可視)はロック&非表示 → 3チャンネルのみコントローラーに見せる
+    # 標準チャンネル(TRS/可視)はロック&非表示 → 3チャンネルのみ見せる
     for at in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "v"):
         try:
             cmds.setAttr(ctrl + "." + at, lock=True, keyable=False, channelBox=False)

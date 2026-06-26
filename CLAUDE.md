@@ -56,7 +56,8 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 
 ### アニメーション（ラインコントローラー）
 
-各ラインに**独立したコントローラーノード**（`spaceLocator` `<line>_ctrl`、shape は非表示）を作り、
+各ラインに**独立したコントローラーノード**（素の `transform` `<line>_ctrl`、シェイプ無し。
+ドローイングオーバーライド色=イエローでアウトライナー上を色付き表示にし識別しやすく）を作り、
 **キーアブルな英語アトリビュート** `thickness`/`curvature`/`curvatureCap` を持たせる
 （`CTRL_THICK`/`CTRL_CURV`/`CTRL_CAP`）。メッシュ本体には属性を置かない。
 - コントローラーは **ROOT 直下の `toonOutline_ctrls` グループ**に格納（ラインの子にはしない）。
