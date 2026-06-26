@@ -43,8 +43,10 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
    生成される textureDeformerHandle は **削除すると offset(太さ) が効かなくなる**ため、
-   削除すると offset が壊れるので不可。代わりに `_tuck_handle` で **`hiddenInOutliner=1`
-   ＋ `visibility=0`** にしてその場で隠す（**専用グループは作らない**）。
+   削除すると offset が壊れるので不可。代わりに `_tuck_handle` で `visibility=0`＋
+   `hiddenInOutliner` でその場で隠す（**専用グループは作らない**）。hiddenInOutliner は
+   UIチェック「デフォーマハンドルをアウトライナーから隠す」(`_on_toggle_hide_handles`)で
+   ON/OFF 切替可（既定ON。完全に消すと危険なので OFF で表示できる）。
    ※ ハンドルは戻り値に含まれない版があるので、`listConnections(defm, type="transform")` で
      名前に textureDeformerHandle を含むものとして特定。`_stash_loose_handles` が全ハンドルを
      隠し、旧 `toonOutline_handles` グループがあれば解体。孤立分は `_cleanup_orphan_handles`。

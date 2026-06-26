@@ -621,6 +621,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         clrow.addWidget(b_scol)
         lay.addLayout(clrow)
 
+        self.chk_hide_handles = QtWidgets.QCheckBox("デフォーマハンドルをアウトライナーから隠す")
+        self.chk_hide_handles.setChecked(True)
+        self.chk_hide_handles.setToolTip("OFF にするとハンドルがアウトライナーに表示されます（削除は不可）")
+        self.chk_hide_handles.toggled.connect(self._on_toggle_hide_handles)
+        lay.addWidget(self.chk_hide_handles)
+
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
@@ -740,17 +746,32 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return self._ensure_group(name or DEFAULT_GROUP)
 
     def _tuck_handle(self, h):
-        """ハンドルをアウトライナー＆ビューポートから隠す（グループは作らない・その場で隠す）。"""
+        """ハンドルをビューポート非表示にし、アウトライナーからは設定に応じて隠す。"""
         if not (h and cmds.objExists(h)):
             return
+        hide = 1 if getattr(self, "chk_hide_handles", None) is None or self.chk_hide_handles.isChecked() else 0
         for fn in (
-            lambda: cmds.setAttr(h + ".hiddenInOutliner", 1),
+            lambda: cmds.setAttr(h + ".hiddenInOutliner", hide),
             lambda: cmds.setAttr(h + ".visibility", 0),
         ):
             try:
                 fn()
             except Exception:
                 pass
+
+    def _on_toggle_hide_handles(self, state):
+        """UIチェックでハンドルの hiddenInOutliner を一括切替。"""
+        hide = 1 if state else 0
+        for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
+            try:
+                cmds.setAttr(h + ".hiddenInOutliner", hide)
+            except Exception:
+                pass
+        try:
+            import maya.mel as _mel
+            _mel.eval("AEdagNodeCommonRefreshOutliners();")
+        except Exception:
+            pass
 
     def _stash_loose_handles(self):
         """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
