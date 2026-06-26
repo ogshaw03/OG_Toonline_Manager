@@ -119,6 +119,10 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
   曲率はチューブ自身の表面曲率（曲がった所ほど太い）。グループ/全体倍率・キー・色も共通。
 - polyToCurve が世界空間で追従するため parentConstraint/スムース連動は付けない
   （`_ensure_line_anim` で EDGE_TAG のとき follow/smooth をスキップ。曲率ジョブは張る）。
+- **末端細り** `endTaper`(0〜1, `CTRL_TAPER`): 各頂点のカーブ長手パラメータ t を
+  `_taper_factors`（om2 `MFnNurbsCurve.closestPoint`）で求め、端ほど weightList を減衰
+  （`weight*= (1-taper)+taper*norm`）。hull はカーブが無いので無効。UI「末端細り」スライダー。
+- UIツリーは名前に種別サフィックス（`[背面]`/`[エッジ]`）を付けて判別表示。
 
 ### 互換性の注意
 
