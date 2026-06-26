@@ -300,11 +300,12 @@ def _ensure_line_anim(line, default_thick=0.05):
     _set_outliner_color(ctrl, COL_LINE)
     _lock_trs(ctrl)
     _ensure_thickness_chain(line)
-    # エッジライン（チューブ）は polyToCurve 経由で元に追従するので拘束/曲率/スムース連動は不要
+    # エッジライン（チューブ）は polyToCurve 経由で元に追従するので拘束/スムース連動は不要。
+    # 曲率起伏は hull と同じく textureDeformer の weightList で行うのでジョブは張る。
     if not cmds.attributeQuery(EDGE_TAG, node=line, exists=True):
         _ensure_follow(line)
         _ensure_smooth_link(line)
-        _ensure_curv_jobs(line)
+    _ensure_curv_jobs(line)
     return ctrl
 
 
@@ -354,24 +355,10 @@ def _connect(src, dst):
         pass
 
 
-def _profile_of(line):
-    """エッジラインの円プロファイル（makeNurbCircle）を返す。"""
-    if cmds.objExists(line) and cmds.attributeQuery(PROFILE_LINK, node=line, exists=True):
-        c = cmds.listConnections(line + "." + PROFILE_LINK) or []
-        if c and cmds.objExists(c[0]):
-            return c[0]
-    return None
-
-
 def _thick_target(line):
-    """太さを流し込む先のプラグ。hull ライン=deformer.offset / エッジライン=circle.radius。"""
+    """太さを流し込む先のプラグ。hull / エッジ ともチューブ表面の textureDeformer.offset。"""
     defm = _line_deformer(line)
-    if defm:
-        return defm + ".offset"
-    prof = _profile_of(line)
-    if prof:
-        return prof + ".radius"
-    return None
+    return (defm + ".offset") if defm else None
 
 
 def _ensure_thickness_chain(line):
@@ -1588,9 +1575,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.select(edges, r=True)
             # エッジ → カーブ（履歴付き＝メッシュ変形/移動に追従）
             curve = cmds.polyToCurve(form=2, degree=1, ch=True)[0]
-            # 円プロファイル（太さ=半径）
-            circ = cmds.circle(radius=max(thick, 1e-4), normal=(0, 1, 0), ch=True)
-            circ_x, circ_node = circ[0], circ[1]
+            # 細い円プロファイル（実太さは textureDeformer.offset で出す）
+            circ = cmds.circle(radius=0.01, normal=(0, 1, 0), ch=True)
+            circ_x = circ[0]
             # カーブに沿って押し出し → NURBS チューブ
             surf = cmds.extrude(circ_x, curve, et=2, fixedPath=True, useComponentPivot=1,
                                 useProfileNormal=True, reverseSurfaceIfPathReversed=True,
@@ -1600,17 +1587,23 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                     uType=3, uNumber=1, vType=3, vNumber=1)[0]
             line = cmds.rename(line, "edgeLine1")
             lshape = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)[0]
+
+            # hull ラインと同じく textureDeformer で太さ(offset)＋曲率起伏(weightList)を出す
+            td = cmds.textureDeformer(lshape, strength=0, offset=thick, direction="Normal")
+            defm = td[0]
+            handle = None
+            for c in (cmds.listConnections(defm, type="transform") or []):
+                if "textureDeformerHandle" in _short(c):
+                    handle = c
+                    break
+            if handle is None and len(td) > 1:
+                handle = td[1]
+            self._tuck_handle(handle)
+
             cmds.sets(lshape, e=True, forceElement=sg)
             for at in (TAG, EDGE_TAG):
                 if not cmds.attributeQuery(at, node=line, exists=True):
                     cmds.addAttr(line, ln=at, at="bool", dv=True)
-            # 太さ制御用に円プロファイル(makeNurbCircle)をリンク
-            if not cmds.attributeQuery(PROFILE_LINK, node=line, exists=True):
-                cmds.addAttr(line, ln=PROFILE_LINK, at="message")
-            try:
-                cmds.connectAttr(circ_node + ".message", line + "." + PROFILE_LINK, f=True)
-            except Exception:
-                pass
             # 中間ノード（カーブ/円/NURBS面）はラインの子に隠して格納（履歴は保持）
             for n in (curve, circ_x, surf):
                 if n and cmds.objExists(n):

@@ -113,11 +113,12 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 （`create_edge_line`、ボタン「選択エッジにライン」）。`polyToCurve`(履歴付=変形/移動追従)
 → 円プロファイル `circle` を `extrude` でカーブに沿わせ → `nurbsToPoly` でチューブ poly 化。
 - `EDGE_TAG`(`isToonEdgeLine`) で識別。中間ノード(カーブ/円/NURBS面)はラインの子に隠して保持。
-- 太さは **円プロファイル `makeNurbCircle.radius`** を太さ乗算チェーンで駆動（`_thick_target`
-  が hull=textureDeformer.offset / エッジ=circle.radius を出し分け）。グループ/全体倍率も適用。
-- エッジラインは polyToCurve が世界空間で追従するため、parentConstraint/曲率/スムース連動は
-  付けない（`_ensure_line_anim` で EDGE_TAG をスキップ）。グループ/カラー/コントローラー/
-  キーは hull ラインと共通。
+  円プロファイルは細い固定半径(0.01)で、実太さはチューブ表面の **textureDeformer** で出す。
+- **太さ・曲率起伏は hull と完全に同じ機構**（チューブ shape に textureDeformer を付け、
+  offset=太さ／weightList=曲率）。`_thick_target` は hull/エッジとも `textureDeformer.offset`。
+  曲率はチューブ自身の表面曲率（曲がった所ほど太い）。グループ/全体倍率・キー・色も共通。
+- polyToCurve が世界空間で追従するため parentConstraint/スムース連動は付けない
+  （`_ensure_line_anim` で EDGE_TAG のとき follow/smooth をスキップ。曲率ジョブは張る）。
 
 ### 互換性の注意
 
