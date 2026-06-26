@@ -106,52 +106,27 @@ def _compute_curvature(shape):
     return curv
 
 
-class _GroupRow(QtWidgets.QWidget):
-    """グループ行に置くバー型ウィジェット（表示チェック / 名前バー / +追加）。"""
-    def __init__(self, ui, group_node, visible, parent=None):
-        super(_GroupRow, self).__init__(parent)
+class _OutlineTree(QtWidgets.QTreeWidget):
+    """ライン→グループのドラッグ&ドロップ移動に対応したツリー。"""
+    def __init__(self, ui, parent=None):
+        super(_OutlineTree, self).__init__(parent)
         self.ui = ui
-        self.group = group_node
-        h = QtWidgets.QHBoxLayout(self)
-        h.setContentsMargins(2, 1, 2, 1)
-        h.setSpacing(4)
 
-        self.chk = QtWidgets.QCheckBox()
-        self.chk.setChecked(bool(visible))
-        self.chk.setToolTip("グループの表示／非表示")
-        self.chk.toggled.connect(self._on_vis)
-        h.addWidget(self.chk)
-
-        self.lbl = QtWidgets.QLabel(_short(group_node) if group_node else "(未分類)")
-        self.lbl.setStyleSheet(
-            "QLabel{background:#5a6470; color:#eee; border:1px solid #2b2b2b;"
-            " border-radius:4px; padding:2px 10px; font-weight:bold;}")
-        h.addWidget(self.lbl, 1)
-
-        if group_node:
-            self.btn_ren = QtWidgets.QPushButton("✎")
-            self.btn_ren.setFixedWidth(26)
-            self.btn_ren.setToolTip("グループ名をリネーム")
-            self.btn_ren.clicked.connect(self._on_rename)
-            h.addWidget(self.btn_ren)
-            self.btn = QtWidgets.QPushButton("＋追加")
-            self.btn.setFixedWidth(58)
-            self.btn.setToolTip("選択メッシュから、このグループにラインを生成")
-            self.btn.clicked.connect(self._on_add)
-            h.addWidget(self.btn)
-
-    def _on_rename(self):
-        self.ui.rename_node(self.group)
-
-    def _on_vis(self, state):
-        if self.group and cmds.objExists(self.group):
-            try:
-                cmds.setAttr(self.group + ".visibility", bool(state))
-            except Exception:
-                cmds.warning("グループの表示属性を変更できません")
-
-    def _on_add(self):
-        self.ui.create_outlines(target_group=self.group)
+    def dropEvent(self, event):
+        # ドロップ先のグループを解決し、選択ライン群を Maya 側で親子付けし直す。
+        try:
+            pos = event.position().toPoint()   # PySide6
+        except AttributeError:
+            pos = event.pos()                  # PySide2
+        target = self.itemAt(pos)
+        group = self.ui._group_of_item(target)
+        lines = self.ui._selected_lines()
+        if group and lines:
+            self.ui._move_lines_to(lines, group)
+        try:
+            event.acceptProposedAction()
+        except Exception:
+            event.accept()
 
 
 class ToonOutlineUI(QtWidgets.QDialog):
@@ -184,17 +159,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow.addWidget(self.group_combo)
         lay.addLayout(crow)
 
-        # ライン／グループ ツリー（チェック=表示、色列=個別カラー）
-        self.tree = QtWidgets.QTreeWidget()
+        # ライン／グループ ツリー（チェック=表示、色列=個別カラー、D&Dでグループ移動）
+        self.tree = _OutlineTree(self)
         self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ", "色"])
         self.tree.setColumnWidth(0, 230)
         self.tree.setColumnWidth(1, 60)
         self.tree.setColumnWidth(2, 40)
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.tree.setDragEnabled(True)
+        self.tree.viewport().setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+        self.tree.setExpandsOnDoubleClick(False)   # ダブルクリックはリネーム用
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemDoubleClicked.connect(self._on_double_click)
         lay.addWidget(self.tree, 1)
+        self.lbl_dd = QtWidgets.QLabel("※ ラインをグループへドラッグ&ドロップで移動。ダブルクリックで名前変更")
+        self.lbl_dd.setStyleSheet("color:#888;")
+        lay.addWidget(self.lbl_dd)
 
         # 太さ（選択中ラインに適用）
         trow = QtWidgets.QHBoxLayout()
@@ -230,9 +213,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         c2row.addWidget(self.cspin)
         lay.addLayout(c2row)
 
-        # 起伏の上限（最大倍率）。角(顎など)が太くなりすぎないよう制限。
+        # 曲率起伏の上限（最大倍率）。角(顎など)が太くなりすぎないよう制限。
         c3row = QtWidgets.QHBoxLayout()
-        c3row.addWidget(QtWidgets.QLabel("上限"))
+        c3row.addWidget(QtWidgets.QLabel("曲率上限"))
         self.cap_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.cap_slider.setRange(100, 1000)   # /100 = 1.0〜10.0
         self.cap_slider.setValue(300)
@@ -247,24 +230,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         c3row.addWidget(self.cap_slider)
         c3row.addWidget(self.cap_spin)
         lay.addLayout(c3row)
-
-        # 凹み抑制（凹んだ所で押し出しを抑え、輪郭の浮き/ズレを軽減）
-        c4row = QtWidgets.QHBoxLayout()
-        c4row.addWidget(QtWidgets.QLabel("凹み抑制"))
-        self.supp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.supp_slider.setRange(0, 100)             # /100 = 0.0〜1.0
-        self.supp_slider.setValue(0)
-        self.supp_spin = QtWidgets.QDoubleSpinBox()
-        self.supp_spin.setDecimals(2)
-        self.supp_spin.setRange(0.0, 1.0)
-        self.supp_spin.setSingleStep(0.05)
-        self.supp_spin.setValue(0.0)
-        self.supp_spin.setToolTip("凹んだ部分の太さを抑えて輪郭の浮き/ズレを軽減（凹部の inverted hull のはみ出し対策）")
-        self.supp_slider.valueChanged.connect(self._on_supp_slider)
-        self.supp_spin.valueChanged.connect(self._on_supp_spin)
-        c4row.addWidget(self.supp_slider)
-        c4row.addWidget(self.supp_spin)
-        lay.addLayout(c4row)
 
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
@@ -290,16 +255,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # 管理ボタン
         mrow = QtWidgets.QHBoxLayout()
         b_grp = QtWidgets.QPushButton("新規グループ")
-        b_mov = QtWidgets.QPushButton("選択を対象グループへ")
-        b_ren = QtWidgets.QPushButton("リネーム")
         b_del = QtWidgets.QPushButton("削除")
         b_ref = QtWidgets.QPushButton("再取得")
         b_grp.clicked.connect(self.new_group)
-        b_mov.clicked.connect(self.move_selected_to_group)
-        b_ren.clicked.connect(self.rename_selected)
         b_del.clicked.connect(self.delete_selected)
         b_ref.clicked.connect(self.refresh_tree)
-        for b in (b_grp, b_mov, b_ren, b_del, b_ref):
+        for b in (b_grp, b_del, b_ref):
             mrow.addWidget(b)
         lay.addLayout(mrow)
 
@@ -425,7 +386,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _add_line_item(self, parent_item, line):
         it = QtWidgets.QTreeWidgetItem([_short(line), "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
-        it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+        # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
+        it.setFlags((it.flags() | QtCore.Qt.ItemIsUserCheckable
+                     | QtCore.Qt.ItemIsDragEnabled) & ~QtCore.Qt.ItemIsDropEnabled)
         vis = True
         try:
             vis = bool(cmds.getAttr(line + ".visibility"))
@@ -442,13 +405,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return it
 
     def _add_group_item(self, group_node, lines, visible):
-        """バー型ウィジェット付きのグループ行を追加する。"""
-        gi = QtWidgets.QTreeWidgetItem(["", "", ""])
+        """展開式（プルダウン）のグループ項目を追加する。"""
+        label = _short(group_node) if group_node else "(未分類)"
+        gi = QtWidgets.QTreeWidgetItem([label, "", ""])
         if group_node:
             gi.setData(0, QtCore.Qt.UserRole, group_node)
-        gi.setFirstColumnSpanned(True)
+            # グループ: チェック可・ドロップ可・自身はドラッグ不可
+            gi.setFlags((gi.flags() | QtCore.Qt.ItemIsUserCheckable
+                         | QtCore.Qt.ItemIsDropEnabled) & ~QtCore.Qt.ItemIsDragEnabled)
+            gi.setCheckState(0, QtCore.Qt.Checked if visible else QtCore.Qt.Unchecked)
+        else:
+            gi.setFlags((gi.flags() | QtCore.Qt.ItemIsDropEnabled)
+                        & ~QtCore.Qt.ItemIsUserCheckable & ~QtCore.Qt.ItemIsDragEnabled)
+        f = gi.font(0); f.setBold(True); gi.setFont(0, f)
+        gi.setBackground(0, QtGui.QBrush(QtGui.QColor(70, 78, 88)))
         self.tree.addTopLevelItem(gi)
-        self.tree.setItemWidget(gi, 0, _GroupRow(self, group_node, visible))
         for line in lines:
             self._add_line_item(gi, line)
         gi.setExpanded(True)
@@ -527,13 +498,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cap = cmds.getAttr(lines[0] + ".toonCurvCap")
             except Exception:
                 cap = None
-        supp = None
-        if cmds.attributeQuery("toonConcave", node=lines[0], exists=True):
-            try:
-                supp = cmds.getAttr(lines[0] + ".toonConcave")
-            except Exception:
-                supp = None
-        self._set_curv_widgets(infl, cap, supp)
+        self._set_curv_widgets(infl, cap)
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -589,16 +554,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
         self._apply_curvature()
 
-    def _on_supp_slider(self, v):
-        val = v / 100.0
-        self.supp_spin.blockSignals(True); self.supp_spin.setValue(val); self.supp_spin.blockSignals(False)
-        self._apply_curvature()
-
-    def _on_supp_spin(self, val):
-        self.supp_slider.blockSignals(True); self.supp_slider.setValue(int(val * 100)); self.supp_slider.blockSignals(False)
-        self._apply_curvature()
-
-    def _set_curv_widgets(self, infl, cap=None, supp=None):
+    def _set_curv_widgets(self, infl, cap=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
         self.cspin.setValue(infl)
         self.cslider.setValue(int(infl * 100))
@@ -608,11 +564,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self.cap_spin.setValue(cap)
             self.cap_slider.setValue(int(cap * 100))
             self.cap_spin.blockSignals(False); self.cap_slider.blockSignals(False)
-        if supp is not None:
-            self.supp_spin.blockSignals(True); self.supp_slider.blockSignals(True)
-            self.supp_spin.setValue(supp)
-            self.supp_slider.setValue(int(supp * 100))
-            self.supp_spin.blockSignals(False); self.supp_slider.blockSignals(False)
 
     def _curvature_of(self, line):
         """曲率配列をキャッシュ付きで返す（元メッシュ＝deformer のベース入力から計算）。"""
@@ -644,7 +595,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         influence = self.cspin.value()
         cap = self.cap_spin.value()
-        suppress = self.supp_spin.value()
         for line in lines:
             defm = self._thick_node_for(line)
             if not defm or not cmds.objExists(defm):
@@ -653,22 +603,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
             n = len(curv)
             if n == 0:
                 continue
-            # weight[i] = min(上限, 1 + 影響度 * |曲率|)：曲がる所ほど太く・直線は細く、
-            #   上限で角(顎など)の太り過ぎを抑制。さらに凹頂点(c<0)は押し出しを抑えて
-            #   inverted hull のはみ出し/浮きを軽減する。0 で一様。
-            weights = []
-            for c in curv:
-                w = min(cap, max(0.0, 1.0 + influence * abs(c)))
-                if c < 0.0:
-                    w *= max(0.0, 1.0 - suppress * (-c))
-                weights.append(max(0.0, w))
+            # weight[i] = min(曲率上限, 1 + 影響度 * |曲率|)：曲がる所ほど太く・直線は細く、
+            #   曲率上限で角(顎など)の太り過ぎを抑制。0 で一様。
+            weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
             try:
                 cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
             except Exception:
                 pass
-            # 影響度・上限・凹み抑制をラインに保存（選択同期・再開用）
-            for at, v in (("toonCurv", influence), ("toonCurvCap", cap),
-                          ("toonConcave", suppress)):
+            # 影響度・曲率上限をラインに保存（選択同期・再開用）
+            for at, v in (("toonCurv", influence), ("toonCurvCap", cap)):
                 if not cmds.attributeQuery(at, node=line, exists=True):
                     try:
                         cmds.addAttr(line, ln=at, at="double", dv=0.0)
@@ -851,18 +794,44 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.warning("リネームに失敗しました: {}".format(new))
         self.refresh_tree()
 
-    def rename_selected(self):
-        """ツリーで選択中のライン（1つ）をリネーム。グループは行の ✎ から。"""
-        lines = self._selected_lines()
-        if len(lines) != 1:
-            cmds.warning("リネームするラインを1つだけ選択してください（グループは行の ✎ ボタン）")
-            return
-        self.rename_node(lines[0])
-
     def _on_double_click(self, item, column):
+        """ライン・グループともダブルクリックでリネーム。"""
         node = item.data(0, QtCore.Qt.UserRole)
-        if node and cmds.objExists(node) and cmds.attributeQuery(TAG, node=node, exists=True):
+        if not node or not cmds.objExists(node):
+            return
+        if (cmds.attributeQuery(TAG, node=node, exists=True)
+                or cmds.attributeQuery(GROUP_TAG, node=node, exists=True)):
             self.rename_node(node)
+
+    # ========== ドラッグ&ドロップ移動 ==========
+    def _group_of_item(self, item):
+        """ツリー項目から移動先グループ（ノード）を解決する。"""
+        if item is None:
+            return None
+        node = item.data(0, QtCore.Qt.UserRole)
+        if not node or not cmds.objExists(node):
+            return None
+        if cmds.attributeQuery(GROUP_TAG, node=node, exists=True):
+            return node
+        if cmds.attributeQuery(TAG, node=node, exists=True):
+            par = cmds.listRelatives(node, parent=True, f=True) or []
+            if par and cmds.attributeQuery(GROUP_TAG, node=par[0], exists=True):
+                return par[0]
+        return None
+
+    def _move_lines_to(self, lines, group):
+        if not group or not cmds.objExists(group):
+            return
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in lines:
+                try:
+                    cmds.parent(ln, group)
+                except Exception:
+                    pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
 
     # ========== グループ管理 ==========
     def new_group(self):
@@ -875,20 +844,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         idx = self.group_combo.findText(name)
         if idx >= 0:
             self.group_combo.setCurrentIndex(idx)
-
-    def move_selected_to_group(self):
-        lines = self._selected_lines()
-        if not lines:
-            cmds.warning("移動するラインをツリーで選択してください"); return
-        grp = self._current_group()
-        cmds.undoInfo(openChunk=True)
-        try:
-            for ln in lines:
-                if cmds.listRelatives(ln, parent=True, f=True) != [grp]:
-                    cmds.parent(ln, grp)
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
 
     def delete_selected(self):
         nodes = self._selected_nodes()
