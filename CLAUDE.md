@@ -59,7 +59,7 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 コントローラーは **全体>グループ>ライン の3階層**（すべて素の `transform`、シェイプ無し。
 `useOutlinerColor`/`outlinerColor` でアウトライナーの文字を色分け。`overrideColor` はビューポート
 用なので使わない）:
-- **全体** `toonOutline_globalCtrl`（青 / `thicknessMult`）= ROOT 直下、コントローラー階層の親。
+- **全体** `toonOutline_globalCtrl`（水色 / `thicknessMult`）= ROOT 直下、コントローラー階層の親。
 - **グループ** `<group>_ctrl`（黄緑 / `thicknessMult`）= 全体コントローラー配下。`group.toonCtrl`。
 - **ライン** `<line>_ctrl`（黄 / `thickness`/`curvature`/`curvatureCap`、`CTRL_THICK`等）=
   所属グループのコントローラー配下。`line.toonCtrl`。メッシュ本体には属性を置かない。
@@ -98,8 +98,11 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 - → 変形でも太さ一定にするには、**法線を毎フレーム再計算する deformer（textureDeformer
   の法線オフセット）** が正解。
 - worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
-- 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
-  アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
+- 追従: 変形（スキン等）は `outMesh→inMesh` で追従。元トランスフォームの移動/回転/スケールは
+  `parentConstraint`+`scaleConstraint`（`_ensure_follow`）でラインを元に拘束して追従させる。
+
+UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
+ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。
 
 ### 互換性の注意
 

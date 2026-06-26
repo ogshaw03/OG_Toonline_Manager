@@ -54,7 +54,7 @@ CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
-COL_GLOBAL  = (0.2, 0.45, 1.0)       # 全体=青
+COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
 COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
 
@@ -298,8 +298,28 @@ def _ensure_line_anim(line, default_thick=0.05):
     _set_outliner_color(ctrl, COL_LINE)
     _lock_trs(ctrl)
     _ensure_thickness_chain(line)
+    _ensure_follow(line)
     _ensure_curv_jobs(line)
     return ctrl
+
+
+def _ensure_follow(line):
+    """元オブジェクトのトランスフォーム移動にラインを追従させる（parent/scale 拘束）。
+    outMesh は変形のみ追従するので、移動/回転/スケールは拘束で合わせる。"""
+    if cmds.listConnections(line + ".translateX", s=True, d=False, type="parentConstraint"):
+        return
+    srcsh = _line_src_shape(line)
+    if not srcsh:
+        return
+    par = cmds.listRelatives(srcsh, parent=True, f=True) or []
+    if not par:
+        return
+    src = par[0]
+    try:
+        cmds.parentConstraint(src, line, maintainOffset=False)
+        cmds.scaleConstraint(src, line, maintainOffset=False)
+    except Exception:
+        pass
 
 
 def _ensure_thickness_chain(line):
@@ -440,6 +460,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._time_job = None          # timeChanged scriptJob
         self._build()
         self.refresh_tree()
+        self._update_panels()      # 初期は選択無し → ライン/グループパネル非表示
+        self._set_mult_widgets()
         try:
             self._time_job = cmds.scriptJob(event=["timeChanged", self._on_time_changed],
                                             protected=False)
@@ -455,8 +477,38 @@ class ToonOutlineUI(QtWidgets.QDialog):
         super(ToonOutlineUI, self).closeEvent(event)
 
     # ========== UI 構築 ==========
+    def _slider_spin_row(self, label, smin, smax, sval, dec, rmin, rmax, step, rval,
+                         on_slider, on_spin, on_reset, tip=""):
+        """ラベル+スライダー+スピン+リセットの1行を作って (layout, slider, spin) を返す。"""
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel(label))
+        sld = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        sld.setRange(smin, smax); sld.setValue(sval)
+        spn = QtWidgets.QDoubleSpinBox()
+        spn.setDecimals(dec); spn.setRange(rmin, rmax); spn.setSingleStep(step); spn.setValue(rval)
+        if tip:
+            spn.setToolTip(tip)
+        sld.valueChanged.connect(on_slider)
+        sld.sliderPressed.connect(self._begin_drag)
+        sld.sliderReleased.connect(self._end_drag)
+        spn.valueChanged.connect(on_spin)
+        row.addWidget(sld); row.addWidget(spn)
+        b = QtWidgets.QPushButton("↺"); b.setFixedWidth(26); b.setToolTip("リセット")
+        b.clicked.connect(on_reset)
+        row.addWidget(b)
+        return row, sld, spn
+
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
+
+        # 全体倍率（常に最上部）
+        self.w_global = QtWidgets.QWidget()
+        gl = QtWidgets.QVBoxLayout(self.w_global); gl.setContentsMargins(0, 0, 0, 0)
+        arow, self.gslider, self.gspin = self._slider_spin_row(
+            "全体倍率", 0, 500, 100, 2, 0.0, 5.0, 0.05, 1.0,
+            self._on_gslider, self._on_gspin, self._reset_gmult, "全アウトラインの太さ倍率")
+        gl.addLayout(arow)
+        lay.addWidget(self.w_global)
 
         # 生成 + 対象グループ
         crow = QtWidgets.QHBoxLayout()
@@ -489,125 +541,35 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_dd.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_dd)
 
-        # 太さ（選択中ラインに適用）
-        trow = QtWidgets.QHBoxLayout()
-        trow.addWidget(QtWidgets.QLabel("太さ"))
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.slider.setRange(0, 2000)
-        self.slider.setValue(50)
-        self.spin = QtWidgets.QDoubleSpinBox()
-        self.spin.setDecimals(3)
-        self.spin.setRange(0.0, 2.0)
-        self.spin.setSingleStep(0.01)
-        self.spin.setValue(0.05)
-        self.slider.valueChanged.connect(self._on_slider)
-        self.slider.sliderPressed.connect(self._begin_drag)
-        self.slider.sliderReleased.connect(self._end_drag)
-        self.spin.valueChanged.connect(self._on_spin)
-        trow.addWidget(self.slider)
-        trow.addWidget(self.spin)
-        b_rt = QtWidgets.QPushButton("↺")
-        b_rt.setFixedWidth(26); b_rt.setToolTip("太さをリセット (0.05)")
-        b_rt.clicked.connect(self._reset_thickness)
-        trow.addWidget(b_rt)
-        lay.addLayout(trow)
+        # ライン用パネル（ライン選択時のみ表示）: 太さ / 曲率起伏 / 曲率上限
+        self.w_line = QtWidgets.QWidget()
+        lvl = QtWidgets.QVBoxLayout(self.w_line); lvl.setContentsMargins(0, 0, 0, 0)
+        trow, self.slider, self.spin = self._slider_spin_row(
+            "太さ", 0, 2000, 50, 3, 0.0, 2.0, 0.01, 0.05,
+            self._on_slider, self._on_spin, self._reset_thickness)
+        lvl.addLayout(trow)
+        c2row, self.cslider, self.cspin = self._slider_spin_row(
+            "曲率起伏", 0, 1000, 0, 2, 0.0, 10.0, 0.1, 0.0,
+            self._on_cslider, self._on_cspin, self._reset_curv)
+        lvl.addLayout(c2row)
+        c3row, self.cap_slider, self.cap_spin = self._slider_spin_row(
+            "曲率上限", 100, 1000, 300, 1, 1.0, 10.0, 0.5, 3.0,
+            self._on_cap_slider, self._on_cap_spin, self._reset_cap,
+            "起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
+        lvl.addLayout(c3row)
+        lay.addWidget(self.w_line)
 
-        # 曲率起伏（元メッシュの曲率に応じて太さに起伏。0=一様 / 曲がる所ほど太く）
-        c2row = QtWidgets.QHBoxLayout()
-        c2row.addWidget(QtWidgets.QLabel("曲率起伏"))
-        self.cslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.cslider.setRange(0, 1000)
-        self.cslider.setValue(0)
-        self.cspin = QtWidgets.QDoubleSpinBox()
-        self.cspin.setDecimals(2)
-        self.cspin.setRange(0.0, 10.0)
-        self.cspin.setSingleStep(0.1)
-        self.cspin.setValue(0.0)
-        self.cslider.valueChanged.connect(self._on_cslider)
-        self.cslider.sliderPressed.connect(self._begin_drag)
-        self.cslider.sliderReleased.connect(self._end_drag)
-        self.cspin.valueChanged.connect(self._on_cspin)
-        c2row.addWidget(self.cslider)
-        c2row.addWidget(self.cspin)
-        b_rc = QtWidgets.QPushButton("↺")
-        b_rc.setFixedWidth(26); b_rc.setToolTip("曲率起伏をリセット (0.0)")
-        b_rc.clicked.connect(self._reset_curv)
-        c2row.addWidget(b_rc)
-        lay.addLayout(c2row)
+        # グループ用パネル（グループ選択時のみ表示）: グループ倍率
+        self.w_group = QtWidgets.QWidget()
+        gvl = QtWidgets.QVBoxLayout(self.w_group); gvl.setContentsMargins(0, 0, 0, 0)
+        grow, self.grpslider, self.grpspin = self._slider_spin_row(
+            "グループ倍率", 0, 500, 100, 2, 0.0, 5.0, 0.05, 1.0,
+            self._on_grpslider, self._on_grpspin, self._reset_grpmult,
+            "選択グループの太さ倍率")
+        gvl.addLayout(grow)
+        lay.addWidget(self.w_group)
 
-        # 曲率起伏の上限（最大倍率）。角(顎など)が太くなりすぎないよう制限。
-        c3row = QtWidgets.QHBoxLayout()
-        c3row.addWidget(QtWidgets.QLabel("曲率上限"))
-        self.cap_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.cap_slider.setRange(100, 1000)   # /100 = 1.0〜10.0
-        self.cap_slider.setValue(300)
-        self.cap_spin = QtWidgets.QDoubleSpinBox()
-        self.cap_spin.setDecimals(1)
-        self.cap_spin.setRange(1.0, 10.0)
-        self.cap_spin.setSingleStep(0.5)
-        self.cap_spin.setValue(3.0)
-        self.cap_spin.setToolTip("起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
-        self.cap_slider.valueChanged.connect(self._on_cap_slider)
-        self.cap_slider.sliderPressed.connect(self._begin_drag)
-        self.cap_slider.sliderReleased.connect(self._end_drag)
-        self.cap_spin.valueChanged.connect(self._on_cap_spin)
-        c3row.addWidget(self.cap_slider)
-        c3row.addWidget(self.cap_spin)
-        b_rcap = QtWidgets.QPushButton("↺")
-        b_rcap.setFixedWidth(26); b_rcap.setToolTip("曲率上限をリセット (3.0)")
-        b_rcap.clicked.connect(self._reset_cap)
-        c3row.addWidget(b_rcap)
-        lay.addLayout(c3row)
-
-        # グループ倍率（選択中グループの全ラインに乗算）
-        grow = QtWidgets.QHBoxLayout()
-        grow.addWidget(QtWidgets.QLabel("グループ倍率"))
-        self.grpslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.grpslider.setRange(0, 500)   # /100 = 0.0〜5.0
-        self.grpslider.setValue(100)
-        self.grpspin = QtWidgets.QDoubleSpinBox()
-        self.grpspin.setDecimals(2)
-        self.grpspin.setRange(0.0, 5.0)
-        self.grpspin.setSingleStep(0.05)
-        self.grpspin.setValue(1.0)
-        self.grpspin.setToolTip("選択ラインの所属グループ（またはグループ選択時はそのグループ）の太さ倍率")
-        self.grpslider.valueChanged.connect(self._on_grpslider)
-        self.grpslider.sliderPressed.connect(self._begin_drag)
-        self.grpslider.sliderReleased.connect(self._end_drag)
-        self.grpspin.valueChanged.connect(self._on_grpspin)
-        grow.addWidget(self.grpslider)
-        grow.addWidget(self.grpspin)
-        b_rg = QtWidgets.QPushButton("↺")
-        b_rg.setFixedWidth(26); b_rg.setToolTip("グループ倍率をリセット (1.0)")
-        b_rg.clicked.connect(self._reset_grpmult)
-        grow.addWidget(b_rg)
-        lay.addLayout(grow)
-
-        # 全体倍率（全ラインに乗算）
-        arow = QtWidgets.QHBoxLayout()
-        arow.addWidget(QtWidgets.QLabel("全体倍率"))
-        self.gslider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.gslider.setRange(0, 500)
-        self.gslider.setValue(100)
-        self.gspin = QtWidgets.QDoubleSpinBox()
-        self.gspin.setDecimals(2)
-        self.gspin.setRange(0.0, 5.0)
-        self.gspin.setSingleStep(0.05)
-        self.gspin.setValue(1.0)
-        self.gspin.setToolTip("全アウトラインの太さ倍率")
-        self.gslider.valueChanged.connect(self._on_gslider)
-        self.gslider.sliderPressed.connect(self._begin_drag)
-        self.gslider.sliderReleased.connect(self._end_drag)
-        self.gspin.valueChanged.connect(self._on_gspin)
-        arow.addWidget(self.gslider)
-        arow.addWidget(self.gspin)
-        b_ra = QtWidgets.QPushButton("↺")
-        b_ra.setFixedWidth(26); b_ra.setToolTip("全体倍率をリセット (1.0)")
-        b_ra.clicked.connect(self._reset_gmult)
-        arow.addWidget(b_ra)
-        lay.addLayout(arow)
-
-        self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
+        self.lbl_hint = QtWidgets.QLabel("※ 値はツリーで選択したライン/グループに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_hint)
 
@@ -961,35 +923,42 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.warning("{} の表示属性を変更できません（接続/ロック）".format(_short(node)))
 
     # ---- 選択変更 → 太さUIを同期 ----
+    def _update_panels(self):
+        """選択種別に応じてライン用/グループ用パネルの表示を切替（全体は常時表示）。"""
+        nodes = self._selected_nodes()
+        has_line = any(cmds.attributeQuery(TAG, node=n, exists=True) for n in nodes)
+        has_group = any(cmds.attributeQuery(GROUP_TAG, node=n, exists=True) for n in nodes)
+        self.w_line.setVisible(has_line)
+        self.w_group.setVisible(has_group and not has_line)
+
     def _on_tree_selection(self):
-        lines = self._selected_lines()
-        if not lines:
-            return
-        ctrl = _ctrl_of(lines[0])
-        t = self._thickness_of(lines[0])
-        if t is not None:
-            self._set_thickness_widgets(t)
-        infl = 0.0
-        cap = None
-        if ctrl:
-            try:
-                infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
-            except Exception:
-                infl = 0.0
-            try:
-                cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
-            except Exception:
-                cap = None
-        self._set_curv_widgets(infl, cap)
-        # タイムスライダにキーを表示するため、コントローラーを Maya 選択
-        ctrls = [_ctrl_of(l) for l in lines]
+        self._update_panels()
+        self._set_mult_widgets()
+        # 選択ノードのコントローラーを Maya 選択（タイムスライダにキー表示）
+        ctrls = [_ctrl_of(n) for n in self._selected_nodes()]
         ctrls = [c for c in ctrls if c and cmds.objExists(c)]
         if ctrls:
             try:
                 cmds.select(ctrls, r=True)
             except Exception:
                 pass
-        self._set_mult_widgets()
+        lines = self._selected_lines()
+        if lines:
+            ctrl = _ctrl_of(lines[0])
+            t = self._thickness_of(lines[0])
+            if t is not None:
+                self._set_thickness_widgets(t)
+            infl, cap = 0.0, None
+            if ctrl:
+                try:
+                    infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
+                except Exception:
+                    infl = 0.0
+                try:
+                    cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
+                except Exception:
+                    cap = None
+            self._set_curv_widgets(infl, cap)
         self._update_key_colors()
 
     def _set_thickness_widgets(self, val):
