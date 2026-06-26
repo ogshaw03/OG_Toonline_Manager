@@ -73,7 +73,7 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 - 太さ = `lineCtrl.thickness × groupCtrl.thicknessMult × globalCtrl.thicknessMult`
   （`_ensure_thickness_chain`、multDoubleLinear 2段）。
 - ライングループ（GROUP_TAG）は **ROOT 直下 `Outline_grp`（`LINE_HOLDER`）の中**に格納。
-  UIツリーの太さ列にグループ倍率（x?.??）、ヘッダーに全体倍率を表示。
+  UIツリーの太さ列にグループ倍率（x?.??）を表示（ヘッダーは「名前/太さ/色」のみ）。
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。

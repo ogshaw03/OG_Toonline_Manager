@@ -981,7 +981,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
         # ライン／グループ ツリー（チェック=表示、色列=個別カラー、D&Dでグループ移動）
         self.tree = _OutlineTree(self)
-        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ", "色"])
+        self.tree.setHeaderLabels(["名前", "太さ", "色"])
         self.tree.setColumnWidth(0, 230)
         self.tree.setColumnWidth(1, 60)
         self.tree.setColumnWidth(2, 40)
@@ -1427,15 +1427,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         loose = self._loose_lines()
         if loose:
             self._add_group_item(None, loose, True)
-        # 太さ列ヘッダーに全体倍率を表示
-        gc = _find_global_ctrl()
-        gv = 1.0
-        if gc:
-            try:
-                gv = cmds.getAttr(gc + "." + GMULT)
-            except Exception:
-                pass
-        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
+        self.tree.setHeaderLabels(["名前", "太さ", "色"])
         self._stash_loose_handles()   # はみ出したハンドルを退避
         # 既存/再取得ラインにも現在の「選択不可」状態を反映
         lock = self._lock_select()
@@ -1636,16 +1628,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._update_mult_labels()
 
     def _update_mult_labels(self):
-        """ツリーのグループ倍率（太さ列）と全体倍率（ヘッダー）を再描画（再構築せず）。"""
+        """ツリーのグループ倍率（太さ列）を再描画（再構築せず）。"""
         self._populating = True
-        gc = _find_global_ctrl()
-        gv = 1.0
-        if gc:
-            try:
-                gv = cmds.getAttr(gc + "." + GMULT)
-            except Exception:
-                pass
-        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
             gi = root.child(i)
