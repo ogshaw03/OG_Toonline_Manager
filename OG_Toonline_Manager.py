@@ -356,6 +356,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
         return h
 
+    def _stash_loose_handles(self):
+        """トップレベル（ワールド直下）に残った textureDeformerHandle をホルダーへ退避。"""
+        loose = []
+        for h in cmds.ls("textureDeformerHandle*", type="transform", long=True) or []:
+            if not (cmds.listRelatives(h, parent=True) or []):
+                loose.append(h)
+        if not loose:
+            return
+        holder = self._ensure_handle_holder()
+        for h in loose:
+            try:
+                cmds.setAttr(h + ".visibility", 0)
+                cmds.parent(h, holder)
+            except Exception:
+                pass
+
     def _cleanup_orphan_handles(self):
         """どの textureDeformer にも繋がっていないハンドルとホルダーを掃除する。"""
         for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
@@ -731,10 +747,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 td = cmds.textureDeformer(dshape, strength=0, offset=thick, direction="Normal")
                 defm = td[0]
                 # ハンドルはデフォーマに接続された transform として特定する
-                # （戻り値に含まれない版があるため接続から拾うのが確実）。
+                # （戻り値に含まれない版があるため接続から拾う。方向フィルタは付けない）。
                 handle = None
-                for c in (cmds.listConnections(defm, source=True, destination=False,
-                                               type="transform") or []):
+                for c in (cmds.listConnections(defm, type="transform") or []):
                     if "textureDeformerHandle" in _short(c):
                         handle = c
                         break
@@ -773,6 +788,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 made.append(dup)
             if made:
                 cmds.select(made, r=True)
+            # 取りこぼしたハンドルがあればトップから退避（確実化）
+            self._stash_loose_handles()
         finally:
             cmds.undoInfo(closeChunk=True)
 
