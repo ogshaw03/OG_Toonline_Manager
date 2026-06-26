@@ -40,7 +40,8 @@ TAG       = "isToonOutline"         # ライン識別タグ
 GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
 DEFAULT_GROUP = "Outline_Group1"
 HANDLE_HOLDER = "toonOutline_handles"   # textureDeformerHandle 退避用の非表示ホルダー
-CTRL_HOLDER   = "toonOutline_ctrls"     # ラインコントローラー格納グループ（ROOT 直下）
+CTRL_HOLDER   = "toonOutline_ctrls"     # 旧: ラインコントローラー格納グループ（互換掃除用）
+LINE_HOLDER   = "Outline_grp"           # ライングループの格納グループ（ROOT 直下）
 COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接頭辞
 THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
 THICK_ATTR = "offset"               # 現在法線方向への一定オフセット（太さ）
@@ -51,7 +52,11 @@ CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
-GMULT       = "thicknessMult"        # グループ/全体(ROOT) の太さ倍率アトリビュート
+GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
+GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
+COL_GLOBAL  = (0.2, 0.45, 1.0)       # 全体=青
+COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
+COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
 
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
@@ -173,71 +178,20 @@ def _ctrl_of(line):
     return None
 
 
-def _ensure_ctrl_holder():
-    """コントローラー格納グループ（ROOT 直下）を確保。"""
-    _ensure_root()
-    for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
-        if _short(c) == CTRL_HOLDER:
-            return c
-    return cmds.group(em=True, name=CTRL_HOLDER, parent=ROOT)
+def _set_outliner_color(node, rgb):
+    try:
+        cmds.setAttr(node + ".useOutlinerColor", 1)
+        cmds.setAttr(node + ".outlinerColor", rgb[0], rgb[1], rgb[2], type="double3")
+    except Exception:
+        pass
 
 
-def _create_controller(line, thick):
-    """ライン用の独立コントローラー（ロケーター）を作り、コントローラーグループへ格納。"""
-    # シェイプ無しの素の transform。アウトライナーの文字色（useOutlinerColor/outlinerColor）
-    # を付けて識別しやすくする（ビューポートには何も出ない）。
-    ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
-    try:
-        cmds.setAttr(ctrl + ".useOutlinerColor", 1)
-        cmds.setAttr(ctrl + ".outlinerColor", 1.0, 0.8, 0.0, type="double3")  # 黄
-    except Exception:
-        pass
-    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
-        cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
-    if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
-        cmds.addAttr(line, ln=CTRL_LINK, at="message")
-    try:
-        cmds.connectAttr(ctrl + ".message", line + "." + CTRL_LINK, f=True)
-    except Exception:
-        pass
-    # コントローラーグループへ格納（独立配置。ラインの子にはしない）
-    try:
-        ctrl = cmds.parent(ctrl, _ensure_ctrl_holder())[0]
-    except Exception:
-        pass
-    # 標準チャンネル(TRS/可視)はロック&非表示 → 3チャンネルのみ見せる
+def _lock_trs(node):
     for at in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "v"):
         try:
-            cmds.setAttr(ctrl + "." + at, lock=True, keyable=False, channelBox=False)
+            cmds.setAttr(node + "." + at, lock=True, keyable=False, channelBox=False)
         except Exception:
             pass
-    return ctrl
-
-
-def _ensure_line_anim(line, default_thick=0.05):
-    """コントローラーを確保し、太さを deformer.offset へ接続、追従ジョブを張る。"""
-    defm = _line_deformer(line)
-    ctrl = _ctrl_of(line)
-    if ctrl is None:
-        thick = default_thick
-        if defm:
-            try:
-                thick = cmds.getAttr(defm + ".offset")
-            except Exception:
-                pass
-        ctrl = _create_controller(line, thick)
-    else:
-        # 旧データ（ラインの子など）はコントローラーグループへ移す
-        holder = _ensure_ctrl_holder()
-        par = cmds.listRelatives(ctrl, parent=True, f=True) or []
-        if not par or _short(par[0]) != CTRL_HOLDER:
-            try:
-                ctrl = cmds.parent(ctrl, holder)[0]
-            except Exception:
-                pass
-    _ensure_thickness_chain(line)
-    _ensure_curv_jobs(line)
-    return ctrl
 
 
 def _ensure_mult_attr(node):
@@ -255,18 +209,108 @@ def _line_group(line):
     return None
 
 
+def _find_global_ctrl():
+    if not cmds.objExists(ROOT):
+        return None
+    for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+        if _short(c) == GLOBAL_CTRL:
+            return c
+    return None
+
+
+def _ensure_global_ctrl():
+    """全体コントローラー（青・thicknessMult）を ROOT 直下に確保。コントローラー階層の親。"""
+    _ensure_root()
+    gc = None
+    for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+        if _short(c) == GLOBAL_CTRL:
+            gc = c
+            break
+    if gc is None:
+        gc = cmds.createNode("transform", name=GLOBAL_CTRL)
+        gc = cmds.parent(gc, ROOT)[0]
+    _ensure_mult_attr(gc)
+    _set_outliner_color(gc, COL_GLOBAL)
+    _lock_trs(gc)
+    return gc
+
+
+def _ensure_group_ctrl(group):
+    """グループコントローラー（黄緑・thicknessMult）を全体コントローラー配下に確保。"""
+    gctrl_parent = _ensure_global_ctrl()
+    gc = _ctrl_of(group)
+    if gc is None or not cmds.objExists(gc):
+        gc = cmds.createNode("transform", name=_short(group) + CTRL_SUFFIX)
+        if not cmds.attributeQuery(CTRL_LINK, node=group, exists=True):
+            cmds.addAttr(group, ln=CTRL_LINK, at="message")
+        try:
+            cmds.connectAttr(gc + ".message", group + "." + CTRL_LINK, f=True)
+        except Exception:
+            pass
+    # 全体コントローラー配下へ
+    par = cmds.listRelatives(gc, parent=True, f=True) or []
+    if not par or _short(par[0]) != GLOBAL_CTRL:
+        try:
+            gc = cmds.parent(gc, gctrl_parent)[0]
+        except Exception:
+            pass
+    _ensure_mult_attr(gc)
+    _set_outliner_color(gc, COL_GROUP)
+    _lock_trs(gc)
+    return gc
+
+
+def _create_line_ctrl(line, thick):
+    """ライン用コントローラー（黄）を作成し、line と message で関連付ける（親子付けは呼び出し側）。"""
+    ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
+    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
+        cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
+    if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
+        cmds.addAttr(line, ln=CTRL_LINK, at="message")
+    try:
+        cmds.connectAttr(ctrl + ".message", line + "." + CTRL_LINK, f=True)
+    except Exception:
+        pass
+    return ctrl
+
+
+def _ensure_line_anim(line, default_thick=0.05):
+    """コントローラー階層（全体>グループ>ライン）を確保し、太さ乗算チェーンと追従ジョブを張る。"""
+    defm = _line_deformer(line)
+    ctrl = _ctrl_of(line)
+    if ctrl is None:
+        thick = default_thick
+        if defm:
+            try:
+                thick = cmds.getAttr(defm + ".offset")
+            except Exception:
+                pass
+        ctrl = _create_line_ctrl(line, thick)
+    # ラインコントローラーを 所属グループのコントローラー（無ければ全体コントローラー）配下へ
+    grp = _line_group(line)
+    parent_ctrl = _ensure_group_ctrl(grp) if grp else _ensure_global_ctrl()
+    par = cmds.listRelatives(ctrl, parent=True, f=True) or []
+    if not par or _short(par[0]) != _short(parent_ctrl):
+        try:
+            ctrl = cmds.parent(ctrl, parent_ctrl)[0]
+        except Exception:
+            pass
+    _set_outliner_color(ctrl, COL_LINE)
+    _lock_trs(ctrl)
+    _ensure_thickness_chain(line)
+    _ensure_curv_jobs(line)
+    return ctrl
+
+
 def _ensure_thickness_chain(line):
-    """offset = ctrl.thickness * group.thicknessMult * ROOT.thicknessMult を DG で構築。
-    ライン値・グループ倍率・全体倍率を乗算し、すべてアニメ可能に保つ。"""
+    """offset = lineCtrl.thickness * groupCtrl.thicknessMult * globalCtrl.thicknessMult を DG で構築。"""
     defm = _line_deformer(line)
     ctrl = _ctrl_of(line)
     if not defm or not ctrl:
         return
-    _ensure_root()
-    _ensure_mult_attr(ROOT)
+    gctrl = _ensure_global_ctrl()
     grp = _line_group(line)
-    if grp:
-        _ensure_mult_attr(grp)
+    grpctrl = _ensure_group_ctrl(grp) if grp else None
     base = _short(ctrl)
     mA = base + "_thkA"
     mB = base + "_thkB"
@@ -274,7 +318,7 @@ def _ensure_thickness_chain(line):
         mA = cmds.createNode("multDoubleLinear", name=mA)
     if not cmds.objExists(mB):
         mB = cmds.createNode("multDoubleLinear", name=mB)
-    # mA = ctrl.thickness * groupMult
+    # mA = lineCtrl.thickness * groupCtrl.thicknessMult
     try:
         cmds.connectAttr(ctrl + "." + CTRL_THICK, mA + ".input1", f=True)
     except Exception:
@@ -284,9 +328,9 @@ def _ensure_thickness_chain(line):
             cmds.disconnectAttr(p, mA + ".input2")
         except Exception:
             pass
-    if grp:
+    if grpctrl:
         try:
-            cmds.connectAttr(grp + "." + GMULT, mA + ".input2", f=True)
+            cmds.connectAttr(grpctrl + "." + GMULT, mA + ".input2", f=True)
         except Exception:
             pass
     else:
@@ -294,10 +338,10 @@ def _ensure_thickness_chain(line):
             cmds.setAttr(mA + ".input2", 1.0)
         except Exception:
             pass
-    # mB = mA * globalMult → offset
+    # mB = mA * globalCtrl.thicknessMult → offset
     try:
         cmds.connectAttr(mA + ".output", mB + ".input1", f=True)
-        cmds.connectAttr(ROOT + "." + GMULT, mB + ".input2", f=True)
+        cmds.connectAttr(gctrl + "." + GMULT, mB + ".input2", f=True)
         cmds.connectAttr(mB + ".output", defm + ".offset", f=True)
     except Exception:
         pass
@@ -605,12 +649,42 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lay.addLayout(mrow)
 
     # ========== シーン走査ヘルパ ==========
+    def _ensure_line_holder(self):
+        """ライングループの格納グループ（ROOT 直下 Outline_grp）を確保。"""
+        _ensure_root()
+        for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+            if _short(c) == LINE_HOLDER:
+                return c
+        return cmds.group(em=True, name=LINE_HOLDER, parent=ROOT)
+
+    def _find_line_holder(self):
+        if not cmds.objExists(ROOT):
+            return None
+        for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+            if _short(c) == LINE_HOLDER:
+                return c
+        return None
+
     def _managed_groups(self):
-        """ROOT 直下のグループ（GROUP_TAG 付き）。"""
+        """ライングループ（GROUP_TAG 付き）。Outline_grp 配下。旧 ROOT 直下のものは移行する。
+        ※ 空のときにホルダーを作らない（ツール起動だけでノードを作らないため）。"""
         if not cmds.objExists(ROOT):
             return []
+        # 旧データ: ROOT 直下のグループがあれば Outline_grp へ移す
+        direct = [t for t in (cmds.listRelatives(ROOT, children=True, type="transform", f=True) or [])
+                  if cmds.attributeQuery(GROUP_TAG, node=t, exists=True)]
+        if direct:
+            holder = self._ensure_line_holder()
+            for t in direct:
+                try:
+                    cmds.parent(t, holder)
+                except Exception:
+                    pass
+        holder = self._find_line_holder()
+        if not holder:
+            return []
         out = []
-        for t in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+        for t in cmds.listRelatives(holder, children=True, type="transform", f=True) or []:
             if cmds.attributeQuery(GROUP_TAG, node=t, exists=True):
                 out.append(t)
         return out
@@ -624,11 +698,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return out
 
     def _loose_lines(self):
-        """ROOT 直下に直接ぶら下がっているライン（グループ未所属）。"""
-        if not cmds.objExists(ROOT):
+        """Outline_grp 直下に直接ぶら下がっているライン（グループ未所属）。"""
+        holder = self._find_line_holder()
+        if not holder:
             return []
         out = []
-        for t in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+        for t in cmds.listRelatives(holder, children=True, type="transform", f=True) or []:
             if cmds.attributeQuery(TAG, node=t, exists=True):
                 out.append(t)
         return out
@@ -675,12 +750,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return None
 
     def _ensure_group(self, name):
-        """指定名のグループを ROOT 直下に確保して返す。"""
-        _ensure_root()
+        """指定名のグループを Outline_grp 配下に確保して返す。"""
         for g in self._managed_groups():
             if _short(g) == name:
                 return g
-        grp = cmds.group(em=True, name=name, parent=ROOT)
+        grp = cmds.group(em=True, name=name, parent=self._ensure_line_holder())
         cmds.addAttr(grp, ln=GROUP_TAG, at="bool", dv=True)
         return grp
 
@@ -733,20 +807,31 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 pass
 
     def _cleanup_orphan_ctrls(self):
-        """リンク先ラインが消えたコントローラーと、空のコントローラーグループを掃除する。"""
-        if cmds.objExists(CTRL_HOLDER):
-            for c in cmds.listRelatives(CTRL_HOLDER, children=True, type="transform", f=True) or []:
+        """リンク先（ライン/グループ）が消えたコントローラーと空の全体コントローラーを掃除。"""
+        gc = _find_global_ctrl()
+        if gc:
+            orphans = []
+            for c in cmds.listRelatives(gc, allDescendents=True, type="transform", f=True) or []:
                 dest = cmds.listConnections(c + ".message", s=False, d=True) or []
                 if not any(cmds.objExists(d) for d in dest):
+                    orphans.append(c)
+            for c in orphans:
+                if cmds.objExists(c):
                     try:
                         cmds.delete(c)
                     except Exception:
                         pass
-            if not (cmds.listRelatives(CTRL_HOLDER, c=True) or []):
+            if cmds.objExists(gc) and not (cmds.listRelatives(gc, children=True, type="transform") or []):
                 try:
-                    cmds.delete(CTRL_HOLDER)
+                    cmds.delete(gc)
                 except Exception:
                     pass
+        # 旧 toonOutline_ctrls が空で残っていれば掃除
+        if cmds.objExists(CTRL_HOLDER) and not (cmds.listRelatives(CTRL_HOLDER, c=True) or []):
+            try:
+                cmds.delete(CTRL_HOLDER)
+            except Exception:
+                pass
 
     def _ensure_line_shader(self, line):
         """ラインの個別カラー用 surfaceShader/SG を確保。"""
@@ -792,6 +877,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
             gi.setFlags((gi.flags() | QtCore.Qt.ItemIsUserCheckable
                          | QtCore.Qt.ItemIsDropEnabled) & ~QtCore.Qt.ItemIsDragEnabled)
             gi.setCheckState(0, QtCore.Qt.Checked if visible else QtCore.Qt.Unchecked)
+            # 太さ列にグループ倍率を表示
+            grpctrl = _ensure_group_ctrl(group_node)
+            gm = 1.0
+            try:
+                gm = cmds.getAttr(grpctrl + "." + GMULT)
+            except Exception:
+                pass
+            gi.setText(1, "x{:.2f}".format(gm))
         else:
             gi.setFlags((gi.flags() | QtCore.Qt.ItemIsDropEnabled)
                         & ~QtCore.Qt.ItemIsUserCheckable & ~QtCore.Qt.ItemIsDragEnabled)
@@ -818,6 +911,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         loose = self._loose_lines()
         if loose:
             self._add_group_item(None, loose, True)
+        # 太さ列ヘッダーに全体倍率を表示
+        gc = _find_global_ctrl()
+        gv = 1.0
+        if gc:
+            try:
+                gv = cmds.getAttr(gc + "." + GMULT)
+            except Exception:
+                pass
+        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
         self._populating = False
         self._refresh_group_combo()
 
@@ -952,14 +1054,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if chunk:
             cmds.undoInfo(openChunk=True)
         try:
-            _ensure_mult_attr(grp)
+            grpctrl = _ensure_group_ctrl(grp)
             try:
-                cmds.setAttr(grp + "." + GMULT, val)
+                cmds.setAttr(grpctrl + "." + GMULT, val)
             except Exception:
                 pass
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
+        self._update_mult_labels()
 
     def _on_gslider(self, v):
         val = v / 100.0
@@ -971,26 +1074,53 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._apply_global_mult(val)
 
     def _apply_global_mult(self, val):
-        _ensure_root()
-        _ensure_mult_attr(ROOT)
         chunk = not self._dragging
         if chunk:
             cmds.undoInfo(openChunk=True)
         try:
+            gc = _ensure_global_ctrl()
             try:
-                cmds.setAttr(ROOT + "." + GMULT, val)
+                cmds.setAttr(gc + "." + GMULT, val)
             except Exception:
                 pass
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
+        self._update_mult_labels()
+
+    def _update_mult_labels(self):
+        """ツリーのグループ倍率（太さ列）と全体倍率（ヘッダー）を再描画（再構築せず）。"""
+        self._populating = True
+        gc = _find_global_ctrl()
+        gv = 1.0
+        if gc:
+            try:
+                gv = cmds.getAttr(gc + "." + GMULT)
+            except Exception:
+                pass
+        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            gi = root.child(i)
+            node = gi.data(0, QtCore.Qt.UserRole)
+            if node and cmds.objExists(node) and cmds.attributeQuery(GROUP_TAG, node=node, exists=True):
+                grpctrl = _ctrl_of(node)
+                gm = 1.0
+                if grpctrl:
+                    try:
+                        gm = cmds.getAttr(grpctrl + "." + GMULT)
+                    except Exception:
+                        pass
+                gi.setText(1, "x{:.2f}".format(gm))
+        self._populating = False
 
     def _set_mult_widgets(self):
         """選択に応じてグループ倍率・全体倍率スライダーを現在値へ同期。"""
         g = 1.0
-        if cmds.objExists(ROOT) and cmds.attributeQuery(GMULT, node=ROOT, exists=True):
+        gc = _find_global_ctrl()
+        if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
             try:
-                g = cmds.getAttr(ROOT + "." + GMULT)
+                g = cmds.getAttr(gc + "." + GMULT)
             except Exception:
                 g = 1.0
         self.gspin.blockSignals(True); self.gslider.blockSignals(True)
@@ -998,9 +1128,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.gspin.blockSignals(False); self.gslider.blockSignals(False)
         grp = self._target_group()
         gm = 1.0
-        if grp and cmds.attributeQuery(GMULT, node=grp, exists=True):
+        grpctrl = _ctrl_of(grp) if grp else None
+        if grpctrl and cmds.attributeQuery(GMULT, node=grpctrl, exists=True):
             try:
-                gm = cmds.getAttr(grp + "." + GMULT)
+                gm = cmds.getAttr(grpctrl + "." + GMULT)
             except Exception:
                 gm = 1.0
         self.grpspin.blockSignals(True); self.grpslider.blockSignals(True)
@@ -1419,6 +1550,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if cmds.attributeQuery(TAG, node=n, exists=True):
                 _gather(n)
             if cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
+                gc = _ctrl_of(n)          # グループコントローラーも削除
+                if gc:
+                    victims.add(gc)
                 for d in cmds.listRelatives(n, ad=True, type="transform", f=True) or []:
                     if cmds.attributeQuery(TAG, node=d, exists=True):
                         _gather(d)
@@ -1428,6 +1562,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             # 孤立したハンドル／コントローラー／空ホルダーを掃除
             self._cleanup_orphan_handles()
             self._cleanup_orphan_ctrls()
+            if cmds.objExists(LINE_HOLDER) and not (cmds.listRelatives(LINE_HOLDER, c=True) or []):
+                cmds.delete(LINE_HOLDER)
             # 空になった ROOT は片付ける
             if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
                 cmds.delete(ROOT)

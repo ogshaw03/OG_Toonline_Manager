@@ -56,14 +56,19 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 
 ### アニメーション（ラインコントローラー）
 
-各ラインに**独立したコントローラーノード**（素の `transform` `<line>_ctrl`、シェイプ無し。
-`useOutlinerColor`/`outlinerColor`=黄でアウトライナーの文字を色付き表示にし識別しやすく。
-※ `overrideColor` はビューポート用でアウトライナーには効かないので使わない）を作り、
-**キーアブルな英語アトリビュート** `thickness`/`curvature`/`curvatureCap` を持たせる
-（`CTRL_THICK`/`CTRL_CURV`/`CTRL_CAP`）。メッシュ本体には属性を置かない。
-- コントローラーは **ROOT 直下の `toonOutline_ctrls` グループ**に格納（ラインの子にはしない）。
-  TRS/可視はロック&非表示で3チャンネルだけ見せる。`ctrl.message → line.toonCtrl` で関連付け
-  （`_ctrl_of`）。ライン削除時は `delete_selected`＋`_cleanup_orphan_ctrls` で一緒に掃除。
+コントローラーは **全体>グループ>ライン の3階層**（すべて素の `transform`、シェイプ無し。
+`useOutlinerColor`/`outlinerColor` でアウトライナーの文字を色分け。`overrideColor` はビューポート
+用なので使わない）:
+- **全体** `toonOutline_globalCtrl`（青 / `thicknessMult`）= ROOT 直下、コントローラー階層の親。
+- **グループ** `<group>_ctrl`（黄緑 / `thicknessMult`）= 全体コントローラー配下。`group.toonCtrl`。
+- **ライン** `<line>_ctrl`（黄 / `thickness`/`curvature`/`curvatureCap`、`CTRL_THICK`等）=
+  所属グループのコントローラー配下。`line.toonCtrl`。メッシュ本体には属性を置かない。
+- 関連付けは `ctrl.message → node.toonCtrl`（`_ctrl_of`）。TRS/可視はロック&非表示。
+  ライン/グループ削除時は `delete_selected`＋`_cleanup_orphan_ctrls` で一緒に掃除。
+- 太さ = `lineCtrl.thickness × groupCtrl.thicknessMult × globalCtrl.thicknessMult`
+  （`_ensure_thickness_chain`、multDoubleLinear 2段）。
+- ライングループ（GROUP_TAG）は **ROOT 直下 `Outline_grp`（`LINE_HOLDER`）の中**に格納。
+  UIツリーの太さ列にグループ倍率（x?.??）、ヘッダーに全体倍率を表示。
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。
