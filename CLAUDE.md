@@ -43,12 +43,11 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 3. 変形追従は **outMesh を textureDeformer のベース入力 `input[0].inputGeometry` に接続**。
    先に静的複製へ deformer を付けてから接続する（先に inMesh へ直結すると評価が壊れて歪む）。
    生成される textureDeformerHandle は **削除すると offset(太さ) が効かなくなる**ため、
-   visibility=0 で dup の子に格納してアウトライナーを整理する（削除不可）。
-   ※ ハンドルは戻り値に含まれない版があるので、**デフォーマに接続された transform**
-     （`listConnections(defm, type="transform")` で名前に textureDeformerHandle を含むもの）
-     として特定する。削除は offset を壊すので不可。また**変形対象メッシュ(dup)配下には
-     親子付けできない**ため、ROOT 直下の非表示ホルダー `toonOutline_handles` へ退避する。
-     ライン削除時は `_cleanup_orphan_handles` で孤立ハンドルと空ホルダーを掃除。
+   削除すると offset が壊れるので不可。代わりに `_tuck_handle` で **`hiddenInOutliner=1`
+   ＋ `visibility=0`** にしてその場で隠す（**専用グループは作らない**）。
+   ※ ハンドルは戻り値に含まれない版があるので、`listConnections(defm, type="transform")` で
+     名前に textureDeformerHandle を含むものとして特定。`_stash_loose_handles` が全ハンドルを
+     隠し、旧 `toonOutline_handles` グループがあれば解体。孤立分は `_cleanup_orphan_handles`。
    曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
    `weight[i]=min(曲率上限, 1+影響度*|曲率[i]|)`（曲がる所＝太く・直線＝細く、曲率上限で角の
    太り過ぎを抑制）。曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。

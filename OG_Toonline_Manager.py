@@ -739,29 +739,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         name = self.group_combo.currentText().strip() if self.group_combo.count() else ""
         return self._ensure_group(name or DEFAULT_GROUP)
 
-    def _ensure_handle_holder(self):
-        """textureDeformerHandle を格納する ROOT 直下の非表示ホルダー。
-        ハンドルは変形対象メッシュの配下に親子付けできないため、ここへ退避する。"""
-        _ensure_root()
-        for c in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
-            if _short(c) == HANDLE_HOLDER:
-                return c
-        h = cmds.group(em=True, name=HANDLE_HOLDER, parent=ROOT)
-        try:
-            cmds.setAttr(h + ".visibility", 0)
-        except Exception:
-            pass
-        return h
-
     def _tuck_handle(self, h):
-        """ハンドルをアウトライナーから隠す＋非表示＋ホルダーへ退避（各処理は独立）。"""
+        """ハンドルをアウトライナー＆ビューポートから隠す（グループは作らない・その場で隠す）。"""
         if not (h and cmds.objExists(h)):
             return
-        holder = self._ensure_handle_holder()
         for fn in (
             lambda: cmds.setAttr(h + ".hiddenInOutliner", 1),
             lambda: cmds.setAttr(h + ".visibility", 0),
-            lambda: cmds.parent(h, holder),
         ):
             try:
                 fn()
@@ -769,11 +753,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 pass
 
     def _stash_loose_handles(self):
-        """ホルダー外の textureDeformerHandle を退避＆アウトライナーから隠す。"""
-        for h in cmds.ls("textureDeformerHandle*", type="transform", long=True) or []:
-            par = cmds.listRelatives(h, parent=True) or []
-            if par and _short(par[0]) == HANDLE_HOLDER:
-                continue
+        """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
+        # 旧 toonOutline_handles グループを解体（中身をワールドへ出して削除）
+        if cmds.objExists(HANDLE_HOLDER):
+            for c in cmds.listRelatives(HANDLE_HOLDER, children=True, type="transform", f=True) or []:
+                try:
+                    cmds.parent(c, world=True)
+                except Exception:
+                    pass
+            try:
+                cmds.delete(HANDLE_HOLDER)
+            except Exception:
+                pass
+        for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
             self._tuck_handle(h)
         # アウトライナーを更新して hiddenInOutliner を反映
         try:
@@ -783,18 +775,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
 
     def _cleanup_orphan_handles(self):
-        """どの textureDeformer にも繋がっていないハンドルとホルダーを掃除する。"""
+        """どの textureDeformer にも繋がっていないハンドルを削除する。"""
         for h in cmds.ls("textureDeformerHandle*", type="transform") or []:
             if not (cmds.listConnections(h, type="textureDeformer") or []):
                 try:
                     cmds.delete(h)
                 except Exception:
                     pass
-        if cmds.objExists(HANDLE_HOLDER) and not (cmds.listRelatives(HANDLE_HOLDER, c=True) or []):
-            try:
-                cmds.delete(HANDLE_HOLDER)
-            except Exception:
-                pass
 
     def _cleanup_orphan_ctrls(self):
         """リンク先（ライン/グループ）が消えたコントローラーと空の全体コントローラーを掃除。"""
@@ -1314,26 +1301,28 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._style_spin(self.gspin, st)
 
     def _on_time_changed(self):
-        """フレーム変更時：選択ラインの現在値をスライダーへ反映し、キー色を更新。"""
+        """フレーム変更時：選択中の値をスライダーへ反映し、キー色を更新（ライン/グループ/全体）。"""
         lines = self._selected_lines()
-        if not lines:
-            return
-        t = self._thickness_of(lines[0])
-        if t is not None:
-            self._set_thickness_widgets(t)   # blockSignals 済み → 適用は走らない
-        ctrl = _ctrl_of(lines[0])
-        if ctrl:
-            infl = cap = None
-            try:
-                infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
-            except Exception:
-                pass
-            try:
-                cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
-            except Exception:
-                pass
-            if infl is not None:
-                self._set_curv_widgets(infl, cap)
+        if lines:
+            t = self._thickness_of(lines[0])
+            if t is not None:
+                self._set_thickness_widgets(t)   # blockSignals 済み → 適用は走らない
+            ctrl = _ctrl_of(lines[0])
+            if ctrl:
+                infl = cap = None
+                try:
+                    infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
+                except Exception:
+                    pass
+                try:
+                    cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
+                except Exception:
+                    pass
+                if infl is not None:
+                    self._set_curv_widgets(infl, cap)
+        # グループ/全体倍率の値・キー色もラインと同様に追従
+        self._set_mult_widgets()
+        self._update_mult_labels()
         self._update_key_colors()
 
     # ========== カラー ==========
