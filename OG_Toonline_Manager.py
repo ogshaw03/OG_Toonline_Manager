@@ -141,6 +141,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._curv_cache = {}          # line名 -> 正規化曲率リスト
+        self._dragging = False         # スライダードラッグ中（undoチャンク制御）
         self._build()
         self.refresh_tree()
 
@@ -191,6 +192,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spin.setSingleStep(0.01)
         self.spin.setValue(0.05)
         self.slider.valueChanged.connect(self._on_slider)
+        self.slider.sliderPressed.connect(self._begin_drag)
+        self.slider.sliderReleased.connect(self._end_drag)
         self.spin.valueChanged.connect(self._on_spin)
         trow.addWidget(self.slider)
         trow.addWidget(self.spin)
@@ -212,6 +215,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cspin.setSingleStep(0.1)
         self.cspin.setValue(0.0)
         self.cslider.valueChanged.connect(self._on_cslider)
+        self.cslider.sliderPressed.connect(self._begin_drag)
+        self.cslider.sliderReleased.connect(self._end_drag)
         self.cspin.valueChanged.connect(self._on_cspin)
         c2row.addWidget(self.cslider)
         c2row.addWidget(self.cspin)
@@ -234,6 +239,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cap_spin.setValue(3.0)
         self.cap_spin.setToolTip("起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
         self.cap_slider.valueChanged.connect(self._on_cap_slider)
+        self.cap_slider.sliderPressed.connect(self._begin_drag)
+        self.cap_slider.sliderReleased.connect(self._end_drag)
         self.cap_spin.valueChanged.connect(self._on_cap_spin)
         c3row.addWidget(self.cap_slider)
         c3row.addWidget(self.cap_spin)
@@ -534,6 +541,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.slider.setValue(int(val * 1000))
         self.slider.blockSignals(False); self.spin.blockSignals(False)
 
+    # ========== undo 制御 ==========
+    def _begin_drag(self):
+        """スライダー押下：ドラッグ全体を1つの undo チャンクにまとめる。"""
+        self._dragging = True
+        cmds.undoInfo(openChunk=True)
+
+    def _end_drag(self):
+        cmds.undoInfo(closeChunk=True)
+        self._dragging = False
+
     # ========== リセット ==========
     def _reset_thickness(self):
         self.spin.setValue(0.05)   # spin の valueChanged が適用＋slider同期する
@@ -558,13 +575,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lines = self._selected_lines()
         if not lines:
             return
-        for line in lines:
-            node = self._thick_node_for(line)
-            if node and cmds.objExists(node):
-                try:
-                    cmds.setAttr(node + "." + THICK_ATTR, val)
-                except Exception:
-                    pass
+        chunk = not self._dragging   # ドラッグ中は _begin/_end_drag のチャンクに含める
+        if chunk:
+            cmds.undoInfo(openChunk=True)
+        try:
+            for line in lines:
+                node = self._thick_node_for(line)
+                if node and cmds.objExists(node):
+                    try:
+                        cmds.setAttr(node + "." + THICK_ATTR, val)
+                    except Exception:
+                        pass
+        finally:
+            if chunk:
+                cmds.undoInfo(closeChunk=True)
         # ツリーの太さ表示を更新
         self._populating = True
         for it in self.tree.selectedItems():
@@ -633,32 +657,39 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         influence = self.cspin.value()
         cap = self.cap_spin.value()
-        for line in lines:
-            defm = self._thick_node_for(line)
-            if not defm or not cmds.objExists(defm):
-                continue
-            curv = self._curvature_of(line)
-            n = len(curv)
-            if n == 0:
-                continue
-            # weight[i] = min(曲率上限, 1 + 影響度 * |曲率|)：曲がる所ほど太く・直線は細く、
-            #   曲率上限で角(顎など)の太り過ぎを抑制。0 で一様。
-            weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
-            try:
-                cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
-            except Exception:
-                pass
-            # 影響度・曲率上限をラインに保存（選択同期・再開用）
-            for at, v in (("toonCurv", influence), ("toonCurvCap", cap)):
-                if not cmds.attributeQuery(at, node=line, exists=True):
-                    try:
-                        cmds.addAttr(line, ln=at, at="double", dv=0.0)
-                    except Exception:
-                        pass
+        chunk = not self._dragging   # ドラッグ中は _begin/_end_drag のチャンクに含める
+        if chunk:
+            cmds.undoInfo(openChunk=True)
+        try:
+            for line in lines:
+                defm = self._thick_node_for(line)
+                if not defm or not cmds.objExists(defm):
+                    continue
+                curv = self._curvature_of(line)
+                n = len(curv)
+                if n == 0:
+                    continue
+                # weight[i] = min(曲率上限, 1 + 影響度 * |曲率|)：曲がる所ほど太く・直線は細く、
+                #   曲率上限で角(顎など)の太り過ぎを抑制。0 で一様。
+                weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
                 try:
-                    cmds.setAttr(line + "." + at, v)
+                    cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
                 except Exception:
                     pass
+                # 影響度・曲率上限をラインに保存（選択同期・再開用）
+                for at, v in (("toonCurv", influence), ("toonCurvCap", cap)):
+                    if not cmds.attributeQuery(at, node=line, exists=True):
+                        try:
+                            cmds.addAttr(line, ln=at, at="double", dv=0.0)
+                        except Exception:
+                            pass
+                    try:
+                        cmds.setAttr(line + "." + at, v)
+                    except Exception:
+                        pass
+        finally:
+            if chunk:
+                cmds.undoInfo(closeChunk=True)
 
     # ========== カラー ==========
     def _refresh_swatch(self):
@@ -673,9 +704,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._color = [c.redF(), c.greenF(), c.blueF()]
             self._refresh_swatch()
             if cmds.objExists(SHADER):
-                cmds.setAttr(SHADER + ".outColor",
-                             self._color[0], self._color[1], self._color[2],
-                             type="double3")
+                cmds.undoInfo(openChunk=True)
+                try:
+                    cmds.setAttr(SHADER + ".outColor",
+                                 self._color[0], self._color[1], self._color[2],
+                                 type="double3")
+                finally:
+                    cmds.undoInfo(closeChunk=True)
             self.refresh_tree()
 
     def set_individual_color(self):
@@ -827,10 +862,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         new = (new or "").strip()
         if not ok or not new or new == old:
             return
+        cmds.undoInfo(openChunk=True)
         try:
             cmds.rename(node, new)
         except Exception:
             cmds.warning("リネームに失敗しました: {}".format(new))
+        finally:
+            cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
 
     def _on_double_click(self, item, column):
