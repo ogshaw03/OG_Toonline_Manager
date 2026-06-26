@@ -70,6 +70,7 @@ GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コン�
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
 COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
+WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起動の防止に使用）
 
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
@@ -843,6 +844,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             parent = _maya_main()
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager")
+        self.setObjectName(WINDOW_OBJ)
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
@@ -2225,12 +2227,20 @@ _toon_win = None
 
 
 def show():
-    """ツールウィンドウを起動。既存ウィンドウがあれば閉じてから開く。"""
+    """ツールウィンドウを起動。既存ウィンドウがあれば閉じてから開く（重複起動を防止）。"""
     global _toon_win
+    # モジュールグローバルの参照を後始末
     try:
         _toon_win.close(); _toon_win.deleteLater()
     except Exception:
         pass
+    # スクリプト再実行で global がリセットされても残っている同名ウィンドウを全て掃除
+    for w in QtWidgets.QApplication.topLevelWidgets():
+        try:
+            if w.objectName() == WINDOW_OBJ:
+                w.close(); w.deleteLater()
+        except Exception:
+            pass
     _toon_win = ToonOutlineUI()
     _toon_win.show()
     return _toon_win
