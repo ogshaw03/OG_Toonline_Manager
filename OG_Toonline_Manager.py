@@ -50,6 +50,9 @@ THICK_ATTR = "offset"               # 現在法線方向への一定オフセッ
 CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
+DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
+DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
+DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
@@ -872,12 +875,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._on_cap_slider, self._on_cap_spin, self._reset_cap,
             on_key=self._key_cap, tip="起伏の最大倍率（角が太くなりすぎないよう上限を設定）")
         lvl.addLayout(c3row)
-        c4row, self.tpslider, self.tpspin = self._slider_spin_row(
-            "末端細り", 0, 100, 0, 2, 0.0, 1.0, 0.05, 0.0,
-            self._on_tpslider, self._on_tpspin, self._reset_taper,
-            on_key=self._key_taper, tip="ライン末端ほど細くする（エッジライン向け）")
-        lvl.addLayout(c4row)
         # 太さプロファイル（長手方向のカーブで強弱）。エッジライン選択時のみ表示。
+        # （末端細りはプロファイルで代替できるため UI スライダーは廃止。互換のため
+        #   endTaper 属性自体は残し、既存シーンの値があれば _update_curv_weights が反映する）
         self.w_profile = QtWidgets.QWidget()
         prow = QtWidgets.QHBoxLayout(self.w_profile); prow.setContentsMargins(0, 0, 0, 0)
         plabel = QtWidgets.QLabel("太さプロファイル")
@@ -1294,7 +1294,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             t = self._thickness_of(lines[0])
             if t is not None:
                 self._set_thickness_widgets(t)
-            infl, cap, tp = 0.0, None, None
+            infl, cap = 0.0, None
             if ctrl:
                 try:
                     infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
@@ -1304,12 +1304,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
                 except Exception:
                     cap = None
-                if cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
-                    try:
-                        tp = cmds.getAttr(ctrl + "." + CTRL_TAPER)
-                    except Exception:
-                        tp = None
-            self._set_curv_widgets(infl, cap, tp)
+            self._set_curv_widgets(infl, cap)
             self.ramp.set_points([list(p) for p in _profile_of_ctrl(ctrl)])
         self._update_key_colors()
 
@@ -1338,9 +1333,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _reset_cap(self):
         self.cap_spin.setValue(3.0)
-
-    def _reset_taper(self):
-        self.tpspin.setValue(0.0)
 
     def _reset_grpmult(self):
         self.grpspin.setValue(1.0)
@@ -1518,7 +1510,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
         self._apply_curvature()
 
-    def _set_curv_widgets(self, infl, cap=None, taper=None):
+    def _set_curv_widgets(self, infl, cap=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
         self.cspin.setValue(infl)
         self.cslider.setValue(int(infl * 100))
@@ -1528,44 +1520,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self.cap_spin.setValue(cap)
             self.cap_slider.setValue(int(cap * 100))
             self.cap_spin.blockSignals(False); self.cap_slider.blockSignals(False)
-        if taper is not None:
-            self.tpspin.blockSignals(True); self.tpslider.blockSignals(True)
-            self.tpspin.setValue(taper)
-            self.tpslider.setValue(int(taper * 100))
-            self.tpspin.blockSignals(False); self.tpslider.blockSignals(False)
-
-    def _on_tpslider(self, v):
-        val = v / 100.0
-        self.tpspin.blockSignals(True); self.tpspin.setValue(val); self.tpspin.blockSignals(False)
-        self._apply_taper(val)
-
-    def _on_tpspin(self, val):
-        self.tpslider.blockSignals(True); self.tpslider.setValue(int(val * 100)); self.tpslider.blockSignals(False)
-        self._apply_taper(val)
-
-    def _apply_taper(self, val):
-        lines = self._selected_lines()
-        if not lines:
-            return
-        chunk = not self._dragging
-        if chunk:
-            cmds.undoInfo(openChunk=True)
-        try:
-            for line in lines:
-                ctrl = _ensure_line_anim(line, self.spin.value())
-                if cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
-                    try:
-                        cmds.setAttr(ctrl + "." + CTRL_TAPER, val)
-                    except Exception:
-                        pass
-                _update_curv_weights(line)
-        finally:
-            if chunk:
-                cmds.undoInfo(closeChunk=True)
-        self._update_key_colors()
-
-    def _key_taper(self):
-        self._key_line_attr(CTRL_TAPER)
 
     def _apply_profile(self):
         lines = self._selected_lines()
@@ -1690,7 +1644,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lines = self._selected_lines()
         lctrl = _ctrl_of(lines[0]) if lines else None
         for spin, at in ((self.spin, CTRL_THICK), (self.cspin, CTRL_CURV),
-                         (self.cap_spin, CTRL_CAP), (self.tpspin, CTRL_TAPER)):
+                         (self.cap_spin, CTRL_CAP)):
             state = "none"
             if lctrl and cmds.attributeQuery(at, node=lctrl, exists=True):
                 state = _attr_key_state(lctrl + "." + at)
@@ -1718,7 +1672,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self._set_thickness_widgets(t)   # blockSignals 済み → 適用は走らない
             ctrl = _ctrl_of(lines[0])
             if ctrl:
-                infl = cap = tp = None
+                infl = cap = None
                 try:
                     infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
                 except Exception:
@@ -1727,13 +1681,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
                 except Exception:
                     pass
-                if cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
-                    try:
-                        tp = cmds.getAttr(ctrl + "." + CTRL_TAPER)
-                    except Exception:
-                        pass
                 if infl is not None:
-                    self._set_curv_widgets(infl, cap, tp)
+                    self._set_curv_widgets(infl, cap)
         # グループ/全体倍率の値・キー色もラインと同様に追従
         self._set_mult_widgets()
         self._update_mult_labels()
@@ -1909,7 +1858,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         edges = cmds.filterExpand(sel, sm=32) or []
         if not edges:
             cmds.warning("メッシュのエッジを選択してください"); return
-        thick = self.spin.value()
+        # 新規エッジラインは UI の現在値ではなく初期値で生成する
+        thick = DEFAULT_THICK
         _, sg = _ensure_shader(self._color)
         grp = self._current_group()
 
@@ -1959,11 +1909,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
             line = cmds.parent(line, grp)[0]
             ctrl = _ensure_line_anim(line, thick)
-            try:
-                cmds.setAttr(ctrl + "." + CTRL_THICK, thick)
-            except Exception:
-                pass
-            cmds.select(line, r=True)
+            # 各項目を初期値で生成（太さ/曲率起伏/曲率上限/末端細り/プロファイル）
+            for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+                           (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                if cmds.attributeQuery(at, node=ctrl, exists=True):
+                    try:
+                        cmds.setAttr(ctrl + "." + at, dv)
+                    except Exception:
+                        pass
+            if cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                try:
+                    cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
+                except Exception:
+                    pass
+            _update_curv_weights(line)
+            # 生成したエッジラインはアウトライナーで選択状態にしない
+            cmds.select(clear=True)
         finally:
             cmds.undoInfo(closeChunk=True)
 
