@@ -19,7 +19,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
         import OG_Toonline_Manager
         OG_Toonline_Manager.show()
 
-詳細・残課題は toon_outline_handoff.md を参照。
+使い方の概要は README.md を参照。
 """
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui

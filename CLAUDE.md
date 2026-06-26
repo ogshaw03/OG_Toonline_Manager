@@ -17,11 +17,11 @@ Maya 用の輪郭線生成ツール「OG Toonline Manager」。
 元メッシュの変形に自動追従し、PySide6/PySide2 UI で太さ・色をライブ調整できる。
 
 - 実装本体: `OG_Toonline_Manager.py`
-- 設計・残課題・ハマりどころ: `toon_outline_handoff.md`（必読）
+- 設計・残課題・ハマりどころ: 本ファイル（CLAUDE.md）に集約。
 
 ### 実装上の最重要ポイント（原点バグ対策）
 
-handoff §3 の「ヒストリを積んでから worldMesh を差し替える」方式は、
+旧方式の「ヒストリを積んでから worldMesh を差し替える」方式は、
 差し替えが output に伝播せず輪郭が原点に生成される不具合が再発した。
 原点バグは「**複製をワールドへ出して T0/R0/S1 に単位化 + worldMesh 接続**」方式が
 原因（worldMesh の接続順を NG/OK どちらにしても再発した）。現行は worldMesh を使わない
