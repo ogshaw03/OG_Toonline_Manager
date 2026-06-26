@@ -299,8 +299,27 @@ def _ensure_line_anim(line, default_thick=0.05):
     _lock_trs(ctrl)
     _ensure_thickness_chain(line)
     _ensure_follow(line)
+    _ensure_smooth_link(line)
     _ensure_curv_jobs(line)
     return ctrl
+
+
+def _ensure_smooth_link(line):
+    """元 shape のスムースメッシュプレビュー（サブディビ表示）をライン shape へ接続。
+    元で 3 キー等のサブディビ表示を切り替えるとラインも追従する。"""
+    src = _line_src_shape(line)
+    osh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True) or []
+    if not src or not osh:
+        return
+    osh = osh[0]
+    for at in ("displaySmoothMesh", "smoothLevel"):
+        try:
+            if (cmds.attributeQuery(at, node=src, exists=True)
+                    and cmds.attributeQuery(at, node=osh, exists=True)
+                    and not cmds.isConnected(src + "." + at, osh + "." + at)):
+                cmds.connectAttr(src + "." + at, osh + "." + at, f=True)
+        except Exception:
+            pass
 
 
 def _ensure_follow(line):
