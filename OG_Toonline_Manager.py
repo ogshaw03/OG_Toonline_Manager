@@ -322,6 +322,15 @@ def _ensure_follow(line):
         pass
 
 
+def _connect(src, dst):
+    """未接続のときだけ接続（既接続時の警告を避ける）。"""
+    try:
+        if not cmds.isConnected(src, dst):
+            cmds.connectAttr(src, dst, f=True)
+    except Exception:
+        pass
+
+
 def _ensure_thickness_chain(line):
     """offset = lineCtrl.thickness * groupCtrl.thicknessMult * globalCtrl.thicknessMult を DG で構築。"""
     defm = _line_deformer(line)
@@ -339,32 +348,29 @@ def _ensure_thickness_chain(line):
     if not cmds.objExists(mB):
         mB = cmds.createNode("multDoubleLinear", name=mB)
     # mA = lineCtrl.thickness * groupCtrl.thicknessMult
-    try:
-        cmds.connectAttr(ctrl + "." + CTRL_THICK, mA + ".input1", f=True)
-    except Exception:
-        pass
-    for p in (cmds.listConnections(mA + ".input2", s=True, d=False, p=True) or []):
-        try:
-            cmds.disconnectAttr(p, mA + ".input2")
-        except Exception:
-            pass
+    _connect(ctrl + "." + CTRL_THICK, mA + ".input1")
     if grpctrl:
-        try:
-            cmds.connectAttr(grpctrl + "." + GMULT, mA + ".input2", f=True)
-        except Exception:
-            pass
+        if not cmds.isConnected(grpctrl + "." + GMULT, mA + ".input2"):
+            for p in (cmds.listConnections(mA + ".input2", s=True, d=False, p=True) or []):
+                try:
+                    cmds.disconnectAttr(p, mA + ".input2")
+                except Exception:
+                    pass
+            _connect(grpctrl + "." + GMULT, mA + ".input2")
     else:
+        for p in (cmds.listConnections(mA + ".input2", s=True, d=False, p=True) or []):
+            try:
+                cmds.disconnectAttr(p, mA + ".input2")
+            except Exception:
+                pass
         try:
             cmds.setAttr(mA + ".input2", 1.0)
         except Exception:
             pass
     # mB = mA * globalCtrl.thicknessMult → offset
-    try:
-        cmds.connectAttr(mA + ".output", mB + ".input1", f=True)
-        cmds.connectAttr(gctrl + "." + GMULT, mB + ".input2", f=True)
-        cmds.connectAttr(mB + ".output", defm + ".offset", f=True)
-    except Exception:
-        pass
+    _connect(mA + ".output", mB + ".input1")
+    _connect(gctrl + "." + GMULT, mB + ".input2")
+    _connect(mB + ".output", defm + ".offset")
 
 
 def _update_curv_weights(line):
