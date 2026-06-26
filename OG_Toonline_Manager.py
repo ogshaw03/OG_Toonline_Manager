@@ -44,10 +44,12 @@ COL_PREFIX = "toonOutlineCol_"      # ライン個別カラーシェーダの接
 THICK_TYPE = "textureDeformer"      # 太さ駆動ノードの型
 THICK_ATTR = "offset"               # 現在法線方向への一定オフセット（太さ）
 
-# ラインコントローラー（line transform）のアニメ用アトリビュート（全て英語）
-CTRL_THICK = "thickness"
-CTRL_CURV  = "curvature"
-CTRL_CAP   = "curvatureCap"
+# ラインコントローラー（独立ノード）のアニメ用アトリビュート（全て英語）
+CTRL_THICK  = "thickness"
+CTRL_CURV   = "curvature"
+CTRL_CAP    = "curvatureCap"
+CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
+CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
@@ -144,17 +146,90 @@ def _line_curvature(line):
     return curv
 
 
+def _attr_key_state(plug):
+    """属性プラグのアニメ状態を返す: 'none' / 'anim'（アニメ有・キー上でない）/ 'key'（現フレームがキー）。"""
+    try:
+        kc = cmds.keyframe(plug, query=True, keyframeCount=True) or 0
+    except Exception:
+        kc = 0
+    if kc <= 0:
+        return "none"
+    t = cmds.currentTime(query=True)
+    try:
+        at_t = cmds.keyframe(plug, query=True, time=(t, t)) or []
+    except Exception:
+        at_t = []
+    return "key" if at_t else "anim"
+
+
+def _ctrl_of(line):
+    """ラインに紐づくコントローラー（独立ノード）を返す。無ければ None。"""
+    if cmds.objExists(line) and cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
+        c = cmds.listConnections(line + "." + CTRL_LINK) or []
+        if c and cmds.objExists(c[0]):
+            return c[0]
+    return None
+
+
+def _create_controller(line, thick):
+    """ライン用の独立コントローラー（空 transform）を作って関連付ける。"""
+    ctrl = cmds.createNode("transform", name=_short(line) + CTRL_SUFFIX)
+    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
+        cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
+    if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
+        cmds.addAttr(line, ln=CTRL_LINK, at="message")
+    try:
+        cmds.connectAttr(ctrl + ".message", line + "." + CTRL_LINK, f=True)
+    except Exception:
+        pass
+    # ラインの子に格納（独立ノードだがライン削除で一緒に消える）。相対で原点のまま。
+    try:
+        ctrl = cmds.parent(ctrl, line, relative=True)[0]
+    except Exception:
+        pass
+    # 標準チャンネル(TRS/可視)はロック&非表示 → 3チャンネルのみコントローラーに見せる
+    for at in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "v"):
+        try:
+            cmds.setAttr(ctrl + "." + at, lock=True, keyable=False, channelBox=False)
+        except Exception:
+            pass
+    return ctrl
+
+
+def _ensure_line_anim(line, default_thick=0.05):
+    """コントローラーを確保し、太さを deformer.offset へ接続、追従ジョブを張る。"""
+    defm = _line_deformer(line)
+    ctrl = _ctrl_of(line)
+    if ctrl is None:
+        thick = default_thick
+        if defm:
+            try:
+                thick = cmds.getAttr(defm + ".offset")
+            except Exception:
+                pass
+        ctrl = _create_controller(line, thick)
+    if defm:
+        try:
+            if not cmds.isConnected(ctrl + "." + CTRL_THICK, defm + ".offset"):
+                cmds.connectAttr(ctrl + "." + CTRL_THICK, defm + ".offset", f=True)
+        except Exception:
+            pass
+    _ensure_curv_jobs(line)
+    return ctrl
+
+
 def _update_curv_weights(line):
-    """line.curvature / line.curvatureCap から textureDeformer の頂点ウェイトを再計算。
+    """コントローラーの curvature / curvatureCap から頂点ウェイトを再計算。
     scriptJob からも呼ばれる（アニメーション時の追従用）。"""
     if not cmds.objExists(line):
         return
     defm = _line_deformer(line)
-    if not defm:
+    ctrl = _ctrl_of(line)
+    if not defm or not ctrl:
         return
     try:
-        influence = cmds.getAttr(line + "." + CTRL_CURV)
-        cap = cmds.getAttr(line + "." + CTRL_CAP)
+        influence = cmds.getAttr(ctrl + "." + CTRL_CURV)
+        cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
     except Exception:
         return
     curv = _line_curvature(line)
@@ -168,16 +243,12 @@ def _update_curv_weights(line):
         pass
 
 
-def _ensure_ctrl_attrs(line, thick):
-    """ライン（コントローラー）にキーアブルな英語アトリビュートを追加。"""
-    for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
-        if not cmds.attributeQuery(at, node=line, exists=True):
-            cmds.addAttr(line, ln=at, at="double", dv=dv, keyable=True)
-
-
 def _ensure_curv_jobs(line):
-    """curvature / curvatureCap の変化で頂点ウェイトを再計算する scriptJob を確保。
-    （ノード削除時に自動で kill される attributeChange ジョブ）"""
+    """controller の curvature / curvatureCap 変化で頂点ウェイトを再計算する scriptJob。
+    （ノード削除時に自動 kill される attributeChange ジョブ）"""
+    ctrl = _ctrl_of(line)
+    if not ctrl:
+        return
     old = _CURV_JOBS.get(line)
     if old:
         try:
@@ -194,7 +265,7 @@ def _ensure_curv_jobs(line):
     jobs = []
     for at in (CTRL_CURV, CTRL_CAP):
         try:
-            jid = cmds.scriptJob(attributeChange=[line + "." + at,
+            jid = cmds.scriptJob(attributeChange=[ctrl + "." + at,
                                                   lambda ln=line: _update_curv_weights(ln)])
             jobs.append(jid)
         except Exception:
@@ -237,8 +308,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
+        self._time_job = None          # timeChanged scriptJob
         self._build()
         self.refresh_tree()
+        try:
+            self._time_job = cmds.scriptJob(event=["timeChanged", self._on_time_changed],
+                                            protected=False)
+        except Exception:
+            self._time_job = None
+
+    def closeEvent(self, event):
+        try:
+            if self._time_job and cmds.scriptJob(exists=self._time_job):
+                cmds.scriptJob(kill=self._time_job, force=True)
+        except Exception:
+            pass
+        super(ToonOutlineUI, self).closeEvent(event)
 
     # ========== UI 構築 ==========
     def _build(self):
@@ -424,10 +509,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return _line_deformer(line)
 
     def _thickness_of(self, line):
-        # 太さの真値はコントローラー属性 line.thickness（offset を駆動）。
-        if cmds.attributeQuery(CTRL_THICK, node=line, exists=True):
+        # 太さの真値はコントローラー属性 ctrl.thickness（offset を駆動）。
+        ctrl = _ctrl_of(line)
+        if ctrl:
             try:
-                return cmds.getAttr(line + "." + CTRL_THICK)
+                return cmds.getAttr(ctrl + "." + CTRL_THICK)
             except Exception:
                 pass
         node = self._thick_node_for(line)
@@ -565,10 +651,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.tree.addTopLevelItem(gi)
         for line in lines:
             self._add_line_item(gi, line)
-            # 既存ラインにもコントローラー属性・追従ジョブを確保（旧データ/再開対応）
-            if not cmds.attributeQuery(CTRL_THICK, node=line, exists=True):
-                _ensure_ctrl_attrs(line, self._thickness_of(line) or 0.05)
-            _ensure_curv_jobs(line)
+            # 既存ラインにもコントローラー・接続・追従ジョブを確保（旧データ/再開対応）
+            _ensure_line_anim(line, self._thickness_of(line) or 0.05)
         gi.setExpanded(True)
         return gi
 
@@ -630,22 +714,31 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lines = self._selected_lines()
         if not lines:
             return
+        ctrl = _ctrl_of(lines[0])
         t = self._thickness_of(lines[0])
         if t is not None:
             self._set_thickness_widgets(t)
         infl = 0.0
-        if cmds.attributeQuery(CTRL_CURV, node=lines[0], exists=True):
+        cap = None
+        if ctrl:
             try:
-                infl = cmds.getAttr(lines[0] + "." + CTRL_CURV)
+                infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
             except Exception:
                 infl = 0.0
-        cap = None
-        if cmds.attributeQuery(CTRL_CAP, node=lines[0], exists=True):
             try:
-                cap = cmds.getAttr(lines[0] + "." + CTRL_CAP)
+                cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
             except Exception:
                 cap = None
         self._set_curv_widgets(infl, cap)
+        # タイムスライダにキーを表示するため、コントローラーを Maya 選択
+        ctrls = [_ctrl_of(l) for l in lines]
+        ctrls = [c for c in ctrls if c and cmds.objExists(c)]
+        if ctrls:
+            try:
+                cmds.select(ctrls, r=True)
+            except Exception:
+                pass
+        self._update_key_colors()
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -693,21 +786,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             for line in lines:
                 # コントローラー属性 thickness を設定（offset へ接続済みなので反映される）
-                if cmds.attributeQuery(CTRL_THICK, node=line, exists=True):
-                    try:
-                        cmds.setAttr(line + "." + CTRL_THICK, val)
-                    except Exception:
-                        pass
-                else:
-                    node = self._thick_node_for(line)
-                    if node and cmds.objExists(node):
-                        try:
-                            cmds.setAttr(node + "." + THICK_ATTR, val)
-                        except Exception:
-                            pass
+                ctrl = _ensure_line_anim(line, val)
+                try:
+                    cmds.setAttr(ctrl + "." + CTRL_THICK, val)
+                except Exception:
+                    pass
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
         # ツリーの太さ表示を更新
         self._populating = True
         for it in self.tree.selectedItems():
@@ -759,16 +846,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
             for line in lines:
                 # コントローラー属性 curvature / curvatureCap を設定 → scriptJob で頂点
                 #   ウェイトが再計算されるが、即時反映のため明示的にも更新する。
-                _ensure_ctrl_attrs(line, self.spin.value())
+                ctrl = _ensure_line_anim(line, self.spin.value())
                 try:
-                    cmds.setAttr(line + "." + CTRL_CURV, influence)
-                    cmds.setAttr(line + "." + CTRL_CAP, cap)
+                    cmds.setAttr(ctrl + "." + CTRL_CURV, influence)
+                    cmds.setAttr(ctrl + "." + CTRL_CAP, cap)
                 except Exception:
                     pass
                 _update_curv_weights(line)
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
 
     # ========== キー（アニメーション） ==========
     def key_selected(self):
@@ -779,14 +867,58 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         try:
             for line in lines:
-                _ensure_ctrl_attrs(line, self.spin.value())
+                ctrl = _ensure_line_anim(line, self.spin.value())
                 for at in (CTRL_THICK, CTRL_CURV, CTRL_CAP):
                     try:
-                        cmds.setKeyframe(line + "." + at)
+                        cmds.setKeyframe(ctrl + "." + at)
                     except Exception:
                         pass
         finally:
             cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
+
+    # ---- 数値欄のキー色（アトリビュートエディター風） ----
+    def _style_spin(self, spin, state):
+        if state == "key":
+            css = "QDoubleSpinBox{background-color:#c25450; color:#fff;}"   # 赤=現フレームがキー
+        elif state == "anim":
+            css = "QDoubleSpinBox{background-color:#e0a6a6;}"               # ピンク=アニメ有り
+        else:
+            css = ""
+        spin.setStyleSheet(css)
+
+    def _update_key_colors(self):
+        pairs = ((self.spin, CTRL_THICK), (self.cspin, CTRL_CURV), (self.cap_spin, CTRL_CAP))
+        lines = self._selected_lines()
+        ctrl = _ctrl_of(lines[0]) if lines else None
+        for spin, at in pairs:
+            state = "none"
+            if ctrl and cmds.attributeQuery(at, node=ctrl, exists=True):
+                state = _attr_key_state(ctrl + "." + at)
+            self._style_spin(spin, state)
+
+    def _on_time_changed(self):
+        """フレーム変更時：選択ラインの現在値をスライダーへ反映し、キー色を更新。"""
+        lines = self._selected_lines()
+        if not lines:
+            return
+        t = self._thickness_of(lines[0])
+        if t is not None:
+            self._set_thickness_widgets(t)   # blockSignals 済み → 適用は走らない
+        ctrl = _ctrl_of(lines[0])
+        if ctrl:
+            infl = cap = None
+            try:
+                infl = cmds.getAttr(ctrl + "." + CTRL_CURV)
+            except Exception:
+                pass
+            try:
+                cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
+            except Exception:
+                pass
+            if infl is not None:
+                self._set_curv_widgets(infl, cap)
+        self._update_key_colors()
 
     # ========== カラー ==========
     def _refresh_swatch(self):
@@ -940,15 +1072,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # グループへ（ワールド位置を保持したまま移動 → 重なりは維持）
                 dup = cmds.parent(dup, grp)[0]
 
-                # ラインコントローラー: キーアブル属性を作り、太さは offset へ直結（DGでアニメ可）。
-                # 曲率/上限は scriptJob で頂点ウェイトを追従させる。
-                _ensure_ctrl_attrs(dup, thick)
-                cmds.setAttr(dup + "." + CTRL_THICK, thick)
+                # ラインコントローラー（独立ノード）を作成。太さは offset へ直結（DGでアニメ可）、
+                # 曲率/上限は scriptJob で頂点ウェイトを追従。
+                ctrl = _ensure_line_anim(dup, thick)
                 try:
-                    cmds.connectAttr(dup + "." + CTRL_THICK, defm + ".offset", f=True)
+                    cmds.setAttr(ctrl + "." + CTRL_THICK, thick)
                 except Exception:
                     pass
-                _ensure_curv_jobs(dup)
                 made.append(dup)
             if made:
                 cmds.select(made, r=True)
