@@ -1361,14 +1361,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._dragging = False
 
     # ========== リセット ==========
+    def _sel_is_edge(self):
+        """選択ラインがエッジライン（チューブ）を含むか。リセット既定値の出し分けに使う。"""
+        return any(cmds.attributeQuery(EDGE_TAG, node=n, exists=True)
+                   for n in self._selected_lines())
+
     def _reset_thickness(self):
-        self.spin.setValue(0.05)   # spin の valueChanged が適用＋slider同期する
+        # エッジラインとハルラインで初期太さが異なるため選択種別で出し分ける
+        dv = DEFAULT_EDGE_THICK if self._sel_is_edge() else DEFAULT_THICK
+        self.spin.setValue(dv)   # spin の valueChanged が適用＋slider同期する
 
     def _reset_curv(self):
-        self.cspin.setValue(0.0)
+        self.cspin.setValue(DEFAULT_CURV)
 
     def _reset_cap(self):
-        self.cap_spin.setValue(3.0)
+        self.cap_spin.setValue(DEFAULT_CAP)
 
     def _reset_grpmult(self):
         self.grpspin.setValue(1.0)
