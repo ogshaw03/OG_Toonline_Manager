@@ -23,22 +23,29 @@ Maya 用の輪郭線生成ツール「OG Toonline Manager」。
 
 handoff §3 の「ヒストリを積んでから worldMesh を差し替える」方式は、
 差し替えが output に伝播せず輪郭が原点に生成される不具合が再発した。
-現行の `create_outlines()` の正しい手順:
+原点バグは「**複製をワールドへ出して T0/R0/S1 に単位化 + worldMesh 接続**」方式が
+原因（worldMesh の接続順を NG/OK どちらにしても再発した）。現行は worldMesh を使わない
+方式に変更済み。`create_outlines()` の正しい手順:
 
 ```
-元.worldMesh[0] → polyMoveVertex(押し出し) → polyNormal(反転) → ライン shape.inMesh
+複製は元と同じ親・同じ TRS のまま（動かさない）
+元.outMesh → polyMoveVertex(押し出し) → polyNormal(反転) → ライン shape.inMesh
+最後に parent でグループへ（ワールド位置保持で重なりは維持）
 ```
 
-1. ライン側トランスフォームを T0/R0/S1、shape のヒストリを削除して inMesh を空ける。
-2. **先に `worldMesh[0]` を shape の inMesh に直結**してライブ追従を確立（原点バグ回避）。
-3. その後 **コマンド形式** `cmds.polyMoveVertex(...)` / `cmds.polyNormal(...)` で
-   押し出し→反転を挿入。コマンドは追従チェーンを保ったまま挿入する。
+1. `cmds.duplicate` した複製はトランスフォームを**動かさない**（元と同じ変換空間に置く）。
+2. 複製のヒストリを削除して inMesh を空け、**元の `outMesh`（オブジェクト空間の変形後
+   メッシュ）** を inMesh に直結。複製は元と同じ TRS なので変形追従しつつ元に重なる。
+3. **コマンド形式** `cmds.polyMoveVertex` / `cmds.polyNormal` で押し出し→反転を挿入。
 
-注意: `createNode("polyMoveVertex")` で手動構築すると **頂点ごとの法線フレームが
-張られず localTranslateZ が法線方向に膨らまない**（元メッシュと重なって z-fighting で
-表示が乱れる）。必ずコマンド形式 `cmds.polyMoveVertex` を使うこと。
-また連結順は「追加した順に shape 側へ積まれる」ため、push を先・reverse を後に追加して
-`worldMesh → push → reverse → shape` の順にする（逆だと内側に縮む）。
+注意:
+- `createNode("polyMoveVertex")` だと頂点ごとの法線フレームが張られず膨らまない
+  （z-fighting で乱れる）。必ずコマンド形式を使う。
+- 追加順に shape 側へ積まれるため push を先・reverse を後 → `outMesh → push → reverse
+  → shape`（逆だと内側に縮む）。
+- worldMesh + トランスフォーム単位化方式は原点バグの原因なので使わない。
+- 制約: outMesh 追従は元の「変形（スキン等）」には追従するが、元トランスフォーム自体の
+  アニメーションには追従しない（生成時のワールド位置で固定）。スキンキャラの通常運用では問題なし。
 
 ### 互換性の注意
 
