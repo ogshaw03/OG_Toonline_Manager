@@ -526,6 +526,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "全体倍率", 0, 500, 100, 2, 0.0, 5.0, 0.05, 1.0,
             self._on_gslider, self._on_gspin, self._reset_gmult,
             on_key=self._key_gmult, tip="全アウトラインの太さ倍率")
+        b_gsel = QtWidgets.QPushButton("選択")
+        b_gsel.setFixedWidth(40)
+        b_gsel.setToolTip("全体コントローラーを選択（タイムスライダにキーを表示）")
+        b_gsel.clicked.connect(self._select_global_ctrl)
+        arow.addWidget(b_gsel)
         gl.addLayout(arow)
         lay.addWidget(self.w_global)
 
@@ -1275,6 +1280,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 pass
         finally:
             cmds.undoInfo(closeChunk=True)
+        self._update_key_colors()
+
+    def _select_global_ctrl(self):
+        """全体コントローラーを Maya 選択（タイムスライダにキーを表示）。"""
+        gc = _ensure_global_ctrl()
+        try:
+            cmds.select(gc, r=True)
+        except Exception:
+            pass
         self._update_key_colors()
 
     def _key_gmult(self):
