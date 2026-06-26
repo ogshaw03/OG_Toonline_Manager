@@ -183,13 +183,9 @@ def _ensure_ctrl_holder():
 
 def _create_controller(line, thick):
     """ライン用の独立コントローラー（ロケーター）を作り、コントローラーグループへ格納。"""
+    # ロケーターはシェイプを持つので、空 transform より識別しやすい（textureDeformerHandle 系）。
+    # シェイプは表示のまま（アウトライナーでロケーターとして判別できる）。
     ctrl = cmds.spaceLocator(name=_short(line) + CTRL_SUFFIX)[0]
-    # ロケーター shape は非表示にしてビューポートを汚さない（アウトライナーでは識別可）
-    for sh in cmds.listRelatives(ctrl, shapes=True, f=True) or []:
-        try:
-            cmds.setAttr(sh + ".visibility", 0)
-        except Exception:
-            pass
     for at, dv in ((CTRL_THICK, thick), (CTRL_CURV, 0.0), (CTRL_CAP, 3.0)):
         cmds.addAttr(ctrl, ln=at, at="double", dv=dv, keyable=True)
     if not cmds.attributeQuery(CTRL_LINK, node=line, exists=True):
@@ -921,9 +917,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
     # ---- 数値欄のキー色（アトリビュートエディター風） ----
     def _style_spin(self, spin, state):
         if state == "key":
-            css = "QDoubleSpinBox{background-color:#c25450; color:#fff;}"   # 赤=現フレームがキー
+            css = "QDoubleSpinBox{background-color:#c25450; color:#fff;}"        # 赤=現フレームがキー
         elif state == "anim":
-            css = "QDoubleSpinBox{background-color:#e0a6a6;}"               # ピンク=アニメ有り
+            css = "QDoubleSpinBox{background-color:#e0a6a6; color:#000;}"        # ピンク=アニメ有り（黒文字）
         else:
             css = ""
         spin.setStyleSheet(css)
