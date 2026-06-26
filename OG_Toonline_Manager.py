@@ -4,7 +4,14 @@ OG Toonline Manager
 ===================
 dx11Shader の MayaToonOutline.fx 相当の輪郭線を、Maya標準機能（実ジオメトリ）だけで再現。
 inverted hull 方式（押し出し → 法線反転 → バックフェースカリング）。
-元メッシュの変形に自動追従し、スライダーで太さをライブ調整できる。
+元メッシュの変形に自動追従し、ライン単位で太さ・表示／非表示を管理できる。
+
+主な機能:
+    - 選択メッシュにアウトライン（ライン）を生成
+    - ライン／グループをツリーで一覧表示
+    - ライン単位の太さ調整（選択したラインだけに適用）
+    - グループ単位／ライン単位の表示・非表示
+    - グループの新規作成・ラインの移動・削除・再取得
 
 使い方:
     Script Editor に貼り付けて実行、もしくは
@@ -24,14 +31,20 @@ except ImportError:
     from PySide2 import QtWidgets, QtCore, QtGui
     from shiboken2 import wrapInstance
 
-SHADER = "toonOutline_SS"
-SG     = "toonOutline_SG"
-GRP    = "toonOutlines_grp"
-TAG    = "isToonOutline"
+SHADER    = "toonOutline_SS"
+SG        = "toonOutline_SG"
+ROOT      = "toonOutlines_grp"      # 全ライン／グループの親
+TAG       = "isToonOutline"         # ライン識別タグ
+GROUP_TAG = "isToonOutlineGroup"    # グループ識別タグ
+DEFAULT_GROUP = "Outline_Group1"
 
 
 def _maya_main():
     return wrapInstance(int(omui.MQtUtil.mainWindow()), QtWidgets.QWidget)
+
+
+def _short(name):
+    return name.split("|")[-1] if name else name
 
 
 def _ensure_shader(color):
@@ -44,6 +57,12 @@ def _ensure_shader(color):
     return SHADER, SG
 
 
+def _ensure_root():
+    if not cmds.objExists(ROOT):
+        cmds.group(em=True, name=ROOT)
+    return ROOT
+
+
 class ToonOutlineUI(QtWidgets.QDialog):
 
     def __init__(self, parent=None):
@@ -51,23 +70,40 @@ class ToonOutlineUI(QtWidgets.QDialog):
             parent = _maya_main()
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager")
-        self.setMinimumWidth(300)
-        self._move_nodes = []          # 太さ駆動対象の polyMoveVertex ノード
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(420)
         self._color = [0.0, 0.0, 0.0]
+        self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._build()
-        self._rebuild_cache()
+        self.refresh_tree()
 
-    # ---------- UI ----------
+    # ========== UI 構築 ==========
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
 
+        # 生成 + 対象グループ
+        crow = QtWidgets.QHBoxLayout()
         self.btn_create = QtWidgets.QPushButton("選択メッシュに輪郭を生成")
         self.btn_create.clicked.connect(self.create_outlines)
-        lay.addWidget(self.btn_create)
+        crow.addWidget(self.btn_create, 1)
+        crow.addWidget(QtWidgets.QLabel("→"))
+        self.group_combo = QtWidgets.QComboBox()
+        self.group_combo.setMinimumWidth(120)
+        crow.addWidget(self.group_combo)
+        lay.addLayout(crow)
 
-        # 太さ：スライダー(0–2000 → 0.000–2.000) + スピンボックス同期
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("太さ"))
+        # ライン／グループ ツリー（チェックで表示・非表示）
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ"])
+        self.tree.setColumnWidth(0, 240)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemSelectionChanged.connect(self._on_tree_selection)
+        lay.addWidget(self.tree, 1)
+
+        # 太さ（選択中ラインに適用）
+        trow = QtWidgets.QHBoxLayout()
+        trow.addWidget(QtWidgets.QLabel("太さ"))
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.slider.setRange(0, 2000)
         self.slider.setValue(50)
@@ -78,32 +114,193 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spin.setValue(0.05)
         self.slider.valueChanged.connect(self._on_slider)
         self.spin.valueChanged.connect(self._on_spin)
-        row.addWidget(self.slider)
-        row.addWidget(self.spin)
-        lay.addLayout(row)
+        trow.addWidget(self.slider)
+        trow.addWidget(self.spin)
+        lay.addLayout(trow)
+        self.lbl_hint = QtWidgets.QLabel("※ 太さはツリーで選択したラインにのみ適用されます")
+        self.lbl_hint.setStyleSheet("color:#888;")
+        lay.addWidget(self.lbl_hint)
 
-        # 色
-        crow = QtWidgets.QHBoxLayout()
-        crow.addWidget(QtWidgets.QLabel("色"))
+        # 色（全ライン共有）
+        clrow = QtWidgets.QHBoxLayout()
+        clrow.addWidget(QtWidgets.QLabel("色 (全ライン共通)"))
         self.btn_color = QtWidgets.QPushButton()
         self.btn_color.setFixedHeight(22)
         self.btn_color.clicked.connect(self._pick_color)
         self._refresh_swatch()
-        crow.addWidget(self.btn_color)
-        lay.addLayout(crow)
+        clrow.addWidget(self.btn_color, 1)
+        lay.addLayout(clrow)
 
-        # 管理
+        # 管理ボタン
         mrow = QtWidgets.QHBoxLayout()
-        b_sel = QtWidgets.QPushButton("輪郭を選択")
-        b_del = QtWidgets.QPushButton("輪郭を削除")
+        b_grp = QtWidgets.QPushButton("新規グループ")
+        b_mov = QtWidgets.QPushButton("選択を対象グループへ")
+        b_del = QtWidgets.QPushButton("削除")
         b_ref = QtWidgets.QPushButton("再取得")
-        b_sel.clicked.connect(self.select_outlines)
-        b_del.clicked.connect(self.delete_outlines)
-        b_ref.clicked.connect(self._rebuild_cache)
-        mrow.addWidget(b_sel); mrow.addWidget(b_del); mrow.addWidget(b_ref)
+        b_grp.clicked.connect(self.new_group)
+        b_mov.clicked.connect(self.move_selected_to_group)
+        b_del.clicked.connect(self.delete_selected)
+        b_ref.clicked.connect(self.refresh_tree)
+        for b in (b_grp, b_mov, b_del, b_ref):
+            mrow.addWidget(b)
         lay.addLayout(mrow)
 
-    # ---------- 太さ ----------
+    # ========== シーン走査ヘルパ ==========
+    def _managed_groups(self):
+        """ROOT 直下のグループ（GROUP_TAG 付き）。"""
+        if not cmds.objExists(ROOT):
+            return []
+        out = []
+        for t in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(GROUP_TAG, node=t, exists=True):
+                out.append(t)
+        return out
+
+    def _lines_in(self, group):
+        """グループ直下のライン（TAG 付き）。"""
+        out = []
+        for t in cmds.listRelatives(group, children=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(TAG, node=t, exists=True):
+                out.append(t)
+        return out
+
+    def _loose_lines(self):
+        """ROOT 直下に直接ぶら下がっているライン（グループ未所属）。"""
+        if not cmds.objExists(ROOT):
+            return []
+        out = []
+        for t in cmds.listRelatives(ROOT, children=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(TAG, node=t, exists=True):
+                out.append(t)
+        return out
+
+    def _pmv_for(self, line):
+        """ラインの太さ駆動ノード（polyMoveVertex）を返す。"""
+        pmvs = cmds.ls(cmds.listHistory(line) or [], type="polyMoveVertex")
+        return pmvs[0] if pmvs else None
+
+    def _thickness_of(self, line):
+        pmv = self._pmv_for(line)
+        if pmv and cmds.objExists(pmv):
+            try:
+                return cmds.getAttr(pmv + ".localTranslateZ")
+            except Exception:
+                pass
+        return None
+
+    def _ensure_group(self, name):
+        """指定名のグループを ROOT 直下に確保して返す。"""
+        _ensure_root()
+        for g in self._managed_groups():
+            if _short(g) == name:
+                return g
+        grp = cmds.group(em=True, name=name, parent=ROOT)
+        cmds.addAttr(grp, ln=GROUP_TAG, at="bool", dv=True)
+        return grp
+
+    def _current_group(self):
+        name = self.group_combo.currentText().strip() if self.group_combo.count() else ""
+        return self._ensure_group(name or DEFAULT_GROUP)
+
+    # ========== ツリー ==========
+    def _add_line_item(self, parent_item, line):
+        it = QtWidgets.QTreeWidgetItem([_short(line), ""])
+        it.setData(0, QtCore.Qt.UserRole, line)
+        it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+        vis = True
+        try:
+            vis = bool(cmds.getAttr(line + ".visibility"))
+        except Exception:
+            pass
+        it.setCheckState(0, QtCore.Qt.Checked if vis else QtCore.Qt.Unchecked)
+        t = self._thickness_of(line)
+        it.setText(1, "" if t is None else "{:.3f}".format(t))
+        parent_item.addChild(it)
+        return it
+
+    def refresh_tree(self):
+        self._populating = True
+        self.tree.clear()
+        # グループ
+        for g in self._managed_groups():
+            gi = QtWidgets.QTreeWidgetItem([_short(g) + "  (グループ)", ""])
+            gi.setData(0, QtCore.Qt.UserRole, g)
+            gi.setFlags(gi.flags() | QtCore.Qt.ItemIsUserCheckable)
+            gvis = True
+            try:
+                gvis = bool(cmds.getAttr(g + ".visibility"))
+            except Exception:
+                pass
+            gi.setCheckState(0, QtCore.Qt.Checked if gvis else QtCore.Qt.Unchecked)
+            self.tree.addTopLevelItem(gi)
+            for line in self._lines_in(g):
+                self._add_line_item(gi, line)
+            gi.setExpanded(True)
+        # グループ未所属のライン
+        loose = self._loose_lines()
+        if loose:
+            gi = QtWidgets.QTreeWidgetItem(["(未分類)", ""])
+            gi.setFlags(gi.flags() & ~QtCore.Qt.ItemIsUserCheckable)
+            self.tree.addTopLevelItem(gi)
+            for line in loose:
+                self._add_line_item(gi, line)
+            gi.setExpanded(True)
+        self._populating = False
+        self._refresh_group_combo()
+
+    def _refresh_group_combo(self):
+        cur = self.group_combo.currentText()
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        names = [_short(g) for g in self._managed_groups()]
+        if not names:
+            names = [DEFAULT_GROUP]
+        self.group_combo.addItems(names)
+        idx = self.group_combo.findText(cur)
+        if idx >= 0:
+            self.group_combo.setCurrentIndex(idx)
+        self.group_combo.blockSignals(False)
+
+    def _selected_nodes(self):
+        out = []
+        for it in self.tree.selectedItems():
+            n = it.data(0, QtCore.Qt.UserRole)
+            if n and cmds.objExists(n):
+                out.append(n)
+        return out
+
+    def _selected_lines(self):
+        return [n for n in self._selected_nodes()
+                if cmds.attributeQuery(TAG, node=n, exists=True)]
+
+    # ---- 表示・非表示（チェックボックス） ----
+    def _on_item_changed(self, item, column):
+        if self._populating or column != 0:
+            return
+        node = item.data(0, QtCore.Qt.UserRole)
+        if node and cmds.objExists(node):
+            vis = item.checkState(0) == QtCore.Qt.Checked
+            try:
+                cmds.setAttr(node + ".visibility", vis)
+            except Exception:
+                cmds.warning("{} の表示属性を変更できません（接続/ロック）".format(_short(node)))
+
+    # ---- 選択変更 → 太さUIを同期 ----
+    def _on_tree_selection(self):
+        lines = self._selected_lines()
+        if not lines:
+            return
+        t = self._thickness_of(lines[0])
+        if t is not None:
+            self._set_thickness_widgets(t)
+
+    def _set_thickness_widgets(self, val):
+        self.slider.blockSignals(True); self.spin.blockSignals(True)
+        self.spin.setValue(val)
+        self.slider.setValue(int(val * 1000))
+        self.slider.blockSignals(False); self.spin.blockSignals(False)
+
+    # ========== 太さ（選択ラインのみ） ==========
     def _on_slider(self, v):
         val = v / 1000.0
         self.spin.blockSignals(True); self.spin.setValue(val); self.spin.blockSignals(False)
@@ -114,14 +311,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._apply_thickness(val)
 
     def _apply_thickness(self, val):
-        for m in list(self._move_nodes):
-            if cmds.objExists(m):
+        lines = self._selected_lines()
+        if not lines:
+            return
+        for line in lines:
+            pmv = self._pmv_for(line)
+            if pmv and cmds.objExists(pmv):
                 try:
-                    cmds.setAttr(m + ".localTranslateZ", val)
+                    cmds.setAttr(pmv + ".localTranslateZ", val)
                 except Exception:
                     pass
+        # ツリーの太さ表示を更新
+        self._populating = True
+        for it in self.tree.selectedItems():
+            n = it.data(0, QtCore.Qt.UserRole)
+            if n and cmds.attributeQuery(TAG, node=n, exists=True):
+                it.setText(1, "{:.3f}".format(val))
+        self._populating = False
 
-    # ---------- 色 ----------
+    # ========== 色（全ライン共通） ==========
     def _refresh_swatch(self):
         r, g, b = [int(c * 255) for c in self._color]
         self.btn_color.setStyleSheet(
@@ -138,89 +346,107 @@ class ToonOutlineUI(QtWidgets.QDialog):
                              self._color[0], self._color[1], self._color[2],
                              type="double3")
 
-    # ---------- キャッシュ ----------
-    def _managed_outlines(self):
-        return [t for t in (cmds.ls(type="transform") or [])
-                if cmds.attributeQuery(TAG, node=t, exists=True)]
-
-    def _rebuild_cache(self):
-        nodes = []
-        for o in self._managed_outlines():
-            nodes += cmds.ls(cmds.listHistory(o) or [], type="polyMoveVertex")
-        self._move_nodes = list(set(nodes))
-
-    # ---------- 生成 ----------
+    # ========== 生成 ==========
     def create_outlines(self):
         sel = cmds.ls(sl=True, long=True, type="transform")
         if not sel:
             cmds.warning("メッシュを選択してください"); return
         thick = self.spin.value()
         _, sg = _ensure_shader(self._color)
-        if not cmds.objExists(GRP):
-            cmds.group(em=True, name=GRP)
+        grp = self._current_group()
 
         cmds.undoInfo(openChunk=True)
+        made = []
         try:
-            made = []
             for obj in sel:
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
                     continue
                 src = shps[0]
 
-                # 複製 → ワールドへ出してトランスフォームを単位化
-                dup = cmds.duplicate(obj, name=obj.split("|")[-1] + "_outline", rr=True)[0]
+                # 複製 → 子トランスフォームを除去 → ワールドへ出して T0/R0/S1 に単位化
+                dup = cmds.duplicate(obj, name=_short(obj) + "_outline", rr=True)[0]
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
                 if cmds.listRelatives(dup, parent=True):
                     dup = cmds.parent(dup, world=True)[0]
-                for at, v in (("t", 0), ("r", 0), ("s", 1)):
-                    for ax in "xyz":
-                        cmds.setAttr("{}.{}{}".format(dup, at, ax), v)
+                for ax in "xyz":
+                    cmds.setAttr("{}.t{}".format(dup, ax), 0)
+                    cmds.setAttr("{}.r{}".format(dup, ax), 0)
+                    cmds.setAttr("{}.s{}".format(dup, ax), 1)
+
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
+                # 複製に付いてきたヒストリを除去し inMesh を空にする
+                cmds.delete(dup, constructionHistory=True)
 
-                # 1) 先に 押し出し→法線反転 をヒストリとして積む（入力は複製の静的メッシュ）
-                #    ※ この順序が重要。worldMesh を先に繋ぐと原点にラインが出る。
-                move_node = cmds.polyMoveVertex(dup + ".vtx[*]",
-                                                localTranslateZ=thick, ch=True)[0]
-                cmds.polyNormal(dshape, normalMode=0, ch=True)
+                # --- inverted hull のヒストリを「明示的に」構築 ---
+                #   元.worldMesh[0] → polyMoveVertex(押し出し) → polyNormal(反転) → dshape.inMesh
+                #   ※ ヒストリ自動挿入に頼らず全接続を手動で張るので原点に落ちない。
+                #     worldMesh はワールド空間、ライン側トランスフォームは単位なので元に重なる。
+                pmv = cmds.createNode("polyMoveVertex", name=_short(dup) + "_push")
+                cmds.setAttr(pmv + ".inputComponents", 1, "vtx[*]", type="componentList")
+                cmds.setAttr(pmv + ".localTranslateZ", thick)
+                pn = cmds.createNode("polyNormal", name=_short(dup) + "_reverse")
+                cmds.setAttr(pn + ".normalMode", 0)   # 0 = 法線反転
 
-                # 2) ヒストリ先頭の入力を 元メッシュの worldMesh に差し替え → ライブ追従
-                cmds.connectAttr(src + ".worldMesh[0]",
-                                 move_node + ".inputPolymesh", f=True)
+                cmds.connectAttr(src + ".worldMesh[0]", pmv + ".inputPolymesh", f=True)
+                cmds.connectAttr(pmv + ".output", pn + ".inputPolymesh", f=True)
+                cmds.connectAttr(pn + ".output", dshape + ".inMesh", f=True)
 
-                # 3) バックフェースカリング
+                # バックフェースカリング + シェーダ + タグ
                 cmds.setAttr(dshape + ".doubleSided", 0)
-
                 cmds.sets(dshape, e=True, forceElement=sg)
-                cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
-                cmds.parent(dup, GRP)
+                if not cmds.attributeQuery(TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
+
+                dup = cmds.parent(dup, grp)[0]
                 made.append(dup)
             if made:
                 cmds.select(made, r=True)
         finally:
             cmds.undoInfo(closeChunk=True)
 
-        self._rebuild_cache()
-        self._apply_thickness(thick)   # 現在のスライダー値で揃える
+        self.refresh_tree()
 
-    # ---------- 管理 ----------
-    def select_outlines(self):
-        outs = self._managed_outlines()
-        cmds.select(outs, r=True) if outs else cmds.warning("輪郭がありません")
+    # ========== グループ管理 ==========
+    def new_group(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "新規グループ", "グループ名:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        self._ensure_group(name)
+        self.refresh_tree()
+        idx = self.group_combo.findText(name)
+        if idx >= 0:
+            self.group_combo.setCurrentIndex(idx)
 
-    def delete_outlines(self):
-        outs = self._managed_outlines()
-        if not outs:
-            cmds.warning("輪郭がありません"); return
+    def move_selected_to_group(self):
+        lines = self._selected_lines()
+        if not lines:
+            cmds.warning("移動するラインをツリーで選択してください"); return
+        grp = self._current_group()
         cmds.undoInfo(openChunk=True)
         try:
-            cmds.delete(outs)
-            if cmds.objExists(GRP) and not (cmds.listRelatives(GRP, c=True) or []):
-                cmds.delete(GRP)
+            for ln in lines:
+                if cmds.listRelatives(ln, parent=True, f=True) != [grp]:
+                    cmds.parent(ln, grp)
         finally:
             cmds.undoInfo(closeChunk=True)
-        self._rebuild_cache()
+        self.refresh_tree()
+
+    def delete_selected(self):
+        nodes = self._selected_nodes()
+        if not nodes:
+            cmds.warning("削除する項目をツリーで選択してください"); return
+        cmds.undoInfo(openChunk=True)
+        try:
+            cmds.delete(nodes)
+            # 空になった ROOT は片付ける
+            if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
+                cmds.delete(ROOT)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
 
 
 _toon_win = None

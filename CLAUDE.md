@@ -19,12 +19,20 @@ Maya 用の輪郭線生成ツール「OG Toonline Manager」。
 - 実装本体: `OG_Toonline_Manager.py`
 - 設計・残課題・ハマりどころ: `toon_outline_handoff.md`（必読）
 
-### 実装上の最重要ポイント
+### 実装上の最重要ポイント（原点バグ対策）
 
-`create_outlines()` のノード接続順序を崩さないこと。
-**先に `polyMoveVertex`（押し出し）+ `polyNormal`（反転）のヒストリを積んでから**、
-`元.worldMesh[0]` を `polyMoveVertex.inputPolymesh` に差し込む。
-順序を間違えると輪郭が原点に生成される（詳細は handoff §3）。
+handoff §3 の「ヒストリを積んでから worldMesh を差し替える」方式は、
+差し替えが output に伝播せず輪郭が原点に生成される不具合が再発した。
+現行の `create_outlines()` は **ノードと接続を明示的に手で構築する方式** に変更済み:
+
+```
+元.worldMesh[0] → polyMoveVertex(押し出し) → polyNormal(反転) → ライン shape.inMesh
+```
+
+`createNode` で `polyMoveVertex` / `polyNormal` を作り、`connectAttr` で
+上記チェーンを直接張る（Maya のヒストリ自動挿入に頼らない）。
+ライン側トランスフォームは T0/R0/S1、shape の inMesh は事前に空にする。
+この方式は静的キャッシュへフォールバックしないため原点に落ちない。
 
 ### 互換性の注意
 
