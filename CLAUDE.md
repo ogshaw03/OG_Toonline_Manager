@@ -107,6 +107,21 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
 ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。
 
+### 生成時の初期値・選択不可
+
+- **新規生成は常に初期値**（UIの現在スライダー値を引き継がない）。hull/エッジとも
+  `create_outlines`/`create_edge_line` で太さ=`DEFAULT_THICK`(hull 0.05)/`DEFAULT_EDGE_THICK`
+  (edge 0.025)・曲率起伏=`DEFAULT_CURV`(0)・曲率上限=`DEFAULT_CAP`(3)・末端細り=0・
+  プロファイル=フラット を `setAttr` してから生成。リセット(↺)も同じ定数・edge/hull 出し分け。
+- **エッジラインの全体/グループ/ライン太さが 0 のとき消える**: 円プロファイル基準半径(0.01)が
+  あるため offset=0 でもチューブが残る。`_ensure_thickness_chain` で総太さ出力(mB.output)を
+  `condition`(Greater Than `EDGE_VIS_EPS`=1e-4) 経由で **shape.visibility** に接続し、
+  総太さ ~0 で非表示にする（shape 可視を駆動。手動表示/非表示は transform 可視なので競合しない）。
+- **ラインのビューポート選択不可**（UIチェック「ラインをビューポートで選択不可にする」既定ON。
+  `_on_toggle_lock_select`/`_apply_line_selectable`）: shape の `overrideEnabled=1`＋
+  `overrideDisplayType=2`(reference) で表示・レンダーは有効のまま選択だけ不可。OFF で通常選択可。
+  生成時・`refresh_tree` で現在状態を全ラインへ反映。
+
 ### エッジライン（チューブ・追加機能）
 
 inverted hull とは別に、**選択ポリゴンエッジに沿ったチューブ状ライン**を追加できる

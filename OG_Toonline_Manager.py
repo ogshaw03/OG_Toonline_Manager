@@ -52,6 +52,7 @@ CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
 DEFAULT_EDGE_THICK = 0.025            # 新規エッジライン生成時の初期太さ
+EDGE_VIS_EPS = 1e-4                   # 総太さがこれ以下ならエッジチューブを非表示にする閾値
 DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
 DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
@@ -558,6 +559,31 @@ def _ensure_thickness_chain(line):
     _connect(gctrl + "." + GMULT, mB + ".input2")
     _connect(mB + ".output", target)
 
+    # エッジラインは円プロファイルの基準半径(0.01)があるため、太さ(offset)が 0 でも
+    # チューブが残る。総太さ(mB.output)が ~0 のときシェイプ可視を 0 にして消す。
+    # （シェイプ可視を駆動。手動表示/非表示はトランスフォーム可視なので競合しない）
+    if cmds.attributeQuery(EDGE_TAG, node=line, exists=True):
+        shp = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True) or []
+        if shp:
+            lshape = shp[0]
+            cnd = base + "_visCond"
+            if not cmds.objExists(cnd):
+                cnd = cmds.createNode("condition", name=cnd)
+            try:
+                cmds.setAttr(cnd + ".operation", 2)          # Greater Than
+                cmds.setAttr(cnd + ".secondTerm", EDGE_VIS_EPS)
+                cmds.setAttr(cnd + ".colorIfTrueR", 1)
+                cmds.setAttr(cnd + ".colorIfFalseR", 0)
+            except Exception:
+                pass
+            _connect(mB + ".output", cnd + ".firstTerm")
+            try:
+                if cmds.getAttr(lshape + ".visibility", lock=True):
+                    cmds.setAttr(lshape + ".visibility", lock=False)
+            except Exception:
+                pass
+            _connect(cnd + ".outColorR", lshape + ".visibility")
+
 
 def _update_curv_weights(line):
     """コントローラーの curvature / curvatureCap から頂点ウェイトを再計算。
@@ -967,6 +993,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.chk_hide_handles.toggled.connect(self._on_toggle_hide_handles)
         lay.addWidget(self.chk_hide_handles)
 
+        self.chk_lock_select = QtWidgets.QCheckBox("ラインをビューポートで選択不可にする")
+        self.chk_lock_select.setChecked(True)
+        self.chk_lock_select.setToolTip("ON: ラインはビューポートで選択できません（表示・レンダーは有効）。"
+                                        "OFF にすると通常通り選択できます")
+        self.chk_lock_select.toggled.connect(self._on_toggle_lock_select)
+        lay.addWidget(self.chk_lock_select)
+
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
@@ -1112,6 +1145,37 @@ class ToonOutlineUI(QtWidgets.QDialog):
             _mel.eval("AEdagNodeCommonRefreshOutliners();")
         except Exception:
             pass
+
+    def _all_lines(self):
+        """管理下の全ライン（TAG 付き transform）。"""
+        return [t for t in (cmds.ls(type="transform") or [])
+                if cmds.attributeQuery(TAG, node=t, exists=True)]
+
+    def _lock_select(self):
+        """ビューポート選択不可チェックの現在状態（True=選択不可）。"""
+        c = getattr(self, "chk_lock_select", None)
+        return True if c is None else c.isChecked()
+
+    def _apply_line_selectable(self, line, lock):
+        """ライン shape を選択不可(reference)/通常に切替。
+        reference(displayType=2) は表示・レンダーは有効のまま選択だけ不可にする。"""
+        sh = self._shape_of(line)
+        if not sh:
+            return
+        try:
+            cmds.setAttr(sh + ".overrideEnabled", 1 if lock else 0)
+            if lock:
+                cmds.setAttr(sh + ".overrideDisplayType", 2)  # 2 = reference
+            else:
+                cmds.setAttr(sh + ".overrideDisplayType", 0)  # 0 = normal
+        except Exception:
+            pass
+
+    def _on_toggle_lock_select(self, state):
+        """UIチェックで全ラインのビューポート選択可否を一括切替。"""
+        lock = bool(state)
+        for line in self._all_lines():
+            self._apply_line_selectable(line, lock)
 
     def _stash_loose_handles(self):
         """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
@@ -1261,6 +1325,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 pass
         self.tree.setHeaderLabels(["名前 (チェック=表示)", "太さ (全体x{:.2f})".format(gv), "色"])
         self._stash_loose_handles()   # はみ出したハンドルを退避
+        # 既存/再取得ラインにも現在の「選択不可」状態を反映
+        lock = self._lock_select()
+        for line in self._all_lines():
+            self._apply_line_selectable(line, lock)
         self._populating = False
         self._refresh_group_combo()
 
@@ -1806,7 +1874,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sel = cmds.ls(sl=True, long=True, type="transform")
         if not sel:
             cmds.warning("メッシュを選択してください"); return
-        thick = self.spin.value()
+        # 新規ハルラインも UI の現在値ではなく初期値で生成する
+        thick = DEFAULT_THICK
         _, sg = _ensure_shader(self._color)
         if target_group and cmds.objExists(target_group):
             grp = target_group
@@ -1880,10 +1949,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # ラインコントローラー（独立ノード）を作成。太さは offset へ直結（DGでアニメ可）、
                 # 曲率/上限は scriptJob で頂点ウェイトを追従。
                 ctrl = _ensure_line_anim(dup, thick)
-                try:
-                    cmds.setAttr(ctrl + "." + CTRL_THICK, thick)
-                except Exception:
-                    pass
+                # 各項目を初期値で生成（太さ/曲率起伏/曲率上限/末端細り）
+                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
+                    if cmds.attributeQuery(at, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + at, dv)
+                        except Exception:
+                            pass
+                _update_curv_weights(dup)
+                self._apply_line_selectable(dup, self._lock_select())
                 made.append(dup)
             if made:
                 cmds.select(made, r=True)
@@ -1975,6 +2050,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     pass
             _update_curv_weights(line)
+            self._apply_line_selectable(line, self._lock_select())
             # 生成したエッジラインはアウトライナーで選択状態にしない
             cmds.select(clear=True)
         finally:
