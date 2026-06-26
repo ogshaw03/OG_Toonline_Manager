@@ -387,6 +387,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.setAttr(pmv + ".inputComponents", 1, "vtx[*]", type="componentList")
                 cmds.setAttr(pmv + ".localTranslateZ", thick)
                 pn = cmds.createNode("polyNormal", name=_short(dup) + "_reverse")
+                # 反転対象の面を明示（未設定だと "Can't perform ... on selection" 警告）
+                cmds.setAttr(pn + ".inputComponents", 1, "f[*]", type="componentList")
                 cmds.setAttr(pn + ".normalMode", 0)   # 0 = 法線反転
 
                 cmds.connectAttr(src + ".worldMesh[0]", pmv + ".inputPolymesh", f=True)
