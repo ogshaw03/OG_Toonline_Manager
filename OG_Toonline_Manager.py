@@ -248,6 +248,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         c3row.addWidget(self.cap_spin)
         lay.addLayout(c3row)
 
+        # 凹み抑制（凹んだ所で押し出しを抑え、輪郭の浮き/ズレを軽減）
+        c4row = QtWidgets.QHBoxLayout()
+        c4row.addWidget(QtWidgets.QLabel("凹み抑制"))
+        self.supp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.supp_slider.setRange(0, 100)             # /100 = 0.0〜1.0
+        self.supp_slider.setValue(0)
+        self.supp_spin = QtWidgets.QDoubleSpinBox()
+        self.supp_spin.setDecimals(2)
+        self.supp_spin.setRange(0.0, 1.0)
+        self.supp_spin.setSingleStep(0.05)
+        self.supp_spin.setValue(0.0)
+        self.supp_spin.setToolTip("凹んだ部分の太さを抑えて輪郭の浮き/ズレを軽減（凹部の inverted hull のはみ出し対策）")
+        self.supp_slider.valueChanged.connect(self._on_supp_slider)
+        self.supp_spin.valueChanged.connect(self._on_supp_spin)
+        c4row.addWidget(self.supp_slider)
+        c4row.addWidget(self.supp_spin)
+        lay.addLayout(c4row)
+
         self.lbl_hint = QtWidgets.QLabel("※ 太さ・曲率起伏・個別カラーはツリーで選択したラインに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_hint)
@@ -509,7 +527,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cap = cmds.getAttr(lines[0] + ".toonCurvCap")
             except Exception:
                 cap = None
-        self._set_curv_widgets(infl, cap)
+        supp = None
+        if cmds.attributeQuery("toonConcave", node=lines[0], exists=True):
+            try:
+                supp = cmds.getAttr(lines[0] + ".toonConcave")
+            except Exception:
+                supp = None
+        self._set_curv_widgets(infl, cap, supp)
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -550,31 +574,45 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_cslider(self, v):
         val = v / 100.0
         self.cspin.blockSignals(True); self.cspin.setValue(val); self.cspin.blockSignals(False)
-        self._apply_curvature(val)
+        self._apply_curvature()
 
     def _on_cspin(self, val):
         self.cslider.blockSignals(True); self.cslider.setValue(int(val * 100)); self.cslider.blockSignals(False)
-        self._apply_curvature(val)
+        self._apply_curvature()
 
     def _on_cap_slider(self, v):
         val = v / 100.0
         self.cap_spin.blockSignals(True); self.cap_spin.setValue(val); self.cap_spin.blockSignals(False)
-        self._apply_curvature(self.cspin.value())
+        self._apply_curvature()
 
     def _on_cap_spin(self, val):
         self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
-        self._apply_curvature(self.cspin.value())
+        self._apply_curvature()
 
-    def _set_curv_widgets(self, val, cap=None):
+    def _on_supp_slider(self, v):
+        val = v / 100.0
+        self.supp_spin.blockSignals(True); self.supp_spin.setValue(val); self.supp_spin.blockSignals(False)
+        self._apply_curvature()
+
+    def _on_supp_spin(self, val):
+        self.supp_slider.blockSignals(True); self.supp_slider.setValue(int(val * 100)); self.supp_slider.blockSignals(False)
+        self._apply_curvature()
+
+    def _set_curv_widgets(self, infl, cap=None, supp=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
-        self.cspin.setValue(val)
-        self.cslider.setValue(int(val * 100))
+        self.cspin.setValue(infl)
+        self.cslider.setValue(int(infl * 100))
         self.cslider.blockSignals(False); self.cspin.blockSignals(False)
         if cap is not None:
             self.cap_spin.blockSignals(True); self.cap_slider.blockSignals(True)
             self.cap_spin.setValue(cap)
             self.cap_slider.setValue(int(cap * 100))
             self.cap_spin.blockSignals(False); self.cap_slider.blockSignals(False)
+        if supp is not None:
+            self.supp_spin.blockSignals(True); self.supp_slider.blockSignals(True)
+            self.supp_spin.setValue(supp)
+            self.supp_slider.setValue(int(supp * 100))
+            self.supp_spin.blockSignals(False); self.supp_slider.blockSignals(False)
 
     def _curvature_of(self, line):
         """曲率配列をキャッシュ付きで返す（元メッシュ＝deformer のベース入力から計算）。"""
@@ -600,11 +638,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._curv_cache[line] = curv
         return curv
 
-    def _apply_curvature(self, influence):
+    def _apply_curvature(self):
         lines = self._selected_lines()
         if not lines:
             return
+        influence = self.cspin.value()
         cap = self.cap_spin.value()
+        suppress = self.supp_spin.value()
         for line in lines:
             defm = self._thick_node_for(line)
             if not defm or not cmds.objExists(defm):
@@ -613,15 +653,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
             n = len(curv)
             if n == 0:
                 continue
-            # weight[i] = min(上限, 1 + 影響度 * |曲率|)。曲がる所ほど太く・直線は細く、
-            # 上限で角(顎など)が太くなりすぎるのを抑える。0 で一様。
-            weights = [min(cap, max(0.0, 1.0 + influence * abs(c))) for c in curv]
+            # weight[i] = min(上限, 1 + 影響度 * |曲率|)：曲がる所ほど太く・直線は細く、
+            #   上限で角(顎など)の太り過ぎを抑制。さらに凹頂点(c<0)は押し出しを抑えて
+            #   inverted hull のはみ出し/浮きを軽減する。0 で一様。
+            weights = []
+            for c in curv:
+                w = min(cap, max(0.0, 1.0 + influence * abs(c)))
+                if c < 0.0:
+                    w *= max(0.0, 1.0 - suppress * (-c))
+                weights.append(max(0.0, w))
             try:
                 cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
             except Exception:
                 pass
-            # 影響度・上限をラインに保存（選択同期・再開用）
-            for at, v in (("toonCurv", influence), ("toonCurvCap", cap)):
+            # 影響度・上限・凹み抑制をラインに保存（選択同期・再開用）
+            for at, v in (("toonCurv", influence), ("toonCurvCap", cap),
+                          ("toonConcave", suppress)):
                 if not cmds.attributeQuery(at, node=line, exists=True):
                     try:
                         cmds.addAttr(line, ln=at, at="double", dv=0.0)

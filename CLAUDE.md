@@ -51,8 +51,11 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
      ライン削除時は `_cleanup_orphan_handles` で孤立ハンドルと空ホルダーを掃除。
    曲率起伏は textureDeformer の weightList（頂点ウェイト）で実現。
    `weight[i]=min(上限, 1+影響度*|曲率[i]|)`（曲がる所＝太く・直線＝細く、上限で角の太り過ぎを抑制）。
-   曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。影響度(0〜10)/上限(1〜10)は
-   ライン attr `toonCurv`/`toonCurvCap` に保存。太さ=offset とは独立。
+   さらに凹頂点(曲率<0)は `*= (1-凹み抑制*|曲率|)` で押し出しを下げ、凹部での inverted hull の
+   はみ出し/浮き（縁から離れて見える現象）を軽減する。
+   曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2。凸>0/凹<0）。
+   影響度(0〜10)/上限(1〜10)/凹み抑制(0〜1)はライン attr `toonCurv`/`toonCurvCap`/`toonConcave`
+   に保存。太さ=offset とは独立。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
