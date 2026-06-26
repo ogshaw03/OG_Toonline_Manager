@@ -218,19 +218,28 @@ def _serialize_profile(pts):
 
 
 def _sample_profile(pts, t):
+    """Catmull-Rom スプラインでスムーズ補間（端点は複製してタンジェント代用）。"""
     if not pts:
         return 1.0
+    n = len(pts)
     if t <= pts[0][0]:
         return pts[0][1]
     if t >= pts[-1][0]:
         return pts[-1][1]
-    for i in range(1, len(pts)):
-        if t <= pts[i][0]:
-            x0, y0 = pts[i - 1]
-            x1, y1 = pts[i]
-            if x1 <= x0:
-                return y1
-            return y0 + (y1 - y0) * (t - x0) / (x1 - x0)
+    for i in range(n - 1):
+        x1, y1 = pts[i][0], pts[i][1]
+        x2, y2 = pts[i + 1][0], pts[i + 1][1]
+        if x1 <= t <= x2:
+            if x2 <= x1:
+                return y2
+            s = (t - x1) / (x2 - x1)
+            p0 = pts[i - 1][1] if i - 1 >= 0 else y1
+            p3 = pts[i + 2][1] if i + 2 < n else y2
+            y = 0.5 * (2 * y1
+                       + (-p0 + y2) * s
+                       + (2 * p0 - 5 * y1 + 4 * y2 - p3) * s * s
+                       + (-p0 + 3 * y1 - 3 * y2 + p3) * s * s * s)
+            return max(0.0, min(2.0, y))
     return pts[-1][1]
 
 
@@ -643,7 +652,10 @@ class _RampWidget(QtWidgets.QWidget):
         p.drawLine(int(x0), int(by), int(x1), int(by))   # 基準 y=1
         p.setPen(QtGui.QPen(QtGui.QColor(120, 200, 255), 2))
         prev = None
-        for x, y in self._pts:
+        steps = 60
+        for k in range(steps + 1):
+            x = k / float(steps)
+            y = _sample_profile(self._pts, x)
             px, py = self._to_px(x, y)
             if prev is not None:
                 p.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
@@ -861,20 +873,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._on_tpslider, self._on_tpspin, self._reset_taper,
             on_key=self._key_taper, tip="ライン末端ほど細くする（エッジライン向け）")
         lvl.addLayout(c4row)
-        # 太さプロファイル（長手方向のカーブで強弱）
-        prow = QtWidgets.QHBoxLayout()
+        # 太さプロファイル（長手方向のカーブで強弱）。エッジライン選択時のみ表示。
+        self.w_profile = QtWidgets.QWidget()
+        prow = QtWidgets.QHBoxLayout(self.w_profile); prow.setContentsMargins(0, 0, 0, 0)
         plabel = QtWidgets.QLabel("太さプロファイル")
         plabel.setAlignment(QtCore.Qt.AlignTop)
         prow.addWidget(plabel)
         self.ramp = _RampWidget()
-        self.ramp.setToolTip("長手方向の太さ強弱。左クリックで点追加/移動、右クリックで削除（エッジライン向け）")
+        self.ramp.setToolTip("長手方向の太さ強弱。左クリックで点追加/移動、右クリックで削除")
         self.ramp.valueChanged.connect(self._apply_profile)
         prow.addWidget(self.ramp, 1)
         b_rp = QtWidgets.QPushButton("↺"); b_rp.setFixedWidth(26)
         b_rp.setToolTip("プロファイルをリセット")
         b_rp.clicked.connect(self._reset_profile)
         prow.addWidget(b_rp)
-        lvl.addLayout(prow)
+        lvl.addWidget(self.w_profile)
         lay.addWidget(self.w_line)
 
         # グループ用パネル（グループ選択時のみ表示）: グループ倍率
@@ -1254,8 +1267,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         nodes = self._selected_nodes()
         has_line = any(cmds.attributeQuery(TAG, node=n, exists=True) for n in nodes)
         has_group = any(cmds.attributeQuery(GROUP_TAG, node=n, exists=True) for n in nodes)
+        has_edge = any(cmds.attributeQuery(EDGE_TAG, node=n, exists=True) for n in nodes)
         self.w_line.setVisible(has_line)
         self.w_group.setVisible(has_group and not has_line)
+        # 太さプロファイルはエッジライン選択時のみ
+        self.w_profile.setVisible(has_line and has_edge)
 
     def _on_tree_selection(self):
         self._update_panels()
