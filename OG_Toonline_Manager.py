@@ -829,12 +829,16 @@ class _OutlineTree(QtWidgets.QTreeWidget):
         target = self.itemAt(pos)
         group = self.ui._group_of_item(target)
         lines = self.ui._selected_lines()
+        # Qt 既定の InternalMove に任せると、Move を accept した時点で startDrag が
+        # ソース項目を削除する。空白にドロップ（移動先なし）すると再構築されないまま
+        # 項目が消えるため、既定の移動は行わせず必ず IgnoreAction にして、
+        # 親子付けは Maya 側で行い refresh_tree でツリーを作り直す。
+        event.setDropAction(QtCore.Qt.IgnoreAction)
+        event.ignore()
         if group and lines:
-            self.ui._move_lines_to(lines, group)
-        try:
-            event.acceptProposedAction()
-        except Exception:
-            event.accept()
+            self.ui._move_lines_to(lines, group)   # 内部で refresh_tree
+        else:
+            self.ui.refresh_tree()                 # 空白等への無効ドロップは元の状態へ復元
 
 
 class ToonOutlineUI(QtWidgets.QDialog):

@@ -88,6 +88,9 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 
 UI: グループは展開式（プルダウン）のツリー項目。ライン/グループともダブルクリックでリネーム。
 ラインはグループへ **ドラッグ&ドロップ**で移動（`_OutlineTree.dropEvent` → `_move_lines_to`）。
+※ Qt 既定の InternalMove は Move を accept すると startDrag がソース項目を削除するため、
+  空白へのドロップで項目が消える。`dropEvent` は必ず `IgnoreAction`＋`ignore()` にして
+  既定移動を行わせず、親子付けは Maya 側で行い `refresh_tree` で作り直す（無効ドロップは復元）。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
 
 太さの実体は **textureDeformer.offset**（ライン別に setAttr して制御）。
