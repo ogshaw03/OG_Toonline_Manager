@@ -54,6 +54,18 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
    太り過ぎを抑制）。曲率は `_compute_curvature`（近傍平均との差を法線へ投影、om2）。
    影響度(0〜10)/曲率上限(1〜10)はライン attr `toonCurv`/`toonCurvCap` に保存。太さ=offset とは独立。
 
+### アニメーション（ラインコントローラー）
+
+各ライン transform に**キーアブルな英語アトリビュート**を持たせ、コントローラーとして使う:
+`thickness` / `curvature` / `curvatureCap`（`CTRL_THICK`/`CTRL_CURV`/`CTRL_CAP`）。
+- **太さ**: `line.thickness → textureDeformer.offset` を `connectAttr` で直結。DG評価なので
+  キー/再生/レンダーまで完全にアニメ可能（軽量）。UIスライダーは `line.thickness` を setAttr。
+- **曲率起伏/曲率上限**: 頂点ウェイトは Python 計算が必要なため、`curvature`/`curvatureCap` の
+  attributeChange を監視する `scriptJob`（`_ensure_curv_jobs`）で `_update_curv_weights` を呼び
+  再計算。タイムライン再生でも追従（高密度メッシュは負荷大・バッチレンダーでは不可）。
+- UIの「現フレームにキー」ボタンで選択ラインの3属性へ `setKeyframe`。
+- ノード名・属性名は全て英語（日本語混入による不具合回避）。UIラベルは日本語のまま。
+
 UI: グループは展開式（プルダウン）のツリー項目。ライン/グループともダブルクリックでリネーム。
 ラインはグループへ **ドラッグ&ドロップ**で移動（`_OutlineTree.dropEvent` → `_move_lines_to`）。
 4. 法線反転は **shape の `opposite=1`**（ヒストリノードを足さない）＋ `doubleSided=0`。
