@@ -51,6 +51,7 @@ CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
+DEFAULT_EDGE_THICK = 0.025            # 新規エッジライン生成時の初期太さ
 DEFAULT_CURV  = 0.0                   # 〃 初期曲率起伏
 DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
@@ -1859,7 +1860,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not edges:
             cmds.warning("メッシュのエッジを選択してください"); return
         # 新規エッジラインは UI の現在値ではなく初期値で生成する
-        thick = DEFAULT_THICK
+        thick = DEFAULT_EDGE_THICK
         _, sg = _ensure_shader(self._color)
         grp = self._current_group()
 
@@ -1910,7 +1911,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             line = cmds.parent(line, grp)[0]
             ctrl = _ensure_line_anim(line, thick)
             # 各項目を初期値で生成（太さ/曲率起伏/曲率上限/末端細り/プロファイル）
-            for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+            for at, dv in ((CTRL_THICK, DEFAULT_EDGE_THICK), (CTRL_CURV, DEFAULT_CURV),
                            (CTRL_CAP, DEFAULT_CAP), (CTRL_TAPER, 0.0)):
                 if cmds.attributeQuery(at, node=ctrl, exists=True):
                     try:
