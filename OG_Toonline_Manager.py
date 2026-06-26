@@ -610,7 +610,7 @@ class _RampWidget(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super(_RampWidget, self).__init__(parent)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(90)
         self.setMinimumWidth(180)
         self._pts = [[0.0, 1.0], [1.0, 1.0]]
         self._drag = -1
@@ -745,7 +745,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager")
         self.setMinimumWidth(380)
-        self.setMinimumHeight(460)
+        self.setMinimumHeight(560)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
