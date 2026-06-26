@@ -822,9 +822,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager")
         self.setMinimumWidth(380)
-        # リスト(固定高)＋スライダーパネル＋プロファイル＋下部コントロールが
-        # 重ならない高さを最小に（これより縮めるとスライダーがリストに被るため）。
-        self.setMinimumHeight(780)
+        # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
+        # リストが余白を吸収するので下に余分な余白は出ない。
+        self.setMinimumHeight(620)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -932,10 +932,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemDoubleClicked.connect(self._on_double_click)
-        # リストは固定高さ。下のスライダーパネルが選択で表示/非表示されても
-        # リストの大きさが変わらないようにする（余白は最下部のストレッチが吸収）。
-        self.tree.setFixedHeight(240)
-        lay.addWidget(self.tree)
+        # リストは余白(ウィンドウの伸縮分)を吸収して広がる。スライダーパネル側を
+        # 固定高さにすることで、選択でパネルが切り替わってもリストの大きさは一定。
+        self.tree.setMinimumHeight(120)
+        lay.addWidget(self.tree, 1)
         self.lbl_dd = QtWidgets.QLabel("※ ラインをグループへドラッグ&ドロップで移動。ダブルクリックで名前変更")
         self.lbl_dd.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_dd)
@@ -975,7 +975,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_rp.clicked.connect(self._reset_profile)
         prow.addWidget(b_rp)
         lvl.addWidget(self.w_profile)
-        lay.addWidget(self.w_line)
 
         # グループ用パネル（グループ選択時のみ表示）: グループ倍率
         self.w_group = QtWidgets.QWidget()
@@ -985,7 +984,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._on_grpslider, self._on_grpspin, self._reset_grpmult,
             on_key=self._key_grpmult, tip="選択グループの太さ倍率")
         gvl.addLayout(grow)
-        lay.addWidget(self.w_group)
+
+        # ライン用/グループ用パネルを固定高さの領域に収める。どちらを表示しても
+        # 領域の高さは一定なので、リスト(上)の大きさが選択で変化しない。
+        self.w_panels = QtWidgets.QWidget()
+        pvl = QtWidgets.QVBoxLayout(self.w_panels); pvl.setContentsMargins(0, 0, 0, 0)
+        pvl.setSpacing(0)
+        pvl.addWidget(self.w_line)
+        pvl.addWidget(self.w_group)
+        pvl.addStretch(1)
+        self.w_panels.setFixedHeight(200)   # 太さ/曲率/曲率上限+プロファイルが収まる高さ
+        lay.addWidget(self.w_panels)
 
         self.lbl_hint = QtWidgets.QLabel("※ 値はツリーで選択したライン/グループに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
@@ -1024,9 +1033,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
-
-        # パネルの表示/非表示で生じる余白を吸収（リストや各行は動かさない）
-        lay.addStretch(1)
 
     # ========== シーン走査ヘルパ ==========
     def _ensure_line_holder(self):
@@ -1984,8 +1990,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 _update_curv_weights(dup)
                 self._apply_line_selectable(dup, self._lock_select())
                 made.append(dup)
-            if made:
-                cmds.select(made, r=True)
+            # 生成したラインはビューポート/アウトライナーで選択状態にしない
+            cmds.select(clear=True)
             # 取りこぼしたハンドルがあればトップから退避（確実化）
             self._stash_loose_handles()
         finally:

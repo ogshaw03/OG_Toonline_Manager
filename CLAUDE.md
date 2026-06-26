@@ -117,10 +117,11 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
   実際の offset は `EDGE_THICK_SCALE`(0.2) を掛けて細くする（`_ensure_thickness_chain` が
   edge のとき `mB.output × EDGE_THICK_SCALE`(=`<ctrl>_thkScale`) を offset へ）。円プロファイル
   基準半径は `EDGE_BASE_RADIUS`(0.01)。既定 UI 0.05 → offset 0.01 + 基準 0.01 ≒ 半径0.02。
-- **UIリストは固定高さ**(`tree.setFixedHeight(240)`)。選択でスライダーパネル(w_line/w_group/
-  w_profile)が表示/非表示されてもリストの大きさが変わらないようにし、余白は最下部の
-  `addStretch` が吸収する。ウィンドウ最小高さは `setMinimumHeight(780)`＝固定リスト＋
-  スライダーパネル＋プロファイル＋下部コントロールが重ならない高さ（これより縮めると被る）。
+- **UIリストの大きさを選択で変えない**: リスト(tree)は stretch=1 でウィンドウの伸縮分を
+  吸収（＝下に余分な余白を出さない）。選択で切り替わるスライダーパネルは固定高さの
+  コンテナ `w_panels`(`setFixedHeight(200)`、中に w_line/w_group)に収めるため、ライン/
+  グループ/エッジ(プロファイル有無)のどれを選んでもパネル領域の高さが一定＝リストは不動。
+  ウィンドウ最小高さ `setMinimumHeight(620)`。
 - **エッジラインの全体/グループ/ライン太さが 0 のとき消える**: 円プロファイル基準半径が
   あるため offset=0 でもチューブが残る。`_ensure_thickness_chain` で総太さ出力(mB.output)を
   `condition`(Greater Than `EDGE_VIS_EPS`=1e-4) 経由で **shape.visibility** に接続し、
@@ -142,9 +143,9 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
     `_tube_normals_outward`（中心カーブ最近接点→頂点への向きと頂点法線の内積を多数決）で
     外向きか判定し、内向きなら `polyNormal(normalMode=0)` を **textureDeformer の前**に積んで
     必ず外向き＝膨らむ向きにする。
-- 新規生成時は UI の現在値ではなく **初期値で生成**（太さ=`DEFAULT_EDGE_THICK`(0.025)/曲率起伏=0/
-  曲率上限=3/末端細り=0/プロファイル=フラット）。生成後は **アウトライナーで選択しない**
-  （`cmds.select(clear=True)`）。hull(`create_outlines`)は従来どおり現在値で生成・選択する。
+- 新規生成時は UI の現在値ではなく **初期値で生成**（太さ=`DEFAULT_EDGE_THICK`(0.05)/曲率起伏=0/
+  曲率上限=3/末端細り=0/プロファイル=フラット）。**hull/edge とも生成後は選択状態にしない**
+  （`cmds.select(clear=True)`）。
 - **太さ・曲率起伏は hull と完全に同じ機構**（チューブ shape に textureDeformer を付け、
   offset=太さ／weightList=曲率）。`_thick_target` は hull/エッジとも `textureDeformer.offset`。
   曲率はチューブ自身の表面曲率（曲がった所ほど太い）。グループ/全体倍率・キー・色も共通。
