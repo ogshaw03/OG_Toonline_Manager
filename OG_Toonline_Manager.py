@@ -51,8 +51,8 @@ CTRL_THICK  = "thickness"
 CTRL_CURV   = "curvature"
 CTRL_CAP    = "curvatureCap"
 CTRL_CMIN   = "curvatureMin"          # 曲率下限（曲率が小さい所＝平らな所の太さ倍率の下限）
-DEFAULT_THICK = 0.05                  # 新規ライン生成時の初期太さ
-DEFAULT_EDGE_THICK = 0.05             # 新規エッジライン生成時の初期太さ(UI表示値)
+DEFAULT_THICK = 0.5                   # 新規ライン生成時の初期太さ
+DEFAULT_EDGE_THICK = 0.5              # 新規エッジライン生成時の初期太さ(UI表示値)
 EDGE_THICK_SCALE = 0.2               # エッジは UI 太さ×この係数を offset に流す（見た目を細く）
 EDGE_BASE_SCALE = 0.2                # エッジ円プロファイル半径 = UI 太さ×この係数（太さに比例して細る）
 EDGE_BASE_RADIUS = 0.01              # 生成直後の初期半径（直後に太さチェーンで駆動される）
@@ -1006,7 +1006,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.w_line = QtWidgets.QWidget()
         lvl = QtWidgets.QVBoxLayout(self.w_line); lvl.setContentsMargins(0, 0, 0, 0)
         trow, self.slider, self.spin = self._slider_spin_row(
-            "太さ", 0, 2000, 50, 3, 0.0, 2.0, 0.01, 0.05,
+            "太さ", 0, 2000, 500, 3, 0.0, 2.0, 0.01, 0.5,
             self._on_slider, self._on_spin, self._reset_thickness,
             on_key=self._key_thickness)
         lvl.addLayout(trow)
