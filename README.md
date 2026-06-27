@@ -19,6 +19,13 @@ OG_Toonline_Manager.show()
 
 シェルフボタンに登録すると便利です。
 
+英語UI版（機能は同じ・同じシーンノードを操作）は `OG_Toonline_Manager_EN.py` を使います。
+
+```python
+import OG_Toonline_Manager_EN
+OG_Toonline_Manager_EN.show()
+```
+
 ## 使い方
 
 **作る**
