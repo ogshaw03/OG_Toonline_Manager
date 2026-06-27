@@ -77,6 +77,10 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。
+- **接続/ロックで設定不可なときの忠告**: コントローラー属性にコンストレイント等が接続されていて
+  UI から `setAttr` できない場合、`_set_ctrl_attr` が `getAttr settable` で判定し「他ノードに接続
+  されているため変更できない」旨を `cmds.warning` で一度だけ表示（同一プラグは `_warned_connected`
+  でデデュープ、選択変更でクリア）。全 apply（太さ/曲率起伏/上限/下限/プロファイル/グループ・全体倍率）で共通。
 - **太さ**: `offset = ctrl.thickness × group.thicknessMult × ROOT.thicknessMult` を
   `multDoubleLinear` 2段（`<ctrl>_thkA`/`_thkB`）で構成し `textureDeformer.offset` へ接続。
   ライン値・グループ倍率（`GMULT` on group）・全体倍率（`GMULT` on ROOT）の乗算で、全て DG・
@@ -124,16 +128,16 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
 ### 生成時の初期値・選択不可
 
 - **新規生成は常に初期値**（UIの現在スライダー値を引き継がない）。hull/エッジとも
-  `create_outlines`/`create_edge_line` で太さ=`DEFAULT_THICK`(hull 0.05)/`DEFAULT_EDGE_THICK`
-  (edge 0.05)・曲率起伏=`DEFAULT_CURV`(0)・曲率上限=`DEFAULT_CAP`(3)・末端細り=0・
+  `create_outlines`/`create_edge_line` で太さ=`DEFAULT_THICK`(hull 0.5)/`DEFAULT_EDGE_THICK`
+  (edge 0.5)・曲率起伏=`DEFAULT_CURV`(0)・曲率上限=`DEFAULT_CAP`(3)・末端細り=0・
   プロファイル=フラット を `setAttr` してから生成。リセット(↺)も同じ定数・edge/hull 出し分け。
-- **エッジは UI 太さと実太さを分離**: UI 値(=ctrl.thickness)は hull と同じ 0.05 を既定にしつつ、
+- **エッジは UI 太さと実太さを分離**: UI 値(=ctrl.thickness)は hull と同じ既定にしつつ、
   実際の offset は `EDGE_THICK_SCALE`(0.2) を掛けて細くする（`_ensure_thickness_chain` が
   edge のとき `mB.output × EDGE_THICK_SCALE`(=`<ctrl>_thkScale`) を offset へ）。
 - **円プロファイル半径も太さに比例**: 固定半径だと細くしても基準半径分の太さが残るため、
   `makeNurbCircle.radius` を `mB.output × EDGE_BASE_SCALE`(0.2)(=`<ctrl>_radScale`) で駆動し
   （`_line_circle_node` で履歴から円ノードを取得）、太さに比例してチューブ全体が細る。
-  既定 UI 0.05 → offset 0.01 + 半径 0.01 ≒ 半径0.02。太さ→0 で半径も offset も 0（可視は
+  既定 UI 0.5 → offset 0.1 + 半径 0.1 ≒ 半径0.2。太さ→0 で半径も offset も 0（可視は
   `EDGE_VIS_EPS` 条件で非表示）。生成直後の初期半径は `EDGE_BASE_RADIUS`(0.01)。
 - **UIリストの大きさを選択で変えない**: リスト(tree)は stretch=1 でウィンドウの伸縮分を
   吸収（＝下に余分な余白を出さない）。選択で切り替わるスライダーパネルは固定高さの
@@ -161,7 +165,7 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
     `_tube_normals_outward`（中心カーブ最近接点→頂点への向きと頂点法線の内積を多数決）で
     外向きか判定し、内向きなら `polyNormal(normalMode=0)` を **textureDeformer の前**に積んで
     必ず外向き＝膨らむ向きにする。
-- 新規生成時は UI の現在値ではなく **初期値で生成**（太さ=`DEFAULT_EDGE_THICK`(0.05)/曲率起伏=0/
+- 新規生成時は UI の現在値ではなく **初期値で生成**（太さ=`DEFAULT_EDGE_THICK`(0.5)/曲率起伏=0/
   曲率上限=3/末端細り=0/プロファイル=フラット）。**hull/edge とも生成後は選択状態にしない**
   （`cmds.select(clear=True)`）。
 - **太さ・曲率起伏は hull と完全に同じ機構**（チューブ shape に textureDeformer を付け、
