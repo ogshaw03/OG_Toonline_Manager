@@ -77,6 +77,10 @@ shape.opposite=1 + doubleSided=0 で法線反転＆バックフェースカリ�
 - UIでラインを選択すると **コントローラーを Maya 選択** → タイムスライダにキーが表示される。
 - UIのスピンボックスは **キー状態で着色**（`_attr_key_state`: アニメ有り=ピンク / 現フレームが
   キー=赤）。`timeChanged` scriptJob で再生・スクラブ時に色と数値を追従。
+- **接続/ロックで設定不可なときの忠告**: コントローラー属性にコンストレイント等が接続されていて
+  UI から `setAttr` できない場合、`_set_ctrl_attr` が `getAttr settable` で判定し「他ノードに接続
+  されているため変更できない」旨を `cmds.warning` で一度だけ表示（同一プラグは `_warned_connected`
+  でデデュープ、選択変更でクリア）。全 apply（太さ/曲率起伏/上限/下限/プロファイル/グループ・全体倍率）で共通。
 - **太さ**: `offset = ctrl.thickness × group.thicknessMult × ROOT.thicknessMult` を
   `multDoubleLinear` 2段（`<ctrl>_thkA`/`_thkB`）で構成し `textureDeformer.offset` へ接続。
   ライン値・グループ倍率（`GMULT` on group）・全体倍率（`GMULT` on ROOT）の乗算で、全て DG・

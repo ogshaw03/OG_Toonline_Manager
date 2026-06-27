@@ -891,6 +891,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
         self._time_job = None          # timeChanged scriptJob
+        self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
         self._build()
         self.refresh_tree()
         self._update_panels()      # 初期は選択無し → ライン/グループパネル非表示
@@ -1486,6 +1487,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.w_profile.setVisible(has_line and has_edge)
 
     def _on_tree_selection(self):
+        self._warned_connected.clear()   # 選択が変わったら接続警告の抑制をリセット
         self._update_panels()
         self._set_mult_widgets()
         # 選択ノードのコントローラーを Maya 選択（タイムスライダにキー表示）
@@ -1594,10 +1596,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.undoInfo(openChunk=True)
         try:
             grpctrl = _ensure_group_ctrl(grp)
-            try:
-                cmds.setAttr(grpctrl + "." + GMULT, val)
-            except Exception:
-                pass
+            self._set_ctrl_attr(grpctrl, GMULT, val, "グループ倍率")
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
@@ -1618,10 +1617,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.undoInfo(openChunk=True)
         try:
             gc = _ensure_global_ctrl()
-            try:
-                cmds.setAttr(gc + "." + GMULT, val)
-            except Exception:
-                pass
+            self._set_ctrl_attr(gc, GMULT, val, "全体倍率")
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
@@ -1679,6 +1675,36 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.slider.blockSignals(True); self.slider.setValue(int(val * 1000)); self.slider.blockSignals(False)
         self._apply_thickness(val)
 
+    # ---- コントローラー属性の設定可否チェック（接続/ロックで UI 制御不可なら警告） ----
+    def _set_ctrl_attr(self, ctrl, attr, val, label, as_string=False):
+        """ctrl.attr を設定。接続/ロックで設定不可なら一度だけ忠告して False を返す。
+        （コントローラーにコンストレイント等のノードが繋がっていると UI から変更できない）"""
+        if not ctrl or not cmds.attributeQuery(attr, node=ctrl, exists=True):
+            return False
+        plug = ctrl + "." + attr
+        settable = True
+        try:
+            settable = cmds.getAttr(plug, settable=True)
+        except Exception:
+            settable = True
+        if not settable:
+            if plug not in self._warned_connected:
+                self._warned_connected.add(plug)
+                src = cmds.listConnections(plug, s=True, d=False, p=True) or []
+                why = ("接続元: " + src[0]) if src else "ロックされています"
+                cmds.warning("{} の「{}」は他のノードに接続されているため UI から変更できません"
+                             "（{}）。アニメ/接続を外すか K でキーしてください。"
+                             .format(_short(ctrl), label, why))
+            return False
+        try:
+            if as_string:
+                cmds.setAttr(plug, val, type="string")
+            else:
+                cmds.setAttr(plug, val)
+            return True
+        except Exception:
+            return False
+
     def _apply_thickness(self, val):
         lines = self._selected_lines()
         if not lines:
@@ -1690,10 +1716,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             for line in lines:
                 # コントローラー属性 thickness を設定（offset へ接続済みなので反映される）
                 ctrl = _ensure_line_anim(line, val)
-                try:
-                    cmds.setAttr(ctrl + "." + CTRL_THICK, val)
-                except Exception:
-                    pass
+                self._set_ctrl_attr(ctrl, CTRL_THICK, val, "太さ")
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
@@ -1759,11 +1782,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             for line in lines:
                 ctrl = _ensure_line_anim(line, self.spin.value())
-                if cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
-                    try:
-                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
-                    except Exception:
-                        pass
+                self._set_ctrl_attr(ctrl, CTRL_PROFILE, s, "太さプロファイル", as_string=True)
                 _update_curv_weights(line)
         finally:
             cmds.undoInfo(closeChunk=True)
@@ -1787,13 +1806,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # コントローラー属性 curvature / curvatureCap / curvatureMin を設定 → scriptJob
                 #   で頂点ウェイトが再計算されるが、即時反映のため明示的にも更新する。
                 ctrl = _ensure_line_anim(line, self.spin.value())
-                try:
-                    cmds.setAttr(ctrl + "." + CTRL_CURV, influence)
-                    cmds.setAttr(ctrl + "." + CTRL_CAP, cap)
-                    if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
-                        cmds.setAttr(ctrl + "." + CTRL_CMIN, cmin)
-                except Exception:
-                    pass
+                self._set_ctrl_attr(ctrl, CTRL_CURV, influence, "曲率起伏")
+                self._set_ctrl_attr(ctrl, CTRL_CAP, cap, "曲率上限")
+                self._set_ctrl_attr(ctrl, CTRL_CMIN, cmin, "曲率下限")
                 _update_curv_weights(line)
         finally:
             if chunk:
