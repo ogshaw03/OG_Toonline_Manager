@@ -105,7 +105,7 @@ def _ensure_shader(color):
 
 
 _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
-// facing はビュー空間法線の z 成分で算出（カメラ位置・行列インデックスに依存しない）。
+// 法線入力に頼らず、ビュー空間位置の微分(ddx/ddy)から面法線を求め facing を算出。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
 
@@ -121,25 +121,23 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
-struct V2P { float4 HPos : SV_Position; float3 ON : TEXCOORD0; float3 VN : TEXCOORD1; };
+struct APPDATA { float3 Position : POSITION; };
+struct V2P { float4 HPos : SV_Position; float3 VP : TEXCOORD0; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
-    OUT.ON   = IN.Normal;                        // 生のオブジェクト空間法線（診断用）
-    OUT.VN   = mul(IN.Normal, (float3x3)gWV);    // ビュー空間法線
+    OUT.VP   = mul(float4(IN.Position, 1.0f), gWV).xyz;   // ビュー空間位置
     return OUT;
 }
 
 float4 PShader(V2P IN) : SV_Target
 {
-    // ★診断モード2: 行列変換前の「生の法線」を色で表示（N*0.5+0.5）。
-    //   ・なめらかな多色（赤緑青のグラデ）→ 法線入力は正常 → 行列変換(WorldView)が原因
-    //   ・一様な単色/黒 or ザラザラ → 法線入力自体が壊れている
-    float3 N = normalize(IN.ON);
-    return float4(N * 0.5f + 0.5f, 1.0f);
+    // ★診断モード3: 位置微分から面法線→facing をグレースケール表示（正面=白/シルエット=黒）。
+    float3 N = normalize(cross(ddx(IN.VP), ddy(IN.VP)));
+    float facing = abs(N.z);
+    return float4(facing, facing, facing, 1.0f);
 }
 
 technique11 Main < int isTransparent = 1; >
