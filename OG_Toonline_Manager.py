@@ -72,7 +72,7 @@ PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイ�
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
 FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
-FRES_ZOFFSET = 0.05                  # z-fighting 回避用の法線オフセット（診断中は大きめ）
+FRES_ZOFFSET = 0.02                  # z-fighting 回避用の法線オフセット（シェルを手前へ）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
@@ -105,7 +105,9 @@ def _ensure_shader(color):
 
 
 _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
-// 法線入力に頼らず、ビュー空間位置の微分(ddx/ddy)から面法線を求め facing を算出。
+// ビュー空間法線の z 成分で facing を算出（正面=1 / シルエット=0）。
+// しきい値(threshold)未満の縁だけ線色で不透明、それ以外は透明(discard)。
+// ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
 
@@ -121,23 +123,24 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-struct APPDATA { float3 Position : POSITION; };
-struct V2P { float4 HPos : SV_Position; float3 VP : TEXCOORD0; };
+struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
+struct V2P { float4 HPos : SV_Position; float3 VN : TEXCOORD0; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
-    OUT.VP   = mul(float4(IN.Position, 1.0f), gWV).xyz;   // ビュー空間位置
+    OUT.VN   = mul(IN.Normal, (float3x3)gWV);    // ビュー空間法線
     return OUT;
 }
 
 float4 PShader(V2P IN) : SV_Target
 {
-    // ★診断モード3: 位置微分から面法線→facing をグレースケール表示（正面=白/シルエット=黒）。
-    float3 N = normalize(cross(ddx(IN.VP), ddy(IN.VP)));
-    float facing = abs(N.z);
-    return float4(facing, facing, facing, 1.0f);
+    float3 N = normalize(IN.VN);
+    float facing = abs(N.z);                              // 1=正面, 0=シルエット
+    float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
+    if (a <= 0.002f) discard;
+    return float4(lineColor, a);
 }
 
 technique11 Main < int isTransparent = 1; >
@@ -206,19 +209,6 @@ def _build_fresnel_network(line, shape, color):
         cmds.connectAttr(shd + ".message", line + "." + FRES_LINK, f=True)
     except Exception:
         pass
-    # --- 診断ログ（全面黒の原因切り分け用）---
-    try:
-        eng = cmds.optionVar(q="vp2RenderingEngine") if cmds.optionVar(exists="vp2RenderingEngine") else "?"
-    except Exception:
-        eng = "?"
-    def _src(a):
-        try:
-            return cmds.getAttr(shd + "." + a) if cmds.attributeQuery(a, node=shd, exists=True) else "(なし)"
-        except Exception:
-            return "(取得不可)"
-    fx_ok = os.path.isfile(fx)
-    cmds.warning("[Fresnel診断] VP2={} / .fx存在={} / Position_Source={} / Normal_Source={}"
-                 .format(eng, fx_ok, _src("Position_Source"), _src("Normal_Source")))
     return shd, sg
 
 
@@ -2260,6 +2250,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
+        if made:
+            cmds.warning("フレネル輪郭はハードウェアシェーダです。ビューポートの "
+                         "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
 
     # ========== 生成 ==========
     def create_outlines(self, *args, **kwargs):

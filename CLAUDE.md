@@ -196,11 +196,12 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
   回避に `textureDeformer` を微小オフセット(`FRES_ZOFFSET`=0.001、lock)で付けるが、太さ制御には使わない。
 - シェーダは **VP2 ハードウェアシェーダ `dx11Shader` + 自前 HLSL**（`_build_fresnel_network`/`_FRES_FX_HLSL`）。
   HLSL を `_fresnel_fx_path`（userAppDir/OG_Toonline_Manager/OG_ToonFresnel.fx）へ書き出して `dx11Shader.shader` に
-  ロード。ピクセルシェーダで `facing=abs(dot(N,V))` を計算し、`a=1-smoothstep(0,threshold,facing)`、`a<=0`で discard、
-  `float4(lineColor,a)` を出力（technique に `isTransparent=1`）。**カメラ位置は `ViewInverse[3]`、法線は `WorldInverseTranspose`**。
-  ※ **`samplerInfo.facingRatio` は VP2 で評価されず**（condition/surfaceShader/remapValue 経由でも全面真っ黒）、
-    ハードウェアシェーダで facing を自前計算するのが VP2/Hardware 2.0 バッチで効く唯一の方法。**DirectX11 VP2 前提**
-    （OpenGL VP2 では dx11Shader 不可 → 要 GLSL 版）。
+  ロード。VS で `WorldView` でビュー空間法線 `VN` を作り、PS で `facing=abs(normalize(VN).z)`、
+  `a=1-smoothstep(0,threshold,facing)`、`a<=0` で discard、`float4(lineColor,a)`（technique に `isTransparent=1`）。
+  ※ **`samplerInfo.facingRatio` は VP2 で評価されず**（lambert/condition/remapValue でも全面黒）、ハードウェアシェーダで
+    facing を自前計算するのが VP2/Hardware 2.0 バッチで効く唯一の方法。**DirectX11 VP2 前提**（OpenGL は要 GLSL 版）。
+  ※ **dx11Shader はビューポートの「テクスチャ表示 ON（ホットキー 6）」でないと表示されない**（生成時に警告で案内）。
+    カメラ位置/行列インデックス（ViewInverse[3]）は行/列メジャーで不安定なので使わず、ビュー空間法線 z で算出。
 - **太さ=dx11Shader の `threshold` uniform**（`FRES_THRESH`）。`_thick_target` が FRES のとき `shd.threshold` を返し、
   `_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.3) を流す。line→dx11Shader は `FRES_LINK` message で特定。
 - **scriptJob 不要**（曲率の頂点ウェイトは使わない＝`_ensure_line_anim` で curv ジョブをスキップ）。
