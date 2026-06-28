@@ -237,7 +237,7 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-static const float gZFrac = 0.002f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存）
+static const float gZFrac = 0.0012f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存・控えめ）
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
@@ -245,16 +245,12 @@ struct V2P { float4 HPos : SV_Position; };
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);   // ビュー空間位置
-    float3 vn   = mul(IN.Normal, (float3x3)gWV);         // ビュー空間法線
-    float  vl   = length(vn);
-    float3 vnn  = (vl > 1e-5f) ? (vn / vl) : float3(0.0f, 0.0f, 1.0f);
-    float  facing = abs(vnn.z);                          // 1=正面(内側) / 0=シルエット(縁)
-    // 内側だけ距離比例で奥へ押す（元メッシュが内側を覆う）。縁(facing~0)は押さないので
-    // 本来のシルエット深度のまま＝背後の別オブジェクトの手前に正しく描かれる。
-    vpos.z -= abs(vpos.z) * gZFrac * facing;
+    // ビュー空間へ → 距離に比例して一様に奥へ押す（near/far非依存・スメアが出ない）
+    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
+    vpos.z -= abs(vpos.z) * gZFrac;                // 元メッシュが内側を覆う
     float4 clip = mul(vpos, gProj);
-    float2 sn = vnn.xy;
+    float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
+    float2 sn = vn.xy;
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
