@@ -105,10 +105,12 @@ def _ensure_shader(color):
 
 
 _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
+#pragma pack_matrix(row_major)
+
 float4x4 gWVP   : WorldViewProjection;
 float4x4 gWorld : World;
 float4x4 gWIT   : WorldInverseTranspose;
-float4x4 gViewI : ViewInverse;
+float3   gCamPos : WorldCameraPosition;   // 行列インデックスに依存せずカメラ位置を取得
 
 float threshold <
     string UIName = "Threshold";
@@ -123,22 +125,21 @@ float3 lineColor <
 > = {0.0f, 0.0f, 0.0f};
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
-struct V2P { float4 HPos : SV_Position; float3 WN : TEXCOORD0; float3 WV : TEXCOORD1; };
+struct V2P { float4 HPos : SV_Position; float3 WN : TEXCOORD0; float3 WP : TEXCOORD1; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
     OUT.WN   = mul(IN.Normal, (float3x3)gWIT);
-    float3 wpos = mul(float4(IN.Position, 1.0f), gWorld).xyz;
-    OUT.WV   = gViewI[3].xyz - wpos;
+    OUT.WP   = mul(float4(IN.Position, 1.0f), gWorld).xyz;
     return OUT;
 }
 
 float4 PShader(V2P IN) : SV_Target
 {
     float3 N = normalize(IN.WN);
-    float3 V = normalize(IN.WV);
+    float3 V = normalize(gCamPos - IN.WP);
     float facing = abs(dot(N, V));                       // 1=正面, 0=シルエット
     float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
     if (a <= 0.002f) discard;
@@ -216,13 +217,14 @@ def _build_fresnel_network(line, shape, color):
         eng = cmds.optionVar(q="vp2RenderingEngine") if cmds.optionVar(exists="vp2RenderingEngine") else "?"
     except Exception:
         eng = "?"
-    has_thr = cmds.attributeQuery(FRES_THRESH, node=shd, exists=True)
-    has_col = cmds.attributeQuery(FRES_COLOR, node=shd, exists=True)
-    uattrs = [a for a in (cmds.listAttr(shd, ud=True) or []) if "." not in a]
+    def _src(a):
+        try:
+            return cmds.getAttr(shd + "." + a) if cmds.attributeQuery(a, node=shd, exists=True) else "(なし)"
+        except Exception:
+            return "(取得不可)"
     fx_ok = os.path.isfile(fx)
-    cmds.warning("[Fresnel診断] VP2エンジン={} / dx11Shader生成={} / .fx存在={} / "
-                 "threshold属性={} / lineColor属性={} / uniform属性={}"
-                 .format(eng, cmds.objExists(shd), fx_ok, has_thr, has_col, uattrs))
+    cmds.warning("[Fresnel診断] VP2={} / .fx存在={} / Position_Source={} / Normal_Source={}"
+                 .format(eng, fx_ok, _src("Position_Source"), _src("Normal_Source")))
     return shd, sg
 
 
