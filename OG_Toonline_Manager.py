@@ -219,7 +219,7 @@ def _build_fresnel_network(line, shape, color):
 
 _SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
 // 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
-// 背面のみ描画(CullMode=Front)で外周リング＝輪郭。重なり/シルエットのみ・カメラ依存。
+// さらに深度を僅かに奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
@@ -237,6 +237,8 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
+static const float gZBias = 0.0015f;   // 元メッシュに内側を隠させる深度押し込み量
+
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
 
@@ -251,6 +253,7 @@ V2P VShader(APPDATA IN)
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
     clip.xy += sn * thickness * px * clip.w;
+    clip.z += gZBias * clip.w;          // 奥へ押し込む → 元メッシュが内側を覆う＝外周だけ残る
     OUT.HPos = clip;
     return OUT;
 }
@@ -260,13 +263,10 @@ float4 PShader(V2P IN) : SV_Target
     return float4(lineColor, 1.0f);
 }
 
-RasterizerState CullFront { CullMode = Front; };
-
 technique11 Main
 {
     pass p0
     {
-        SetRasterizerState(CullFront);
         SetVertexShader(CompileShader(vs_5_0, VShader()));
         SetPixelShader(CompileShader(ps_5_0, PShader()));
     }
