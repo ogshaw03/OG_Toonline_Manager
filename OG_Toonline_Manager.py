@@ -211,6 +211,18 @@ def _build_fresnel_network(line, shape, color):
         cmds.connectAttr(shd + ".message", line + "." + FRES_LINK, f=True)
     except Exception:
         pass
+    # --- 診断ログ（全面黒の原因切り分け用）---
+    try:
+        eng = cmds.optionVar(q="vp2RenderingEngine") if cmds.optionVar(exists="vp2RenderingEngine") else "?"
+    except Exception:
+        eng = "?"
+    has_thr = cmds.attributeQuery(FRES_THRESH, node=shd, exists=True)
+    has_col = cmds.attributeQuery(FRES_COLOR, node=shd, exists=True)
+    uattrs = [a for a in (cmds.listAttr(shd, ud=True) or []) if "." not in a]
+    fx_ok = os.path.isfile(fx)
+    cmds.warning("[Fresnel診断] VP2エンジン={} / dx11Shader生成={} / .fx存在={} / "
+                 "threshold属性={} / lineColor属性={} / uniform属性={}"
+                 .format(eng, cmds.objExists(shd), fx_ok, has_thr, has_col, uattrs))
     return shd, sg
 
 
