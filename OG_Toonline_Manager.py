@@ -72,7 +72,7 @@ PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイ�
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
 FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
-FRES_ZOFFSET = 0.001                 # z-fighting 回避用の微小法線オフセット（固定）
+FRES_ZOFFSET = 0.05                  # z-fighting 回避用の法線オフセット（診断中は大きめ）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
@@ -122,25 +122,24 @@ float3 lineColor <
 > = {0.0f, 0.0f, 0.0f};
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
-struct V2P { float4 HPos : SV_Position; float3 VN : TEXCOORD0; };
+struct V2P { float4 HPos : SV_Position; float3 ON : TEXCOORD0; float3 VN : TEXCOORD1; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
-    OUT.VN   = mul(IN.Normal, (float3x3)gWV);   // ビュー空間法線
+    OUT.ON   = IN.Normal;                        // 生のオブジェクト空間法線（診断用）
+    OUT.VN   = mul(IN.Normal, (float3x3)gWV);    // ビュー空間法線
     return OUT;
 }
 
 float4 PShader(V2P IN) : SV_Target
 {
-    // ★診断モード: facing をグレースケールで不透明表示（正面=白 / シルエット=黒）。
-    //   ・なめらかな白黒グラデ → facing は正常（透明処理側が原因）
-    //   ・一様に真っ黒/真っ白 → 法線 or WorldView が不正
-    //   ・ザラザラのノイズ → 法線データが壊れている
-    float3 N = normalize(IN.VN);
-    float facing = abs(N.z);
-    return float4(facing, facing, facing, 1.0f);
+    // ★診断モード2: 行列変換前の「生の法線」を色で表示（N*0.5+0.5）。
+    //   ・なめらかな多色（赤緑青のグラデ）→ 法線入力は正常 → 行列変換(WorldView)が原因
+    //   ・一様な単色/黒 or ザラザラ → 法線入力自体が壊れている
+    float3 N = normalize(IN.ON);
+    return float4(N * 0.5f + 0.5f, 1.0f);
 }
 
 technique11 Main < int isTransparent = 1; >
