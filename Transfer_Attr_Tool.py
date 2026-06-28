@@ -64,20 +64,41 @@ def _selected_meshes():
     return out
 
 
+def _has_deformers(obj):
+    """obj にデフォーマ（geometryFilter 派生：skinCluster/blendShape 等）があるか。"""
+    hist = cmds.listHistory(obj, pruneDagObjects=True) or []
+    return bool(cmds.ls(hist, type="geometryFilter") or [])
+
+
 def bake_nondeformer(objs):
-    """非デフォーマヒストリ（transferAttributes 含む）をベイクして削除。デフォーマは保持。"""
+    """転写結果を焼き付けて transferAttributes を削除する。
+    デフォーマがあれば prePostDeformers でベイク（デフォーマ保持）、
+    無ければ delete -ch で全構築ヒストリをベイク削除（＝確実に消える）。
+    削除できたか検証して (成功数, 残存リスト) を返す。"""
     done = 0
+    remained = []
     cmds.undoInfo(openChunk=True)
     try:
         for o in objs:
+            if not _transfer_nodes(o):
+                continue
             try:
-                cmds.bakePartialHistory(o, prePostDeformers=True)
-                done += 1
+                if _has_deformers(o):
+                    # デフォーマを保持しつつ構築ヒストリ（transferAttributes 含む）を焼く
+                    cmds.bakePartialHistory(o, prePostDeformers=True)
+                else:
+                    # デフォーマが無い場合は prePostDeformers が無効化されることがあるため、
+                    # 全構築ヒストリをベイク削除（結果は保持され、確実に消える）
+                    cmds.delete(o, constructionHistory=True)
             except Exception:
                 cmds.warning("{} のベイクに失敗しました".format(_short(o)))
+            if _transfer_nodes(o):
+                remained.append(o)
+            else:
+                done += 1
     finally:
         cmds.undoInfo(closeChunk=True)
-    return done
+    return done, remained
 
 
 def bake_all_history(objs):
@@ -151,11 +172,14 @@ class TransferAttrUI(QtWidgets.QDialog):
         objs = _selected_meshes()
         if not objs:
             cmds.warning("オブジェクトを選択してください"); return
-        n = bake_nondeformer(objs)
+        done, remained = bake_nondeformer(objs)
         self.refresh()
-        if n:
-            cmds.inViewMessage(amg="{} 個をベイク削除（デフォーマ保持）".format(n),
-                               pos="midCenter", fade=True) if hasattr(cmds, "inViewMessage") else None
+        if remained:
+            cmds.warning("{} 個はデフォーマ保持のままでは transferAttributes を除去できませんでした。"
+                         "「全ヒストリをベイクして削除」を使うか構成をご確認ください: {}"
+                         .format(len(remained), ", ".join(_short(o) for o in remained)))
+        elif done:
+            cmds.warning("{} 個をベイクして transferAttributes を削除しました（結果は保持）。".format(done))
 
     def _on_bake_all(self):
         objs = _selected_meshes()
