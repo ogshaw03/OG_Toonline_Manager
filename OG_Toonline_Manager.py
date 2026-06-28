@@ -237,7 +237,7 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-static const float gZFrac = 0.0012f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存・控えめ）
+static const float gZFrac = 0.002f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存）
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
