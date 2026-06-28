@@ -217,12 +217,14 @@ def _build_fresnel_network(line, shape, color):
     return shd, sg
 
 
-_SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
-// 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
-// さらに深度を僅かに奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
+_SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (back-face ring / Maya dx11Shader / HLSL)
+// ライン用メッシュは巻き方向を反転済み → 既定カリングで「裏面(奥側)」が描かれ、
+// 元メッシュが内側を確実に覆う。リングは本来のシルエット深度なので背後オブジェクトの手前に出る。
+// 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出して均一太さの輪郭にする。
+// 法線は反転済みなので「外向き = -法線」方向へ押し出す。深度押し込みは不要。
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
-float4x4 gWV   : WorldView;
-float4x4 gProj : Projection;
+float4x4 gWVP : WorldViewProjection;
+float4x4 gWV  : WorldView;
 float2   gScreen : ViewportPixelSize;
 
 float thickness <
@@ -237,20 +239,15 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-static const float gZFrac = 0.002f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存）
-
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    // ビュー空間へ → 距離に比例して一様に奥へ押す（near/far非依存・スメアが出ない）
-    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
-    vpos.z -= abs(vpos.z) * gZFrac;                // 元メッシュが内側を覆う
-    float4 clip = mul(vpos, gProj);
-    float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
-    float2 sn = vn.xy;
+    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
+    float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線（反転済みメッシュ）
+    float2 sn = -vn.xy;                            // 外向き = 反転法線の逆
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
@@ -294,8 +291,9 @@ def _screen_fx_path():
 
 def _build_screen_network(line, shape, color):
     """スクリーン空間押し出し輪郭シェーダ（dx11Shader + 自前 HLSL）を shape に割り当てる。
-    頂点シェーダでクリップ空間に一定ピクセル押し出し＋フロントカリングで均一太さの輪郭。
-    隙間/浮きが出ず凸部でも細らない。太さ＝thickness uniform（ピクセル）。"""
+    メッシュは巻き方向反転済み → 既定カリングで裏面(奥側)が描かれ、元メッシュが内側を覆う。
+    頂点シェーダでクリップ空間に一定ピクセル押し出して均一太さの輪郭にする（隙間/浮きなし）。
+    太さ＝thickness uniform（ピクセル）。"""
     try:
         if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
             cmds.loadPlugin("dx11Shader", quiet=True)
@@ -407,11 +405,16 @@ def _fresnel_shader(line):
 
 
 def _line_src_shape(line):
-    """曲率計算用の元メッシュ（deformer のベース入力）を返す。"""
+    """元メッシュ（追従元）の shape を返す。
+    hull/フレネル: deformer のベース入力。スクリーン: toonSrcShape message リンク。"""
     defm = _line_deformer(line)
     if defm:
         conn = cmds.listConnections(defm + ".input[0].inputGeometry",
                                     s=True, d=False, sh=True) or []
+        if conn:
+            return conn[0]
+    if cmds.attributeQuery("toonSrcShape", node=line, exists=True):
+        conn = cmds.listConnections(line + ".toonSrcShape", s=True, d=False, sh=True) or []
         if conn:
             return conn[0]
     sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)
@@ -2430,23 +2433,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
                 cmds.delete(dup, constructionHistory=True)
 
-                # 変形追従用に textureDeformer(offset=0)。押し出しはシェーダで行うので 0 固定。
-                td = cmds.textureDeformer(dshape, strength=0, offset=0.0, direction="Normal")
-                defm = td[0]
-                handle = None
-                for c in (cmds.listConnections(defm, type="transform") or []):
-                    if "textureDeformerHandle" in _short(c):
-                        handle = c
-                        break
-                if handle is None and len(td) > 1:
-                    handle = td[1]
+                # 裏面リング方式: 巻き方向を反転(polyNormal)して既定カリングで裏面を描く。
+                # 反転ノードの入力を 元の outMesh に差し替え、反転＋変形追従を両立する。
+                rev = cmds.polyNormal(dshape, normalMode=0, ch=True)[0]   # 0=Reverse
+                inp = rev + ".inputPolymesh"
+                for s in (cmds.listConnections(inp, s=True, d=False, p=True) or []):
+                    try:
+                        cmds.disconnectAttr(s, inp)
+                    except Exception:
+                        pass
                 try:
-                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
+                    cmds.connectAttr(src + ".outMesh", inp, f=True)
                 except Exception:
                     cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
-                self._tuck_handle(handle)
+                # _line_src_shape / _ensure_follow 用に元 shape を message でリンク
+                if not cmds.attributeQuery("toonSrcShape", node=dup, exists=True):
+                    cmds.addAttr(dup, ln="toonSrcShape", at="message")
                 try:
-                    cmds.setAttr(defm + ".offset", 0.0, lock=True)
+                    cmds.connectAttr(src + ".message", dup + ".toonSrcShape", f=True)
                 except Exception:
                     pass
 
