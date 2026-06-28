@@ -209,16 +209,20 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 - 色は dx11Shader の `lineColor` uniform（`FRES_COLOR`）を直接変更。SG 差し替えはしない（線が消えるため）。
   曲率起伏/上限/下限/プロファイルは無効（UIには出るが効かない）。
 
-### ハイブリッド輪郭
+### スクリーン輪郭（クリップ空間押し出し・隙間なし均一太さ）
 
-純フレネルは facing のみ判定のため「寝ているだけの面（折り返し内側）」にも線が出る。背面法は
-逆に「重なり/シルエットの所だけ」に線が出る（寝た面には出ない）が凸部で交差ズレが出る。両者を
-併用するのが `create_hybrid_outline`（ボタン「ハイブリッド輪郭」）: 同じ選択メッシュに **ハル＋
-フレネルを同じグループへペア生成**（内部で `create_outlines`→選択戻し→`create_fresnel_outline`、
-全体を1 undo チャンク）。ハルが重なり/折れ目を担当、フレネルがシルエットを補強。各ラインは
-ツリーで `[背面]`/`[フレネル]` として個別に太さ/色/表示を調整できる。
-- 別案として **スクリーンスペース深度エッジ検出**（`OG_Edge_Outline.py` / `MRenderOverride`）も用意。
-  重なり/シルエット/折れ目の縁だけに正確に線を出すが、画面全体・グローバル・要実機調整の試験実装。
+ジオメトリ式ハル（textureDeformer のワールド法線オフセット）は、押し出しで元メッシュとライン
+メッシュの間に**3D の隙間**ができ、グラジング角でその隙間が見えて輪郭が浮く/交差する。これを
+解決するのが `create_screen_outline`（ボタン「スクリーン輪郭」、`SCRN_TAG`）:
+- dx11Shader の**頂点シェーダでクリップ空間（画面上）へ一定ピクセル押し出す**（`_SCRN_FX_HLSL`）。
+  `clip = pos×WVP`、ビュー空間法線 xy 方向へ `clip.xy += normalize(sn) * thickness * (2/viewport) * clip.w`。
+  押し出しが**元シルエットと同じ深度のまま画面上で広がる**ので隙間が出ず、`clip.w` 補正で**均一ピクセル太さ**。
+- `RasterizerState CullMode=Front`（背面のみ）で外周リング＝輪郭。元は別オブジェクトの深度で内側を覆う。
+- 太さ＝dx11Shader の `thickness`(px) uniform。`_thick_target` が SCRN のとき返し、`_ensure_thickness_chain`
+  が `mB.output × SCRN_SCALE`(6.0) を流す。色は `lineColor`（フレネルと共通の dx11 線色処理）。
+- 元へ `outMesh`(offset=0 lock)+`parent/scaleConstraint` で追従。曲率/プロファイルは無効・scriptJob 不要。
+- **VP2(DirectX11)・テクスチャ表示 ON(6) 前提**、カメラ依存、Hardware 2.0 バッチ対応。
+- 別案として **スクリーンスペース深度エッジ検出**（`OG_Edge_Outline.py` / `MRenderOverride`）も試験的に用意。
 
 ### 互換性の注意
 

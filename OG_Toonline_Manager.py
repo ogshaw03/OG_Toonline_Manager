@@ -74,7 +74,10 @@ FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの
 FRES_SCALE  = 0.1                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数（細め＝寝た面を拾いにくい）
 FRES_ZOFFSET = 0.001                 # 極小の法線オフセット（手前に出して見えるように・二重線最小）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
-FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
+FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名（フレネル/スクリーン共通）
+SCRN_TAG    = "isToonScreenLine"     # スクリーン空間押し出し輪郭（隙間なし・均一太さ）の識別タグ
+SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uniform 名（太さ駆動先）
+SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -205,6 +208,116 @@ def _build_fresnel_network(line, shape, color):
             pass
     cmds.sets(shape, e=True, forceElement=sg)
     # line → dx11Shader を message でリンク（太さ駆動先・色変更先の特定に使う）
+    if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
+        cmds.addAttr(line, ln=FRES_LINK, at="message")
+    try:
+        cmds.connectAttr(shd + ".message", line + "." + FRES_LINK, f=True)
+    except Exception:
+        pass
+    return shd, sg
+
+
+_SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
+// 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
+// 背面のみ描画(CullMode=Front)で外周リング＝輪郭。重なり/シルエットのみ・カメラ依存。
+// ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
+float4x4 gWVP : WorldViewProjection;
+float4x4 gWV  : WorldView;
+float2   gScreen : ViewportPixelSize;
+
+float thickness <
+    string UIName = "Thickness(px)";
+    float UIMin = 0.0;
+    float UIMax = 30.0;
+    float UIStep = 0.1;
+> = 3.0;
+
+float3 lineColor <
+    string UIName = "Line Color";
+    string UIWidget = "Color";
+> = {0.0f, 0.0f, 0.0f};
+
+struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
+struct V2P { float4 HPos : SV_Position; };
+
+V2P VShader(APPDATA IN)
+{
+    V2P OUT;
+    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
+    float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
+    float2 sn = vn.xy;
+    float  l  = length(sn);
+    sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
+    // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
+    float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
+    clip.xy += sn * thickness * px * clip.w;
+    OUT.HPos = clip;
+    return OUT;
+}
+
+float4 PShader(V2P IN) : SV_Target
+{
+    return float4(lineColor, 1.0f);
+}
+
+RasterizerState CullFront { CullMode = Front; };
+
+technique11 Main
+{
+    pass p0
+    {
+        SetRasterizerState(CullFront);
+        SetVertexShader(CompileShader(vs_5_0, VShader()));
+        SetPixelShader(CompileShader(ps_5_0, PShader()));
+    }
+}
+"""
+
+
+def _screen_fx_path():
+    d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
+    try:
+        if not os.path.isdir(d):
+            os.makedirs(d)
+    except Exception:
+        d = cmds.internalVar(userTmpDir=True)
+    path = os.path.join(d, "OG_ToonScreen.fx").replace("\\", "/")
+    try:
+        with open(path, "w") as f:
+            f.write(_SCRN_FX_HLSL)
+    except Exception:
+        pass
+    return path
+
+
+def _build_screen_network(line, shape, color):
+    """スクリーン空間押し出し輪郭シェーダ（dx11Shader + 自前 HLSL）を shape に割り当てる。
+    頂点シェーダでクリップ空間に一定ピクセル押し出し＋フロントカリングで均一太さの輪郭。
+    隙間/浮きが出ず凸部でも細らない。太さ＝thickness uniform（ピクセル）。"""
+    try:
+        if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
+            cmds.loadPlugin("dx11Shader", quiet=True)
+    except Exception:
+        cmds.warning("dx11Shader プラグインを読み込めません。VP2 を DirectX11 に設定してください。")
+        return None, None
+    base = "toonScreen_" + _short(line)
+    fx = _screen_fx_path()
+    shd = cmds.shadingNode("dx11Shader", asShader=True, name=base + "_DX11")
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
+    try:
+        cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
+    except Exception:
+        pass
+    try:
+        cmds.setAttr(shd + ".shader", fx, type="string")
+    except Exception:
+        cmds.warning("スクリーン輪郭用シェーダの読み込みに失敗（VP2/DirectX11 をご確認ください）")
+    if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
+        try:
+            cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
+        except Exception:
+            pass
+    cmds.sets(shape, e=True, forceElement=sg)
     if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         cmds.addAttr(line, ln=FRES_LINK, at="message")
     try:
@@ -625,10 +738,11 @@ def _ensure_line_anim(line, default_thick=0.05):
     # フレネルラインは hull 同様に拘束で追従させるが、曲率の頂点ウェイトは使わない。
     is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
     is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+    is_scrn = cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
     if not is_edge:
         _ensure_follow(line)
         _ensure_smooth_link(line)
-    if not is_fres:
+    if not is_fres and not is_scrn:
         _ensure_curv_jobs(line)
     return ctrl
 
@@ -681,7 +795,13 @@ def _connect(src, dst):
 
 def _thick_target(line):
     """太さを流し込む先のプラグ。
-    hull / エッジ: textureDeformer.offset。フレネル: condition.secondTerm（しきい値）。"""
+    hull / エッジ: textureDeformer.offset。フレネル: dx11Shader.threshold。
+    スクリーン輪郭: dx11Shader.thickness（ピクセル）。"""
+    if cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
+        shd = _fresnel_shader(line)
+        if shd and cmds.attributeQuery(SCRN_THICK, node=shd, exists=True):
+            return shd + "." + SCRN_THICK
+        return None
     if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
         shd = _fresnel_shader(line)
         if shd and cmds.attributeQuery(FRES_THRESH, node=shd, exists=True):
@@ -766,6 +886,17 @@ def _ensure_thickness_chain(line):
         _connect(mB + ".output", mS + ".input1")
         try:
             cmds.setAttr(mS + ".input2", FRES_SCALE)
+        except Exception:
+            pass
+        _connect(mS + ".output", target)
+    elif cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
+        # スクリーン輪郭は UI 太さ×SCRN_SCALE をピクセル太さ(thickness uniform)へ。
+        mS = base + "_scrnScale"
+        if not cmds.objExists(mS):
+            mS = cmds.createNode("multDoubleLinear", name=mS)
+        _connect(mB + ".output", mS + ".input1")
+        try:
+            cmds.setAttr(mS + ".input2", SCRN_SCALE)
         except Exception:
             pass
         _connect(mS + ".output", target)
@@ -1117,11 +1248,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                  "背面法の凹凸ズレが出ず、VP2/Maya Software のバッチで反映・カメラ依存。")
         self.btn_fres.clicked.connect(self.create_fresnel_outline)
         crow.addWidget(self.btn_fres)
-        self.btn_hybrid = QtWidgets.QPushButton("ハイブリッド輪郭")
-        self.btn_hybrid.setToolTip("背面法(重なり/折れ目)＋フレネル(シルエット補強)を同じグループに"
-                                   "ペア生成。それぞれ個別に太さ/色/表示を調整できます。")
-        self.btn_hybrid.clicked.connect(self.create_hybrid_outline)
-        crow.addWidget(self.btn_hybrid)
+        self.btn_scrn = QtWidgets.QPushButton("スクリーン輪郭")
+        self.btn_scrn.setToolTip("クリップ空間に一定ピクセル押し出す輪郭。ワールド押し出しの隙間/浮きが"
+                                 "出ず凸部でも均一太さ。重なり/シルエットのみ・カメラ依存（VP2/DirectX11・テクスチャ表示ON）。")
+        self.btn_scrn.clicked.connect(self.create_screen_outline)
+        crow.addWidget(self.btn_scrn)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -1362,7 +1493,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         ss = cmds.listConnections(sgs[0] + ".surfaceShader") or []
         if not ss:
             return None
-        attr = ("." + FRES_COLOR) if cmds.attributeQuery(FRES_TAG, node=line, exists=True) else ".outColor"
+        is_dx11 = (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+                   or cmds.attributeQuery(SCRN_TAG, node=line, exists=True))
+        attr = ("." + FRES_COLOR) if is_dx11 else ".outColor"
         try:
             c = cmds.getAttr(ss[0] + attr)[0]
             return [c[0], c[1], c[2]]
@@ -1523,7 +1656,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _add_line_item(self, parent_item, line):
         is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
         is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
-        suffix = "  [フレネル]" if is_fres else ("  [エッジ]" if is_edge else "  [背面]")
+        is_scrn = cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
+        if is_scrn:
+            suffix = "  [スクリーン]"
+        elif is_fres:
+            suffix = "  [フレネル]"
+        elif is_edge:
+            suffix = "  [エッジ]"
+        else:
+            suffix = "  [背面]"
         label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
@@ -2142,8 +2283,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 sh = self._shape_of(line)
                 if not sh:
                     continue
-                # フレネルラインは dx11Shader の lineColor uniform を直接変更（SG は差し替えない）
-                if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+                # フレネル/スクリーンは dx11Shader の lineColor uniform を直接変更（SG は差し替えない）
+                if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+                        or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
                     shd = _fresnel_shader(line)
                     if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
                         cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
@@ -2165,8 +2307,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             for line in lines:
                 sh = self._shape_of(line)
-                # フレネルラインは SG を共有に差し替えると線が出なくなるため、色だけ共通値に戻す
-                if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+                # フレネル/スクリーンは SG を共有に差し替えると線が出ないため、色だけ共通値に戻す
+                if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+                        or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
                     shd = _fresnel_shader(line)
                     if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
                         cmds.setAttr(shd + "." + FRES_COLOR, self._color[0], self._color[1],
@@ -2186,21 +2329,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
 
     # ========== フレネル輪郭（カメラ依存・VP2/バッチ対応） ==========
-    def create_hybrid_outline(self, *args):
-        """ハイブリッド輪郭: 同じ選択メッシュに 背面法(ハル)＋フレネル を同じグループにペア生成。
-        ハル＝重なり/折れ目に正しく線（寝た面には出ない）。フレネル＝シルエット補強（凸部の交差を補う）。
-        それぞれ独立に太さ/色/表示を調整可。フレネルは細めに既定設定して寝た面の拾いを抑える。"""
-        sel = cmds.ls(sl=True, long=True, type="transform")
-        if not sel:
-            cmds.warning("メッシュを選択してください"); return
-        cmds.undoInfo(openChunk=True)
-        try:
-            self.create_outlines()              # ハル（重なり/折れ目）
-            cmds.select(sel, r=True)            # 生成後にクリアされるので選択を戻す
-            self.create_fresnel_outline()       # フレネル（シルエット補強）
-        finally:
-            cmds.undoInfo(closeChunk=True)
-
     def create_fresnel_outline(self, *args):
         """選択メッシュにフレネル輪郭ライン（カメラから見て寝た縁＝シルエット/凹みに線）を生成。
         背面法の凹凸ズレが出ず、VP2/Maya Software のバッチでも反映。カメラ依存。"""
@@ -2274,6 +2402,78 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
         if made:
             cmds.warning("フレネル輪郭はハードウェアシェーダです。ビューポートの "
+                         "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
+
+    # ========== スクリーン輪郭（クリップ空間押し出し・隙間なし均一太さ） ==========
+    def create_screen_outline(self, *args):
+        """選択メッシュにスクリーン輪郭（dx11 頂点シェーダでクリップ空間に一定px押し出し）を生成。
+        ワールド押し出しの隙間/浮きが出ず、凸部でも均一太さ。重なり/シルエットのみ・カメラ依存。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        thick = DEFAULT_THICK
+        grp = self._current_group()
+
+        cmds.undoInfo(openChunk=True)
+        made = []
+        try:
+            for obj in sel:
+                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
+                if not shps:
+                    continue
+                src = shps[0]
+                dup = cmds.duplicate(obj, name=_short(obj) + "_screen", rr=True)[0]
+                for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
+                    cmds.delete(k)
+                dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
+                cmds.delete(dup, constructionHistory=True)
+
+                # 変形追従用に textureDeformer(offset=0)。押し出しはシェーダで行うので 0 固定。
+                td = cmds.textureDeformer(dshape, strength=0, offset=0.0, direction="Normal")
+                defm = td[0]
+                handle = None
+                for c in (cmds.listConnections(defm, type="transform") or []):
+                    if "textureDeformerHandle" in _short(c):
+                        handle = c
+                        break
+                if handle is None and len(td) > 1:
+                    handle = td[1]
+                try:
+                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
+                except Exception:
+                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
+                self._tuck_handle(handle)
+                try:
+                    cmds.setAttr(defm + ".offset", 0.0, lock=True)
+                except Exception:
+                    pass
+
+                _build_screen_network(dup, dshape, self._color)
+
+                if not cmds.attributeQuery(TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
+                if not cmds.attributeQuery(SCRN_TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=SCRN_TAG, at="bool", dv=True)
+
+                dup = cmds.parent(dup, grp)[0]
+                ctrl = _ensure_line_anim(dup, thick)
+                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                               (CTRL_TAPER, 0.0)):
+                    if cmds.attributeQuery(at, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + at, dv)
+                        except Exception:
+                            pass
+                self._apply_line_selectable(dup, self._lock_select())
+                made.append(dup)
+            cmds.select(clear=True)
+            self._stash_loose_handles()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+        if made:
+            cmds.warning("スクリーン輪郭はハードウェアシェーダです。ビューポートの "
                          "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
 
     # ========== 生成 ==========
