@@ -105,12 +105,9 @@ def _ensure_shader(color):
 
 
 _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
-#pragma pack_matrix(row_major)
-
-float4x4 gWVP   : WorldViewProjection;
-float4x4 gWorld : World;
-float4x4 gWIT   : WorldInverseTranspose;
-float3   gCamPos : WorldCameraPosition;   // 行列インデックスに依存せずカメラ位置を取得
+// facing はビュー空間法線の z 成分で算出（カメラ位置・行列インデックスに依存しない）。
+float4x4 gWVP : WorldViewProjection;
+float4x4 gWV  : WorldView;
 
 float threshold <
     string UIName = "Threshold";
@@ -125,22 +122,20 @@ float3 lineColor <
 > = {0.0f, 0.0f, 0.0f};
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
-struct V2P { float4 HPos : SV_Position; float3 WN : TEXCOORD0; float3 WP : TEXCOORD1; };
+struct V2P { float4 HPos : SV_Position; float3 VN : TEXCOORD0; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
-    OUT.WN   = mul(IN.Normal, (float3x3)gWIT);
-    OUT.WP   = mul(float4(IN.Position, 1.0f), gWorld).xyz;
+    OUT.VN   = mul(IN.Normal, (float3x3)gWV);   // ビュー空間法線
     return OUT;
 }
 
 float4 PShader(V2P IN) : SV_Target
 {
-    float3 N = normalize(IN.WN);
-    float3 V = normalize(gCamPos - IN.WP);
-    float facing = abs(dot(N, V));                       // 1=正面, 0=シルエット
+    float3 N = normalize(IN.VN);
+    float facing = abs(N.z);                              // 1=正面, 0=シルエット
     float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
     if (a <= 0.002f) discard;
     return float4(lineColor, a);
