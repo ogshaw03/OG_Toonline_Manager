@@ -134,11 +134,13 @@ V2P VShader(APPDATA IN)
 
 float4 PShader(V2P IN) : SV_Target
 {
+    // ★診断モード: facing をグレースケールで不透明表示（正面=白 / シルエット=黒）。
+    //   ・なめらかな白黒グラデ → facing は正常（透明処理側が原因）
+    //   ・一様に真っ黒/真っ白 → 法線 or WorldView が不正
+    //   ・ザラザラのノイズ → 法線データが壊れている
     float3 N = normalize(IN.VN);
-    float facing = abs(N.z);                              // 1=正面, 0=シルエット
-    float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
-    if (a <= 0.002f) discard;
-    return float4(lineColor, a);
+    float facing = abs(N.z);
+    return float4(facing, facing, facing, 1.0f);
 }
 
 technique11 Main < int isTransparent = 1; >
