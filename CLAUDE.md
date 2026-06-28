@@ -185,7 +185,24 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
   ※ 末端細り/プロファイルで weightList が 0 まで落ちるとチューブが基準半径(≈点)へ潰れて
     スピンドル状に尖る（反転して -値に見える）ため、`_update_curv_weights` 末尾で
     全 weight を `MIN_WEIGHT`(=0.05) で下限クランプして潰れを防ぐ。
-- UIツリーは名前に種別サフィックス（`[背面]`/`[エッジ]`）を付けて判別表示。
+- UIツリーは名前に種別サフィックス（`[背面]`/`[エッジ]`/`[フレネル]`）を付けて判別表示。
+
+### フレネル輪郭（カメラ依存・VP2/バッチ対応）
+
+背面法は凸シルエットの内側でハル境界が実際の見え方とズレて面を横切る線になる弱点がある。
+これを避けるため、**カメラから見て寝た面（facingRatio が小さい縁＝シルエット/凹み）に線を出す**
+方式を追加（`create_fresnel_outline`、ボタン「フレネル輪郭」、`FRES_TAG`）。
+- 元を複製→`outMesh`で変形追従＋`parent/scaleConstraint`で移動追従（hull と同じ）。z-fighting
+  回避に `textureDeformer` を微小オフセット(`FRES_ZOFFSET`=0.001、lock)で付けるが、太さ制御には使わない。
+- シェーダ網 `_build_fresnel_network`: `samplerInfo.facingRatio → condition(Greater Than) → surfaceShader.outTransparency`、
+  `outColor`=線色。facingRatio がしきい値より大きい（カメラを向く）→透明、小さい（寝た縁）→不透明な線。
+- **太さ=facingRatio しきい値**（`condition.secondTerm`）。`_thick_target` が FRES のとき secondTerm を返し、
+  `_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.15) を流す。line→cond は `FRES_LINK` message で特定。
+- **scriptJob 不要**（曲率の頂点ウェイトは使わない＝`_ensure_line_anim` で curv ジョブをスキップ）。
+  純シェーダなので **VP2/Maya Software のバッチで反映**、カメラ依存。レンダラーは現状 VP2/Maya SW 向け
+  （Arnold 等は facing ノードが別なので未対応）。
+- 色は専用シェーダの `outColor` を直接変更（`_fresnel_ss`）。SG 差し替えはしない（線が消えるため）。
+  曲率起伏/上限/下限/プロファイルは無効（UIには出るが効かない）。
 
 ### 互換性の注意
 

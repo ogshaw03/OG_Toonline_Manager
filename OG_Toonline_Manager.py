@@ -68,6 +68,10 @@ CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controlle
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
 PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
+FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
+FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
+FRES_SCALE  = 0.15                   # UI 太さ → フレネルしきい値(facingRatio カット)への係数
+FRES_ZOFFSET = 0.001                 # z-fighting 回避用の微小法線オフセット（固定）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -95,6 +99,37 @@ def _ensure_shader(color):
         cmds.connectAttr(SHADER + ".outColor", SG + ".surfaceShader", f=True)
         cmds.setAttr(SHADER + ".outColor", color[0], color[1], color[2], type="double3")
     return SHADER, SG
+
+
+def _build_fresnel_network(line, shape, color):
+    """フレネル輪郭のシェーダ網を構築して shape に割り当てる。
+    samplerInfo.facingRatio を condition でしきい値化し、
+    カメラに対して寝た面（シルエット/凹み縁）だけ不透明な線色、他は透明にする。
+    VP2/Maya Software のバッチでも評価され、カメラ依存・scriptJob 不要。
+    太さは condition.secondTerm（しきい値）で制御（_ensure_thickness_chain が駆動）。"""
+    base = "toonFresnel_" + _short(line)
+    si = cmds.createNode("samplerInfo", name=base + "_si")
+    cond = cmds.createNode("condition", name=base + "_cond")
+    ss = cmds.shadingNode("surfaceShader", asShader=True, name=base + "_SS")
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
+    # facingRatio が しきい値より大きい（＝カメラを向く）→ 透明(白)、小さい（＝寝た縁）→ 不透明(黒)
+    cmds.setAttr(cond + ".operation", 2)   # Greater Than
+    cmds.setAttr(cond + ".secondTerm", 0.1)
+    cmds.setAttr(cond + ".colorIfTrue", 1, 1, 1, type="double3")    # 透明
+    cmds.setAttr(cond + ".colorIfFalse", 0, 0, 0, type="double3")   # 不透明
+    cmds.connectAttr(si + ".facingRatio", cond + ".firstTerm", f=True)
+    cmds.connectAttr(cond + ".outColor", ss + ".outTransparency", f=True)
+    cmds.setAttr(ss + ".outColor", color[0], color[1], color[2], type="double3")
+    cmds.connectAttr(ss + ".outColor", sg + ".surfaceShader", f=True)
+    cmds.sets(shape, e=True, forceElement=sg)
+    # line → condition を message でリンク（太さ駆動先の特定に使う）
+    if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
+        cmds.addAttr(line, ln=FRES_LINK, at="message")
+    try:
+        cmds.connectAttr(cond + ".message", line + "." + FRES_LINK, f=True)
+    except Exception:
+        pass
+    return cond, ss, sg
 
 
 def _ensure_root():
@@ -162,6 +197,16 @@ def _compute_curvature(shape):
 def _line_deformer(line):
     nodes = cmds.ls(cmds.listHistory(line) or [], type=THICK_TYPE)
     return nodes[0] if nodes else None
+
+
+def _fresnel_cond(line):
+    """フレネルラインの condition ノード（太さ＝facingRatio しきい値の secondTerm を持つ）。"""
+    if cmds.objExists(line) and cmds.attributeQuery(FRES_LINK, node=line, exists=True):
+        c = cmds.listConnections(line + "." + FRES_LINK, s=True, d=False) or []
+        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "condition"]
+        if c:
+            return c[0]
+    return None
 
 
 def _line_src_shape(line):
@@ -495,11 +540,14 @@ def _ensure_line_anim(line, default_thick=0.05):
     _lock_trs(ctrl)
     _ensure_thickness_chain(line)
     # エッジライン（チューブ）は polyToCurve 経由で元に追従するので拘束/スムース連動は不要。
-    # 曲率起伏は hull と同じく textureDeformer の weightList で行うのでジョブは張る。
-    if not cmds.attributeQuery(EDGE_TAG, node=line, exists=True):
+    # フレネルラインは hull 同様に拘束で追従させるが、曲率の頂点ウェイトは使わない。
+    is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
+    is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+    if not is_edge:
         _ensure_follow(line)
         _ensure_smooth_link(line)
-    _ensure_curv_jobs(line)
+    if not is_fres:
+        _ensure_curv_jobs(line)
     return ctrl
 
 
@@ -550,7 +598,11 @@ def _connect(src, dst):
 
 
 def _thick_target(line):
-    """太さを流し込む先のプラグ。hull / エッジ ともチューブ表面の textureDeformer.offset。"""
+    """太さを流し込む先のプラグ。
+    hull / エッジ: textureDeformer.offset。フレネル: condition.secondTerm（しきい値）。"""
+    if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+        cond = _fresnel_cond(line)
+        return (cond + ".secondTerm") if cond else None
     defm = _line_deformer(line)
     return (defm + ".offset") if defm else None
 
@@ -621,6 +673,18 @@ def _ensure_thickness_chain(line):
             except Exception:
                 pass
             _connect(mR + ".output", circ + ".radius")
+    elif cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+        # フレネルは UI 太さ×FRES_SCALE を condition.secondTerm(facingRatio しきい値)へ。
+        # しきい値が大きいほど寝た面まで線が出る＝太い線になる。
+        mS = base + "_fresScale"
+        if not cmds.objExists(mS):
+            mS = cmds.createNode("multDoubleLinear", name=mS)
+        _connect(mB + ".output", mS + ".input1")
+        try:
+            cmds.setAttr(mS + ".input2", FRES_SCALE)
+        except Exception:
+            pass
+        _connect(mS + ".output", target)
     else:
         _connect(mB + ".output", target)
 
@@ -964,6 +1028,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
         self.btn_edge.clicked.connect(self.create_edge_line)
         crow.addWidget(self.btn_edge)
+        self.btn_fres = QtWidgets.QPushButton("フレネル輪郭")
+        self.btn_fres.setToolTip("カメラから見た輪郭（シルエット/凹み縁）にラインを出す方式。"
+                                 "背面法の凹凸ズレが出ず、VP2/Maya Software のバッチで反映・カメラ依存。")
+        self.btn_fres.clicked.connect(self.create_fresnel_outline)
+        crow.addWidget(self.btn_fres)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -1363,7 +1432,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
     # ========== ツリー ==========
     def _add_line_item(self, parent_item, line):
         is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
-        label = _short(line) + ("  [エッジ]" if is_edge else "  [背面]")
+        is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+        suffix = "  [フレネル]" if is_fres else ("  [エッジ]" if is_edge else "  [背面]")
+        label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
         # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
@@ -1981,12 +2052,29 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 sh = self._shape_of(line)
                 if not sh:
                     continue
+                # フレネルラインは専用シェーダの outColor を直接変更（SG は差し替えない）
+                if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+                    fss = self._fresnel_ss(line)
+                    if fss:
+                        cmds.setAttr(fss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+                    continue
                 ss, sg = self._ensure_line_shader(line)
                 cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
                 cmds.sets(sh, e=True, forceElement=sg)
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
+
+    def _fresnel_ss(self, line):
+        """フレネルラインに割り当てられた surfaceShader を返す。"""
+        sh = self._shape_of(line)
+        if not sh:
+            return None
+        for sg in (cmds.listConnections(sh, type="shadingEngine") or []):
+            ss = cmds.listConnections(sg + ".surfaceShader") or []
+            if ss:
+                return ss[0]
+        return None
 
     def reset_to_shared_color(self):
         """選択ラインを共通カラー（ブラック）に戻し、専用シェーダを片付ける。"""
@@ -1998,6 +2086,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             for line in lines:
                 sh = self._shape_of(line)
+                # フレネルラインは SG を共有に差し替えると線が出なくなるため、色だけ共通値に戻す
+                if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+                    fss = self._fresnel_ss(line)
+                    if fss:
+                        cmds.setAttr(fss + ".outColor", self._color[0], self._color[1],
+                                     self._color[2], type="double3")
+                    continue
                 if sh:
                     cmds.sets(sh, e=True, forceElement=sg)
                 base = COL_PREFIX + _short(line)
@@ -2007,6 +2102,79 @@ class ToonOutlineUI(QtWidgets.QDialog):
                             cmds.delete(n)
                         except Exception:
                             pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+
+    # ========== フレネル輪郭（カメラ依存・VP2/バッチ対応） ==========
+    def create_fresnel_outline(self, *args):
+        """選択メッシュにフレネル輪郭ライン（カメラから見て寝た縁＝シルエット/凹みに線）を生成。
+        背面法の凹凸ズレが出ず、VP2/Maya Software のバッチでも反映。カメラ依存。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        thick = DEFAULT_THICK
+        grp = self._current_group()
+
+        cmds.undoInfo(openChunk=True)
+        made = []
+        try:
+            for obj in sel:
+                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
+                if not shps:
+                    continue
+                src = shps[0]
+
+                # 元と同じ位置に複製 → 履歴削除で静的化
+                dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
+                for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
+                    cmds.delete(k)
+                dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
+                cmds.delete(dup, constructionHistory=True)
+
+                # z-fighting 回避の微小オフセット + 変形追従（hull と同じ deformer ベース入力方式）
+                td = cmds.textureDeformer(dshape, strength=0, offset=FRES_ZOFFSET, direction="Normal")
+                defm = td[0]
+                handle = None
+                for c in (cmds.listConnections(defm, type="transform") or []):
+                    if "textureDeformerHandle" in _short(c):
+                        handle = c
+                        break
+                if handle is None and len(td) > 1:
+                    handle = td[1]
+                try:
+                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
+                except Exception:
+                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
+                self._tuck_handle(handle)
+                # 微小オフセットは固定（太さは facingRatio しきい値で制御）→ weightList は使わない
+                try:
+                    cmds.setAttr(defm + ".offset", FRES_ZOFFSET, lock=True)
+                except Exception:
+                    pass
+
+                # フレネルシェーダ網（samplerInfo→condition→surfaceShader）を割り当て
+                _build_fresnel_network(dup, dshape, self._color)
+
+                if not cmds.attributeQuery(TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
+                if not cmds.attributeQuery(FRES_TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=FRES_TAG, at="bool", dv=True)
+
+                dup = cmds.parent(dup, grp)[0]
+                ctrl = _ensure_line_anim(dup, thick)   # 太さ→しきい値、追従。曲率ジョブは張らない
+                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                               (CTRL_TAPER, 0.0)):
+                    if cmds.attributeQuery(at, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + at, dv)
+                        except Exception:
+                            pass
+                self._apply_line_selectable(dup, self._lock_select())
+                made.append(dup)
+            cmds.select(clear=True)
+            self._stash_loose_handles()
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
