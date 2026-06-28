@@ -21,6 +21,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 
 使い方の概要は README.md を参照。
 """
+import os
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 import maya.api.OpenMaya as om2
@@ -72,6 +73,8 @@ FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
 FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
 FRES_ZOFFSET = 0.001                 # z-fighting 回避用の微小法線オフセット（固定）
+FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
+FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -101,44 +104,114 @@ def _ensure_shader(color):
     return SHADER, SG
 
 
+_FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
+float4x4 gWVP   : WorldViewProjection;
+float4x4 gWorld : World;
+float4x4 gWIT   : WorldInverseTranspose;
+float4x4 gViewI : ViewInverse;
+
+float threshold <
+    string UIName = "Threshold";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+    float UIStep = 0.001;
+> = 0.15;
+
+float3 lineColor <
+    string UIName = "Line Color";
+    string UIWidget = "Color";
+> = {0.0f, 0.0f, 0.0f};
+
+struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
+struct V2P { float4 HPos : SV_Position; float3 WN : TEXCOORD0; float3 WV : TEXCOORD1; };
+
+V2P VShader(APPDATA IN)
+{
+    V2P OUT;
+    OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
+    OUT.WN   = mul(IN.Normal, (float3x3)gWIT);
+    float3 wpos = mul(float4(IN.Position, 1.0f), gWorld).xyz;
+    OUT.WV   = gViewI[3].xyz - wpos;
+    return OUT;
+}
+
+float4 PShader(V2P IN) : SV_Target
+{
+    float3 N = normalize(IN.WN);
+    float3 V = normalize(IN.WV);
+    float facing = abs(dot(N, V));                       // 1=正面, 0=シルエット
+    float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
+    if (a <= 0.002f) discard;
+    return float4(lineColor, a);
+}
+
+technique11 Main < int isTransparent = 1; >
+{
+    pass p0
+    {
+        SetVertexShader(CompileShader(vs_5_0, VShader()));
+        SetPixelShader(CompileShader(ps_5_0, PShader()));
+    }
+}
+"""
+
+
+def _fresnel_fx_path():
+    """フレネル用 HLSL(.fx) をユーザー領域に書き出してパスを返す（毎回上書き）。"""
+    d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
+    try:
+        if not os.path.isdir(d):
+            os.makedirs(d)
+    except Exception:
+        d = cmds.internalVar(userTmpDir=True)
+    path = os.path.join(d, "OG_ToonFresnel.fx").replace("\\", "/")
+    try:
+        with open(path, "w") as f:
+            f.write(_FRES_FX_HLSL)
+    except Exception:
+        pass
+    return path
+
+
 def _build_fresnel_network(line, shape, color):
-    """フレネル輪郭のシェーダ網を構築して shape に割り当てる。
-    `samplerInfo.facingRatio → remapValue → lambert.transparency`（VP2 で実績のある構成）。
-    facingRatio 0（カメラに寝た縁＝シルエット/凹み）で不透明、しきい値以上で透明。
-    ※ condition/surfaceShader は VP2 で評価されず全面真っ黒になるため使わない。
-      線色は lambert.incandescence（unlit）、color/diffuse/ambient=0。
-    カメラ依存・scriptJob 不要で VP2/Maya Software のバッチでも反映。
-    太さ＝remapValue の遷移位置 value[1].value_Position（_ensure_thickness_chain が駆動）。"""
+    """フレネル輪郭シェーダ（VP2 ハードウェア = dx11Shader + 自前 HLSL）を shape に割り当てる。
+    カメラから見て寝た面（facingRatio が小さい縁＝シルエット/凹み）だけ不透明な線色、他は透明。
+    VP2/Hardware 2.0 バッチで反映・カメラ依存・scriptJob 不要。
+    太さ＝dx11Shader の threshold uniform（_ensure_thickness_chain が駆動）。
+    ※ samplerInfo.facingRatio は VP2 で評価されないため、ハードウェアシェーダで計算する。"""
+    try:
+        if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
+            cmds.loadPlugin("dx11Shader", quiet=True)
+    except Exception:
+        cmds.warning("dx11Shader プラグインを読み込めません。VP2 を DirectX11 に設定してください。")
+        return None, None
     base = "toonFresnel_" + _short(line)
-    si = cmds.createNode("samplerInfo", name=base + "_si")
-    rv = cmds.createNode("remapValue", name=base + "_remap")
-    lam = cmds.shadingNode("lambert", asShader=True, name=base + "_LAM")
+    fx = _fresnel_fx_path()
+    shd = cmds.shadingNode("dx11Shader", asShader=True, name=base + "_DX11")
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
-    cmds.connectAttr(si + ".facingRatio", rv + ".inputValue", f=True)
-    # facingRatio 0 → 透明度0(不透明=線)、しきい値 → 透明度1(透明)。間は線形でソフトな縁。
-    cmds.setAttr(rv + ".value[0].value_Position", 0.0)
-    cmds.setAttr(rv + ".value[0].value_FloatValue", 0.0)
-    cmds.setAttr(rv + ".value[0].value_Interp", 1)
-    cmds.setAttr(rv + ".value[1].value_Position", 0.15)   # しきい値（太さで駆動）
-    cmds.setAttr(rv + ".value[1].value_FloatValue", 1.0)
-    cmds.setAttr(rv + ".value[1].value_Interp", 1)
-    # lambert: 陰影なし。線色を incandescence に、透明を remap.outValue で駆動
-    cmds.setAttr(lam + ".color", 0, 0, 0, type="double3")
-    cmds.setAttr(lam + ".diffuse", 0)
-    cmds.setAttr(lam + ".ambientColor", 0, 0, 0, type="double3")
-    cmds.setAttr(lam + ".incandescence", color[0], color[1], color[2], type="double3")
-    for ch in "RGB":
-        cmds.connectAttr(rv + ".outValue", lam + ".transparency" + ch, f=True)
-    cmds.connectAttr(lam + ".outColor", sg + ".surfaceShader", f=True)
+    try:
+        cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
+    except Exception:
+        pass
+    try:
+        cmds.setAttr(shd + ".shader", fx, type="string")   # .fx をロード → uniform が attr 化
+    except Exception:
+        cmds.warning("フレネル用シェーダの読み込みに失敗しました（VP2/DirectX11 をご確認ください）")
+    # 線色 uniform を設定
+    if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
+        try:
+            cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
+        except Exception:
+            pass
     cmds.sets(shape, e=True, forceElement=sg)
-    # line → remapValue を message でリンク（太さ駆動先の特定に使う）
+    # line → dx11Shader を message でリンク（太さ駆動先・色変更先の特定に使う）
     if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         cmds.addAttr(line, ln=FRES_LINK, at="message")
     try:
-        cmds.connectAttr(rv + ".message", line + "." + FRES_LINK, f=True)
+        cmds.connectAttr(shd + ".message", line + "." + FRES_LINK, f=True)
     except Exception:
         pass
-    return rv, lam, sg
+    return shd, sg
 
 
 def _ensure_root():
@@ -208,11 +281,11 @@ def _line_deformer(line):
     return nodes[0] if nodes else None
 
 
-def _fresnel_remap(line):
-    """フレネルラインの remapValue ノード（太さ＝facingRatio しきい値 value[1].value_Position）。"""
+def _fresnel_shader(line):
+    """フレネルラインの dx11Shader ノード（threshold=太さ, lineColor=線色 の uniform を持つ）。"""
     if cmds.objExists(line) and cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         c = cmds.listConnections(line + "." + FRES_LINK, s=True, d=False) or []
-        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "remapValue"]
+        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "dx11Shader"]
         if c:
             return c[0]
     return None
@@ -610,8 +683,10 @@ def _thick_target(line):
     """太さを流し込む先のプラグ。
     hull / エッジ: textureDeformer.offset。フレネル: condition.secondTerm（しきい値）。"""
     if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
-        rv = _fresnel_remap(line)
-        return (rv + ".value[1].value_Position") if rv else None
+        shd = _fresnel_shader(line)
+        if shd and cmds.attributeQuery(FRES_THRESH, node=shd, exists=True):
+            return shd + "." + FRES_THRESH
+        return None
     defm = _line_deformer(line)
     return (defm + ".offset") if defm else None
 
@@ -1272,7 +1347,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return None
 
     def _line_color(self, line):
-        """ラインの線色 [r,g,b]。フレネルは lambert.incandescence、他は surfaceShader.outColor。"""
+        """ラインの線色 [r,g,b]。フレネルは dx11Shader.lineColor、他は surfaceShader.outColor。"""
         sh = self._shape_of(line)
         if not sh:
             return None
@@ -1282,7 +1357,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         ss = cmds.listConnections(sgs[0] + ".surfaceShader") or []
         if not ss:
             return None
-        attr = ".incandescence" if cmds.attributeQuery(FRES_TAG, node=line, exists=True) else ".outColor"
+        attr = ("." + FRES_COLOR) if cmds.attributeQuery(FRES_TAG, node=line, exists=True) else ".outColor"
         try:
             c = cmds.getAttr(ss[0] + attr)[0]
             return [c[0], c[1], c[2]]
@@ -2062,11 +2137,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 sh = self._shape_of(line)
                 if not sh:
                     continue
-                # フレネルラインは専用 lambert の incandescence を直接変更（SG は差し替えない）
+                # フレネルラインは dx11Shader の lineColor uniform を直接変更（SG は差し替えない）
                 if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
-                    fss = self._fresnel_ss(line)
-                    if fss:
-                        cmds.setAttr(fss + ".incandescence", rgb[0], rgb[1], rgb[2], type="double3")
+                    shd = _fresnel_shader(line)
+                    if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
+                        cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
                     continue
                 ss, sg = self._ensure_line_shader(line)
                 cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
@@ -2074,17 +2149,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
-
-    def _fresnel_ss(self, line):
-        """フレネルラインに割り当てられた surfaceShader を返す。"""
-        sh = self._shape_of(line)
-        if not sh:
-            return None
-        for sg in (cmds.listConnections(sh, type="shadingEngine") or []):
-            ss = cmds.listConnections(sg + ".surfaceShader") or []
-            if ss:
-                return ss[0]
-        return None
 
     def reset_to_shared_color(self):
         """選択ラインを共通カラー（ブラック）に戻し、専用シェーダを片付ける。"""
@@ -2098,9 +2162,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 sh = self._shape_of(line)
                 # フレネルラインは SG を共有に差し替えると線が出なくなるため、色だけ共通値に戻す
                 if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
-                    fss = self._fresnel_ss(line)
-                    if fss:
-                        cmds.setAttr(fss + ".incandescence", self._color[0], self._color[1],
+                    shd = _fresnel_shader(line)
+                    if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
+                        cmds.setAttr(shd + "." + FRES_COLOR, self._color[0], self._color[1],
                                      self._color[2], type="double3")
                     continue
                 if sh:
@@ -2163,7 +2227,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     pass
 
-                # フレネルシェーダ網（samplerInfo→condition→surfaceShader）を割り当て
+                # フレネルシェーダ（dx11Shader + HLSL、VP2 ハードウェア）を割り当て
                 _build_fresnel_network(dup, dshape, self._color)
 
                 if not cmds.attributeQuery(TAG, node=dup, exists=True):

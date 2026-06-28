@@ -194,17 +194,18 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 方式を追加（`create_fresnel_outline`、ボタン「フレネル輪郭」、`FRES_TAG`）。
 - 元を複製→`outMesh`で変形追従＋`parent/scaleConstraint`で移動追従（hull と同じ）。z-fighting
   回避に `textureDeformer` を微小オフセット(`FRES_ZOFFSET`=0.001、lock)で付けるが、太さ制御には使わない。
-- シェーダ網 `_build_fresnel_network`: `samplerInfo.facingRatio → remapValue → lambert.transparency`
-  （VP2 で実績のある構成）。線色は `lambert.incandescence`（unlit）、`color/diffuse/ambient=0`。
-  facingRatio 0（寝た縁）→不透明な線、しきい値以上→透明。間は線形でソフトな縁。
-  ※ **condition / surfaceShader の透明は VP2 で評価されず全面真っ黒**になるため使わない（remapValue は VP2 対応）。
-    色取得/設定は `incandescence`（`_line_color`/色ボタンが FRES を出し分け）。
-- **太さ=remapValue の遷移位置**（`value[1].value_Position`）。`_thick_target` が FRES のとき
-  これを返し、`_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.3) を流す。line→remap は `FRES_LINK` message で特定。
+- シェーダは **VP2 ハードウェアシェーダ `dx11Shader` + 自前 HLSL**（`_build_fresnel_network`/`_FRES_FX_HLSL`）。
+  HLSL を `_fresnel_fx_path`（userAppDir/OG_Toonline_Manager/OG_ToonFresnel.fx）へ書き出して `dx11Shader.shader` に
+  ロード。ピクセルシェーダで `facing=abs(dot(N,V))` を計算し、`a=1-smoothstep(0,threshold,facing)`、`a<=0`で discard、
+  `float4(lineColor,a)` を出力（technique に `isTransparent=1`）。**カメラ位置は `ViewInverse[3]`、法線は `WorldInverseTranspose`**。
+  ※ **`samplerInfo.facingRatio` は VP2 で評価されず**（condition/surfaceShader/remapValue 経由でも全面真っ黒）、
+    ハードウェアシェーダで facing を自前計算するのが VP2/Hardware 2.0 バッチで効く唯一の方法。**DirectX11 VP2 前提**
+    （OpenGL VP2 では dx11Shader 不可 → 要 GLSL 版）。
+- **太さ=dx11Shader の `threshold` uniform**（`FRES_THRESH`）。`_thick_target` が FRES のとき `shd.threshold` を返し、
+  `_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.3) を流す。line→dx11Shader は `FRES_LINK` message で特定。
 - **scriptJob 不要**（曲率の頂点ウェイトは使わない＝`_ensure_line_anim` で curv ジョブをスキップ）。
-  純シェーダなので **VP2/Maya Software のバッチで反映**、カメラ依存。レンダラーは現状 VP2/Maya SW 向け
-  （Arnold 等は facing ノードが別なので未対応）。
-- 色は専用 lambert の `incandescence` を直接変更（`_fresnel_ss`）。SG 差し替えはしない（線が消えるため）。
+  カメラ依存。元へ `outMesh`+`parent/scaleConstraint` で追従、z-fight 回避に `textureDeformer` 微小オフセット(lock)。
+- 色は dx11Shader の `lineColor` uniform（`FRES_COLOR`）を直接変更。SG 差し替えはしない（線が消えるため）。
   曲率起伏/上限/下限/プロファイルは無効（UIには出るが効かない）。
 
 ### 互換性の注意
