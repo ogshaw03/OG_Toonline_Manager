@@ -72,7 +72,7 @@ PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイ�
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
 FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
-FRES_ZOFFSET = 0.0                   # シェルは元と同位置（z-fight はシェーダのデプスバイアスで回避）
+FRES_ZOFFSET = 0.001                 # 極小の法線オフセット（手前に出して見えるように・二重線最小）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
@@ -145,19 +145,10 @@ float4 PShader(V2P IN) : SV_Target
     return float4(lineColor, a);
 }
 
-// シェルを元メッシュと同位置に置き(オフセット0)、z-fighting はデプスバイアスで回避。
-// SlopeScaledDepthBias がシルエット(grazing)で効くので、線が手前に出てズレない。
-RasterizerState BiasRS
-{
-    DepthBias = -3000;
-    SlopeScaledDepthBias = -2.0;
-};
-
 technique11 Main < int isTransparent = 1; >
 {
     pass p0
     {
-        SetRasterizerState(BiasRS);
         SetVertexShader(CompileShader(vs_5_0, VShader()));
         SetPixelShader(CompileShader(ps_5_0, PShader()));
     }
