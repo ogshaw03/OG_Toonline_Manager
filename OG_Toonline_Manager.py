@@ -103,14 +103,16 @@ def _ensure_shader(color):
 
 def _build_fresnel_network(line, shape, color):
     """フレネル輪郭のシェーダ網を構築して shape に割り当てる。
-    samplerInfo.facingRatio を condition でしきい値化し、
-    カメラに対して寝た面（シルエット/凹み縁）だけ不透明な線色、他は透明にする。
-    VP2/Maya Software のバッチでも評価され、カメラ依存・scriptJob 不要。
+    samplerInfo.facingRatio を condition でしきい値化し、カメラに対して寝た面
+    （シルエット/凹み縁）だけ不透明な線色、他は透明にする。
+    ※ surfaceShader の透明は VP2 で効かないため、VP2 でも確実に効く lambert を使う。
+      色は incandescence（unlit＝陰影なしの線色）、透明は transparency を condition で駆動。
+    カメラ依存・scriptJob 不要で VP2/Maya Software のバッチでも反映。
     太さは condition.secondTerm（しきい値）で制御（_ensure_thickness_chain が駆動）。"""
     base = "toonFresnel_" + _short(line)
     si = cmds.createNode("samplerInfo", name=base + "_si")
     cond = cmds.createNode("condition", name=base + "_cond")
-    ss = cmds.shadingNode("surfaceShader", asShader=True, name=base + "_SS")
+    lam = cmds.shadingNode("lambert", asShader=True, name=base + "_LAM")
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
     # facingRatio が しきい値より大きい（＝カメラを向く）→ 透明(白)、小さい（＝寝た縁）→ 不透明(黒)
     cmds.setAttr(cond + ".operation", 2)   # Greater Than
@@ -118,9 +120,13 @@ def _build_fresnel_network(line, shape, color):
     cmds.setAttr(cond + ".colorIfTrue", 1, 1, 1, type="double3")    # 透明
     cmds.setAttr(cond + ".colorIfFalse", 0, 0, 0, type="double3")   # 不透明
     cmds.connectAttr(si + ".facingRatio", cond + ".firstTerm", f=True)
-    cmds.connectAttr(cond + ".outColor", ss + ".outTransparency", f=True)
-    cmds.setAttr(ss + ".outColor", color[0], color[1], color[2], type="double3")
-    cmds.connectAttr(ss + ".outColor", sg + ".surfaceShader", f=True)
+    # lambert: 陰影を消して線色を incandescence に、透明を condition で駆動
+    cmds.setAttr(lam + ".color", 0, 0, 0, type="double3")
+    cmds.setAttr(lam + ".diffuse", 0)
+    cmds.setAttr(lam + ".ambientColor", 0, 0, 0, type="double3")
+    cmds.setAttr(lam + ".incandescence", color[0], color[1], color[2], type="double3")
+    cmds.connectAttr(cond + ".outColor", lam + ".transparency", f=True)
+    cmds.connectAttr(lam + ".outColor", sg + ".surfaceShader", f=True)
     cmds.sets(shape, e=True, forceElement=sg)
     # line → condition を message でリンク（太さ駆動先の特定に使う）
     if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
@@ -129,7 +135,7 @@ def _build_fresnel_network(line, shape, color):
         cmds.connectAttr(cond + ".message", line + "." + FRES_LINK, f=True)
     except Exception:
         pass
-    return cond, ss, sg
+    return cond, lam, sg
 
 
 def _ensure_root():
@@ -1263,7 +1269,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return None
 
     def _line_color(self, line):
-        """ラインに割り当てられた surfaceShader の outColor（[r,g,b]）。"""
+        """ラインの線色 [r,g,b]。フレネルは lambert.incandescence、他は surfaceShader.outColor。"""
         sh = self._shape_of(line)
         if not sh:
             return None
@@ -1273,8 +1279,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         ss = cmds.listConnections(sgs[0] + ".surfaceShader") or []
         if not ss:
             return None
+        attr = ".incandescence" if cmds.attributeQuery(FRES_TAG, node=line, exists=True) else ".outColor"
         try:
-            c = cmds.getAttr(ss[0] + ".outColor")[0]
+            c = cmds.getAttr(ss[0] + attr)[0]
             return [c[0], c[1], c[2]]
         except Exception:
             return None
@@ -2052,11 +2059,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 sh = self._shape_of(line)
                 if not sh:
                     continue
-                # フレネルラインは専用シェーダの outColor を直接変更（SG は差し替えない）
+                # フレネルラインは専用 lambert の incandescence を直接変更（SG は差し替えない）
                 if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
                     fss = self._fresnel_ss(line)
                     if fss:
-                        cmds.setAttr(fss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+                        cmds.setAttr(fss + ".incandescence", rgb[0], rgb[1], rgb[2], type="double3")
                     continue
                 ss, sg = self._ensure_line_shader(line)
                 cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
@@ -2090,7 +2097,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
                     fss = self._fresnel_ss(line)
                     if fss:
-                        cmds.setAttr(fss + ".outColor", self._color[0], self._color[1],
+                        cmds.setAttr(fss + ".incandescence", self._color[0], self._color[1],
                                      self._color[2], type="double3")
                     continue
                 if sh:

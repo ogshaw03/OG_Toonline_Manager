@@ -194,14 +194,17 @@ inverted hull とは別に、**選択ポリゴンエッジに沿ったチュー�
 方式を追加（`create_fresnel_outline`、ボタン「フレネル輪郭」、`FRES_TAG`）。
 - 元を複製→`outMesh`で変形追従＋`parent/scaleConstraint`で移動追従（hull と同じ）。z-fighting
   回避に `textureDeformer` を微小オフセット(`FRES_ZOFFSET`=0.001、lock)で付けるが、太さ制御には使わない。
-- シェーダ網 `_build_fresnel_network`: `samplerInfo.facingRatio → condition(Greater Than) → surfaceShader.outTransparency`、
-  `outColor`=線色。facingRatio がしきい値より大きい（カメラを向く）→透明、小さい（寝た縁）→不透明な線。
+- シェーダ網 `_build_fresnel_network`: `samplerInfo.facingRatio → condition(Greater Than) → lambert.transparency`、
+  線色は `lambert.incandescence`（unlit）、`color/diffuse/ambient=0`。facingRatio がしきい値より大きい
+  （カメラを向く）→透明、小さい（寝た縁）→不透明な線。
+  ※ **surfaceShader の透明は VP2 で効かず全面が真っ黒になる**ため lambert を使う（透明・facingRatio とも
+    VP2 でちゃんと評価される）。色取得/設定は `incandescence`（`_line_color`/色ボタンが FRES を出し分け）。
 - **太さ=facingRatio しきい値**（`condition.secondTerm`）。`_thick_target` が FRES のとき secondTerm を返し、
   `_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.15) を流す。line→cond は `FRES_LINK` message で特定。
 - **scriptJob 不要**（曲率の頂点ウェイトは使わない＝`_ensure_line_anim` で curv ジョブをスキップ）。
   純シェーダなので **VP2/Maya Software のバッチで反映**、カメラ依存。レンダラーは現状 VP2/Maya SW 向け
   （Arnold 等は facing ノードが別なので未対応）。
-- 色は専用シェーダの `outColor` を直接変更（`_fresnel_ss`）。SG 差し替えはしない（線が消えるため）。
+- 色は専用 lambert の `incandescence` を直接変更（`_fresnel_ss`）。SG 差し替えはしない（線が消えるため）。
   曲率起伏/上限/下限/プロファイルは無効（UIには出るが効かない）。
 
 ### 互換性の注意
