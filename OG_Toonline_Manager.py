@@ -219,10 +219,10 @@ def _build_fresnel_network(line, shape, color):
 
 _SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
 // 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
-// さらにビュー空間で距離比例に奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
+// さらに深度を僅かに奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
-float4x4 gWV   : WorldView;
-float4x4 gProj : Projection;
+float4x4 gWVP : WorldViewProjection;
+float4x4 gWV  : WorldView;
 float2   gScreen : ViewportPixelSize;
 
 float thickness <
@@ -237,7 +237,7 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-static const float gZFrac = 0.002f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存）
+static const float gZBias = 0.0015f;   // 元メッシュに内側を隠させる深度押し込み量
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
@@ -245,10 +245,7 @@ struct V2P { float4 HPos : SV_Position; };
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    // ビュー空間へ → 距離に比例して一様に奥へ押す（near/far非依存・スメアが出ない）
-    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
-    vpos.z -= abs(vpos.z) * gZFrac;                // 元メッシュが内側を覆う
-    float4 clip = mul(vpos, gProj);
+    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
     float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
     float2 sn = vn.xy;
     float  l  = length(sn);
@@ -256,6 +253,7 @@ V2P VShader(APPDATA IN)
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
     clip.xy += sn * thickness * px * clip.w;
+    clip.z += gZBias * clip.w;          // 奥へ押し込む → 元メッシュが内側を覆う＝外周だけ残る
     OUT.HPos = clip;
     return OUT;
 }
@@ -294,9 +292,8 @@ def _screen_fx_path():
 
 def _build_screen_network(line, shape, color):
     """スクリーン空間押し出し輪郭シェーダ（dx11Shader + 自前 HLSL）を shape に割り当てる。
-    頂点シェーダでビュー空間法線方向へクリップ空間に一定ピクセル押し出し、均一太さの輪郭に
-    する（ワールド押し出しの隙間/浮きが出ない）。ビュー空間深度を一定割合だけ奥へずらして
-    元メッシュが内側を覆い、外周リング＝輪郭だけが残る。太さ＝thickness uniform（ピクセル）。"""
+    頂点シェーダでクリップ空間に一定ピクセル押し出し＋フロントカリングで均一太さの輪郭。
+    隙間/浮きが出ず凸部でも細らない。太さ＝thickness uniform（ピクセル）。"""
     try:
         if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
             cmds.loadPlugin("dx11Shader", quiet=True)
@@ -408,16 +405,11 @@ def _fresnel_shader(line):
 
 
 def _line_src_shape(line):
-    """元メッシュ（追従元）の shape を返す。
-    hull/フレネル/スクリーン: deformer のベース入力。後方互換で toonSrcShape も参照。"""
+    """曲率計算用の元メッシュ（deformer のベース入力）を返す。"""
     defm = _line_deformer(line)
     if defm:
         conn = cmds.listConnections(defm + ".input[0].inputGeometry",
                                     s=True, d=False, sh=True) or []
-        if conn:
-            return conn[0]
-    if cmds.attributeQuery("toonSrcShape", node=line, exists=True):
-        conn = cmds.listConnections(line + ".toonSrcShape", s=True, d=False, sh=True) or []
         if conn:
             return conn[0]
     sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)
@@ -2436,8 +2428,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
                 cmds.delete(dup, constructionHistory=True)
 
-                # 変形追従: 静的複製に textureDeformer(offset=0 lock)を付け、ベース入力に
-                # 元 outMesh を接続（押し出しは頂点シェーダで行うので offset は使わない）。
+                # 変形追従用に textureDeformer(offset=0)。押し出しはシェーダで行うので 0 固定。
                 td = cmds.textureDeformer(dshape, strength=0, offset=0.0, direction="Normal")
                 defm = td[0]
                 handle = None
