@@ -70,7 +70,7 @@ EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの�
 PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
-FRES_SCALE  = 0.15                   # UI 太さ → フレネルしきい値(facingRatio カット)への係数
+FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
 FRES_ZOFFSET = 0.001                 # z-fighting 回避用の微小法線オフセット（固定）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
@@ -103,39 +103,42 @@ def _ensure_shader(color):
 
 def _build_fresnel_network(line, shape, color):
     """フレネル輪郭のシェーダ網を構築して shape に割り当てる。
-    samplerInfo.facingRatio を condition でしきい値化し、カメラに対して寝た面
-    （シルエット/凹み縁）だけ不透明な線色、他は透明にする。
-    ※ surfaceShader の透明は VP2 で効かないため、VP2 でも確実に効く lambert を使う。
-      色は incandescence（unlit＝陰影なしの線色）、透明は transparency を condition で駆動。
+    `samplerInfo.facingRatio → remapValue → lambert.transparency`（VP2 で実績のある構成）。
+    facingRatio 0（カメラに寝た縁＝シルエット/凹み）で不透明、しきい値以上で透明。
+    ※ condition/surfaceShader は VP2 で評価されず全面真っ黒になるため使わない。
+      線色は lambert.incandescence（unlit）、color/diffuse/ambient=0。
     カメラ依存・scriptJob 不要で VP2/Maya Software のバッチでも反映。
-    太さは condition.secondTerm（しきい値）で制御（_ensure_thickness_chain が駆動）。"""
+    太さ＝remapValue の遷移位置 value[1].value_Position（_ensure_thickness_chain が駆動）。"""
     base = "toonFresnel_" + _short(line)
     si = cmds.createNode("samplerInfo", name=base + "_si")
-    cond = cmds.createNode("condition", name=base + "_cond")
+    rv = cmds.createNode("remapValue", name=base + "_remap")
     lam = cmds.shadingNode("lambert", asShader=True, name=base + "_LAM")
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
-    # facingRatio が しきい値より大きい（＝カメラを向く）→ 透明(白)、小さい（＝寝た縁）→ 不透明(黒)
-    cmds.setAttr(cond + ".operation", 2)   # Greater Than
-    cmds.setAttr(cond + ".secondTerm", 0.1)
-    cmds.setAttr(cond + ".colorIfTrue", 1, 1, 1, type="double3")    # 透明
-    cmds.setAttr(cond + ".colorIfFalse", 0, 0, 0, type="double3")   # 不透明
-    cmds.connectAttr(si + ".facingRatio", cond + ".firstTerm", f=True)
-    # lambert: 陰影を消して線色を incandescence に、透明を condition で駆動
+    cmds.connectAttr(si + ".facingRatio", rv + ".inputValue", f=True)
+    # facingRatio 0 → 透明度0(不透明=線)、しきい値 → 透明度1(透明)。間は線形でソフトな縁。
+    cmds.setAttr(rv + ".value[0].value_Position", 0.0)
+    cmds.setAttr(rv + ".value[0].value_FloatValue", 0.0)
+    cmds.setAttr(rv + ".value[0].value_Interp", 1)
+    cmds.setAttr(rv + ".value[1].value_Position", 0.15)   # しきい値（太さで駆動）
+    cmds.setAttr(rv + ".value[1].value_FloatValue", 1.0)
+    cmds.setAttr(rv + ".value[1].value_Interp", 1)
+    # lambert: 陰影なし。線色を incandescence に、透明を remap.outValue で駆動
     cmds.setAttr(lam + ".color", 0, 0, 0, type="double3")
     cmds.setAttr(lam + ".diffuse", 0)
     cmds.setAttr(lam + ".ambientColor", 0, 0, 0, type="double3")
     cmds.setAttr(lam + ".incandescence", color[0], color[1], color[2], type="double3")
-    cmds.connectAttr(cond + ".outColor", lam + ".transparency", f=True)
+    for ch in "RGB":
+        cmds.connectAttr(rv + ".outValue", lam + ".transparency" + ch, f=True)
     cmds.connectAttr(lam + ".outColor", sg + ".surfaceShader", f=True)
     cmds.sets(shape, e=True, forceElement=sg)
-    # line → condition を message でリンク（太さ駆動先の特定に使う）
+    # line → remapValue を message でリンク（太さ駆動先の特定に使う）
     if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         cmds.addAttr(line, ln=FRES_LINK, at="message")
     try:
-        cmds.connectAttr(cond + ".message", line + "." + FRES_LINK, f=True)
+        cmds.connectAttr(rv + ".message", line + "." + FRES_LINK, f=True)
     except Exception:
         pass
-    return cond, lam, sg
+    return rv, lam, sg
 
 
 def _ensure_root():
@@ -205,11 +208,11 @@ def _line_deformer(line):
     return nodes[0] if nodes else None
 
 
-def _fresnel_cond(line):
-    """フレネルラインの condition ノード（太さ＝facingRatio しきい値の secondTerm を持つ）。"""
+def _fresnel_remap(line):
+    """フレネルラインの remapValue ノード（太さ＝facingRatio しきい値 value[1].value_Position）。"""
     if cmds.objExists(line) and cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         c = cmds.listConnections(line + "." + FRES_LINK, s=True, d=False) or []
-        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "condition"]
+        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "remapValue"]
         if c:
             return c[0]
     return None
@@ -607,8 +610,8 @@ def _thick_target(line):
     """太さを流し込む先のプラグ。
     hull / エッジ: textureDeformer.offset。フレネル: condition.secondTerm（しきい値）。"""
     if cmds.attributeQuery(FRES_TAG, node=line, exists=True):
-        cond = _fresnel_cond(line)
-        return (cond + ".secondTerm") if cond else None
+        rv = _fresnel_remap(line)
+        return (rv + ".value[1].value_Position") if rv else None
     defm = _line_deformer(line)
     return (defm + ".offset") if defm else None
 
