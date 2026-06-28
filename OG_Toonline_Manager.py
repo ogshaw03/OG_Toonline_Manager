@@ -1117,6 +1117,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                  "背面法の凹凸ズレが出ず、VP2/Maya Software のバッチで反映・カメラ依存。")
         self.btn_fres.clicked.connect(self.create_fresnel_outline)
         crow.addWidget(self.btn_fres)
+        self.btn_hybrid = QtWidgets.QPushButton("ハイブリッド輪郭")
+        self.btn_hybrid.setToolTip("背面法(重なり/折れ目)＋フレネル(シルエット補強)を同じグループに"
+                                   "ペア生成。それぞれ個別に太さ/色/表示を調整できます。")
+        self.btn_hybrid.clicked.connect(self.create_hybrid_outline)
+        crow.addWidget(self.btn_hybrid)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -2181,6 +2186,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
 
     # ========== フレネル輪郭（カメラ依存・VP2/バッチ対応） ==========
+    def create_hybrid_outline(self, *args):
+        """ハイブリッド輪郭: 同じ選択メッシュに 背面法(ハル)＋フレネル を同じグループにペア生成。
+        ハル＝重なり/折れ目に正しく線（寝た面には出ない）。フレネル＝シルエット補強（凸部の交差を補う）。
+        それぞれ独立に太さ/色/表示を調整可。フレネルは細めに既定設定して寝た面の拾いを抑える。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        cmds.undoInfo(openChunk=True)
+        try:
+            self.create_outlines()              # ハル（重なり/折れ目）
+            cmds.select(sel, r=True)            # 生成後にクリアされるので選択を戻す
+            self.create_fresnel_outline()       # フレネル（シルエット補強）
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
     def create_fresnel_outline(self, *args):
         """選択メッシュにフレネル輪郭ライン（カメラから見て寝た縁＝シルエット/凹みに線）を生成。
         背面法の凹凸ズレが出ず、VP2/Maya Software のバッチでも反映。カメラ依存。"""
