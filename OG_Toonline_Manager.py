@@ -72,7 +72,7 @@ PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイ�
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
 FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数
-FRES_ZOFFSET = 0.02                  # z-fighting 回避用の法線オフセット（シェルを手前へ）
+FRES_ZOFFSET = 0.005                 # z-fighting 回避用の法線オフセット（小さめ＝二重線を抑制）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
@@ -138,7 +138,9 @@ float4 PShader(V2P IN) : SV_Target
 {
     float3 N = normalize(IN.VN);
     float facing = abs(N.z);                              // 1=正面, 0=シルエット
-    float a = 1.0f - smoothstep(0.0f, max(threshold, 1e-4f), facing);
+    // facing < threshold の帯を「くっきり」不透明に（トゥーン線）。縁だけ fwidth で1px AA。
+    float w = max(fwidth(facing), 1e-5f);
+    float a = 1.0f - smoothstep(threshold - w, threshold + w, facing);
     if (a <= 0.002f) discard;
     return float4(lineColor, a);
 }
