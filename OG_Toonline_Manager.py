@@ -221,8 +221,8 @@ _SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shade
 // 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
 // さらに深度を僅かに奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
-float4x4 gWVP : WorldViewProjection;
-float4x4 gWV  : WorldView;
+float4x4 gWV   : WorldView;
+float4x4 gProj : Projection;
 float2   gScreen : ViewportPixelSize;
 
 float thickness <
@@ -237,7 +237,7 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-static const float gZBias = 0.0015f;   // 元メッシュに内側を隠させる深度押し込み量
+static const float gZFrac = 0.002f;   // ビュー空間で距離に比例して奥へ押す割合（near/far非依存）
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
 struct V2P { float4 HPos : SV_Position; };
@@ -245,7 +245,10 @@ struct V2P { float4 HPos : SV_Position; };
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
+    // ビュー空間へ → 距離に比例して奥へ押し込む（near/far・スケールに依存しない）
+    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
+    vpos.z -= abs(vpos.z) * gZFrac;                // 元メッシュに内側を隠させる
+    float4 clip = mul(vpos, gProj);
     float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
     float2 sn = vn.xy;
     float  l  = length(sn);
@@ -253,7 +256,6 @@ V2P VShader(APPDATA IN)
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
     clip.xy += sn * thickness * px * clip.w;
-    clip.z += gZBias * clip.w;          // 奥へ押し込む → 元メッシュが内側を覆う＝外周だけ残る
     OUT.HPos = clip;
     return OUT;
 }
