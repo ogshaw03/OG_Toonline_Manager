@@ -84,7 +84,8 @@ SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uni
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
-MASK_INFLATE_FRAC = 0.5              # マスク膨らみ量 = ライン太さ × 係数（線幅 ≒ 太さ×(1-係数)）
+MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
+                                     # （太さは上乗せ補正で一定。係数↑＝覆う力↑だがモデルが膨らむ）
 MASK_HOLDER = "ToonMask_grp"         # 重なりマスクの格納グループ（ROOT 直下・別オブジェクトとして可視）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
