@@ -1020,12 +1020,10 @@ def _mesh_all_intersections(mfn, src_pt, direction, space, maxp, accel):
 
 
 def _occlusion_factors(line):
-    """元メッシュの各頂点からカメラへレイを飛ばし、**元メッシュの裏面に当たれば本体に重なっている**
-    （カメラから見て体の奥側にある）と判定して引き寄せ対象とする方式。
+    """オフセット後のシェル頂点 S=P+N*太さ から、**カメラ方向（手前）と逆方向（奥）の両方**へレイを
+    飛ばし、どちらかで元メッシュに当たれば「画面上で本体に重なっている」＝引き寄せ対象とする方式。
     重なり頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて隠す）、フチ（背景に抜ける）→ 1.0。
-
-    裏面ヒット判定: ヒットした面の法線とレイ方向の内積 > 0（面が進行方向と同じ向き＝裏側から当たった）。
-    入口（自分の表面）は表側ヒット（内積<0）なので自然に無視される。
+    両方外れる＝シルエットのフチ（背景に抜ける）だけ太さを残す。
     オブジェクト空間で計算（MFnMesh のレイ交差はオブジェクト空間が確実なため）。"""
     src = _line_src_shape(line)
     if not src or not cmds.objExists(src):
@@ -1075,21 +1073,37 @@ def _occlusion_factors(line):
     except Exception:
         diag = 1.0
     far = max(diag * 4.0, 1.0)
-    bias = max(diag * 1e-3, 1e-5)   # 始点を表面から少し浮かせて自己交差を避ける
+    # シェルのオフセット量（= textureDeformer.offset の実太さ）。0 なら bbox から微小量。
+    off = 0.0
+    defm = _line_deformer(line)
+    if defm:
+        try:
+            off = abs(cmds.getAttr(defm + ".offset"))
+        except Exception:
+            off = 0.0
+    if off <= 1e-6:
+        off = max(diag * 5e-3, 1e-4)
+    bias = max(off * 1e-2, 1e-5)   # 自己交差回避の微小バイアス
     try:
         accel = mfn.autoUniformGridParams()
     except Exception:
         accel = None
     kob = om2.MSpace.kObject
 
+    def _hit(origin, d, maxp):
+        if maxp <= 0.0:
+            return False
+        faces, _params = _mesh_all_intersections(mfn, origin, d, kob, maxp, accel)
+        return bool(faces)
+
     fac = [1.0] * n
     for i in range(n):
         p = pts[i]; nv = nrm[i]
-        # 始点 = 表面頂点を法線方向へ少し浮かせる（自己交差回避）
-        sx = p.x + nv.x * bias; sy = p.y + nv.y * bias; sz = p.z + nv.z * bias
+        # オフセット後のシェル頂点 S
+        sx = p.x + nv.x * off; sy = p.y + nv.y * off; sz = p.z + nv.z * off
         if is_ortho and vdir is not None:
             to_cam = vdir
-            maxp = far
+            dist = far
         else:
             dx = cam.x - sx; dy = cam.y - sy; dz = cam.z - sz
             to_cam = om2.MFloatVector(dx, dy, dz)
@@ -1097,20 +1111,14 @@ def _occlusion_factors(line):
             if dist < 1e-6:
                 continue
             to_cam = to_cam / dist
-            maxp = dist
-        org = om2.MFloatPoint(sx, sy, sz)
-        faces, params = _mesh_all_intersections(mfn, org, to_cam, kob, maxp, accel)
-        if not faces:
-            continue
-        # 元メッシュの裏面に当たっていれば（面法線・レイ方向の内積>0）重なり＝引き寄せ
-        for fid in faces:
-            try:
-                fn = mfn.getPolygonNormal(fid, kob)
-            except Exception:
-                continue
-            if fn.x * to_cam.x + fn.y * to_cam.y + fn.z * to_cam.z > 1e-4:
-                fac[i] = OCC_HIDDEN_WEIGHT
-                break
+        away = om2.MFloatVector(-to_cam.x, -to_cam.y, -to_cam.z)
+        # バイアス分だけ視線方向にずらした始点（自己交差回避）
+        fwd_org = om2.MFloatPoint(sx + to_cam.x * bias, sy + to_cam.y * bias, sz + to_cam.z * bias)
+        bwd_org = om2.MFloatPoint(sx + away.x * bias, sy + away.y * bias, sz + away.z * bias)
+        fmax = far if (is_ortho and vdir is not None) else (dist - bias * 2.0)
+        # 手前（カメラ側）に本体があるか / 奥に本体があるか → どちらかで重なり
+        if _hit(fwd_org, to_cam, fmax) or _hit(bwd_org, away, far):
+            fac[i] = OCC_HIDDEN_WEIGHT
     return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
 
 
