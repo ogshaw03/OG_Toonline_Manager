@@ -127,8 +127,11 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 ハルはワールド法線オフセットのため、元メッシュとラインの間に 3D の隙間ができ、グラジング角で
 その隙間が横から見えて輪郭が浮く/面に乗る。これを抑える試験機能（UIチェック「ハルの隠れた面を
 元メッシュに寄せる」、既定OFF。`_OCC_ENABLED`/`_on_toggle_occlude`）:
-- 各頂点から法線方向へ微小に出した点から**カメラへレイ**を飛ばし、**元メッシュに当たれば隠蔽**と判定
-  （`_occlusion_factors`、om2 `MFnMesh.anyIntersection`、オブジェクト空間。ortho はビュー方向一定）。
+- 各頂点を法線方向へ微小に浮かせた点から**カメラへレイ**を飛ばし、**元メッシュの裏面に当たれば**
+  （ヒット面法線・レイ方向の内積>0＝体の奥側）重なり＝隠蔽と判定（`_occlusion_factors`、om2
+  `MFnMesh.allIntersections`＋`getPolygonNormal`、オブジェクト空間。入口の表側ヒットは内積<0で無視。
+  ortho はビュー方向一定）。allIntersections はシグネチャ環境差に備え `_mesh_all_intersections` で
+  複数フォーム試行。ON 時に検出頂点数を `cmds.warning` で報告（0なら検出失敗の切り分け用）。
 - 隠れた頂点の weightList 係数を `OCC_HIDDEN_WEIGHT`(-0.5)＝**元メッシュ内側へ寄せて裏面を隠す**。
   **可視（シルエット）頂点は係数 1.0 のまま**なので太さは保たれる（＝交差部だけ細くならない）。
   境界のジャギは `_smooth_vertex_values`(`OCC_SMOOTH_ITERS`=2)で均す。

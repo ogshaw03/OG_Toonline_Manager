@@ -995,14 +995,37 @@ def _smooth_vertex_values(dag, vals, iters):
     return cur
 
 
-def _occlusion_factors(line):
-    """カメラから見てオフセット後のハル頂点が本体（元メッシュ）に重なっているかを判定する係数リスト。
-    重なっている頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて隠す）、フチ（背景に抜ける）→ 1.0。
+def _mesh_all_intersections(mfn, src_pt, direction, space, maxp, accel):
+    """MFnMesh.allIntersections をシグネチャ違いに強く呼ぶ。(hitFaces, hitParams) を返す。
+    om2 の引数順は環境差があるため、複数フォームを順に試す。失敗時は ([],[])。"""
+    forms = []
+    if accel is not None:
+        forms.append(lambda: mfn.allIntersections(src_pt, direction, space, maxp, False,
+                                                  accelParams=accel))
+    forms.append(lambda: mfn.allIntersections(src_pt, direction, space, maxp, False))
+    for f in forms:
+        try:
+            r = f()
+        except Exception:
+            continue
+        if not r:
+            return [], []
+        try:
+            faces = list(r[2])      # hitFaces (MIntArray)
+            params = list(r[1])     # hitRayParams (MFloatArray)
+            return faces, params
+        except Exception:
+            return [], []
+    return [], []
 
-    悪さをするのは表面上の頂点 P ではなく、法線方向にオフセットされた**シェル頂点 S=P+N*太さ**が
-    本体の手前に飛び出して見える分。そこで S から**カメラ方向（手前）と逆方向（奥）の両方**へレイを
-    飛ばし、どちらかで元メッシュに当たれば「画面上で本体に重なっている」＝引き寄せ対象とする。
-    両方外れる＝シルエットのフチ（背景に抜ける）だけ太さを残す。
+
+def _occlusion_factors(line):
+    """元メッシュの各頂点からカメラへレイを飛ばし、**元メッシュの裏面に当たれば本体に重なっている**
+    （カメラから見て体の奥側にある）と判定して引き寄せ対象とする方式。
+    重なり頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて隠す）、フチ（背景に抜ける）→ 1.0。
+
+    裏面ヒット判定: ヒットした面の法線とレイ方向の内積 > 0（面が進行方向と同じ向き＝裏側から当たった）。
+    入口（自分の表面）は表側ヒット（内積<0）なので自然に無視される。
     オブジェクト空間で計算（MFnMesh のレイ交差はオブジェクト空間が確実なため）。"""
     src = _line_src_shape(line)
     if not src or not cmds.objExists(src):
@@ -1043,50 +1066,28 @@ def _occlusion_factors(line):
             vdir = om2.MFloatVector(-fwd_o.x, -fwd_o.y, -fwd_o.z)
         except Exception:
             is_ortho = False
-    # オブジェクト空間 bbox から最大距離を決定
+    # オブジェクト空間 bbox から最大距離/バイアスを決定
     try:
         bb = mfn.boundingBox
         diag = (bb.width ** 2 + bb.height ** 2 + bb.depth ** 2) ** 0.5
     except Exception:
         diag = 1.0
     far = max(diag * 4.0, 1.0)
-    # シェルのオフセット量（= textureDeformer.offset の実太さ）。0 なら bbox から微小量。
-    off = 0.0
-    defm = _line_deformer(line)
-    if defm:
-        try:
-            off = abs(cmds.getAttr(defm + ".offset"))
-        except Exception:
-            off = 0.0
-    if off <= 1e-6:
-        off = max(diag * 5e-3, 1e-4)
-    bias = max(off * 1e-2, 1e-5)   # 自己交差回避の微小バイアス
+    bias = max(diag * 1e-3, 1e-5)   # 始点を表面から少し浮かせて自己交差を避ける
     try:
         accel = mfn.autoUniformGridParams()
     except Exception:
         accel = None
     kob = om2.MSpace.kObject
 
-    def _hit(origin, d, maxp):
-        if maxp <= 0.0:
-            return False
-        try:
-            if accel is not None:
-                r = mfn.anyIntersection(origin, d, kob, maxp, False, accelParams=accel)
-            else:
-                r = mfn.anyIntersection(origin, d, kob, maxp, False)
-        except Exception:
-            return False
-        return bool(r)
-
     fac = [1.0] * n
     for i in range(n):
         p = pts[i]; nv = nrm[i]
-        # オフセット後のシェル頂点 S
-        sx = p.x + nv.x * off; sy = p.y + nv.y * off; sz = p.z + nv.z * off
+        # 始点 = 表面頂点を法線方向へ少し浮かせる（自己交差回避）
+        sx = p.x + nv.x * bias; sy = p.y + nv.y * bias; sz = p.z + nv.z * bias
         if is_ortho and vdir is not None:
             to_cam = vdir
-            dist = far
+            maxp = far
         else:
             dx = cam.x - sx; dy = cam.y - sy; dz = cam.z - sz
             to_cam = om2.MFloatVector(dx, dy, dz)
@@ -1094,14 +1095,20 @@ def _occlusion_factors(line):
             if dist < 1e-6:
                 continue
             to_cam = to_cam / dist
-        away = om2.MFloatVector(-to_cam.x, -to_cam.y, -to_cam.z)
-        # バイアス分だけ視線方向にずらした始点（自己交差回避）
-        fwd_org = om2.MFloatPoint(sx + to_cam.x * bias, sy + to_cam.y * bias, sz + to_cam.z * bias)
-        bwd_org = om2.MFloatPoint(sx + away.x * bias, sy + away.y * bias, sz + away.z * bias)
-        fmax = (dist - bias * 2.0) if not (is_ortho and vdir is not None) else far
-        # 手前（カメラ側）に本体があるか / 奥に本体があるか → どちらかで重なり
-        if _hit(fwd_org, to_cam, fmax) or _hit(bwd_org, away, far):
-            fac[i] = OCC_HIDDEN_WEIGHT
+            maxp = dist
+        org = om2.MFloatPoint(sx, sy, sz)
+        faces, params = _mesh_all_intersections(mfn, org, to_cam, kob, maxp, accel)
+        if not faces:
+            continue
+        # 元メッシュの裏面に当たっていれば（面法線・レイ方向の内積>0）重なり＝引き寄せ
+        for fid in faces:
+            try:
+                fn = mfn.getPolygonNormal(fid, kob)
+            except Exception:
+                continue
+            if fn.x * to_cam.x + fn.y * to_cam.y + fn.z * to_cam.z > 1e-4:
+                fac[i] = OCC_HIDDEN_WEIGHT
+                break
     return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
 
 
@@ -1832,6 +1839,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self._occ_timer.timeout.connect(self._poll_camera)
             self._occ_timer.start()
             self._refresh_occlusion()
+            # 検出できているか切り分け用に頂点数を報告（0なら検出失敗＝レイ/カメラ要確認）
+            try:
+                total = flagged = 0
+                lines = self._hull_lines()
+                for l in lines:
+                    occ = _occlusion_factors(l)
+                    total += len(occ)
+                    flagged += sum(1 for v in occ if v < 1.0)
+                cmds.warning("隠蔽検知ハル: {} ライン中 {}/{} 頂点を引き寄せ検出"
+                             "（0なら検出失敗。テクスチャ/カメラ/メッシュをご確認ください）"
+                             .format(len(lines), flagged, total))
+            except Exception:
+                pass
         else:
             if self._occ_timer is not None:
                 self._occ_timer.stop()
