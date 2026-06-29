@@ -63,7 +63,7 @@ DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
 DEFAULT_CMIN  = 1.0                   # 〃 初期曲率下限（1.0=平らな所を細くしない）
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
-OCC_HIDDEN_WEIGHT = -0.5             # 隠蔽検知ハル: 隠れた頂点の重み（負＝元メッシュ内側へ寄せて隠す）
+OCC_HIDDEN_WEIGHT = -1.5             # 隠蔽検知ハル: 隠れた頂点の重み（負＝元メッシュ内側へ深く寄せて隠す）
 OCC_SMOOTH_ITERS  = 2               # 隠蔽係数の近傍スムージング回数（可視/隠蔽境界のジャギ軽減）
 OCC_KEEP_DILATE   = 1               # 可視リム（残す頂点）を内側へ太らせるリング数（太さの安定化）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
