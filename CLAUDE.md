@@ -136,10 +136,17 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 - 隠れた頂点の weightList 係数を `OCC_HIDDEN_WEIGHT`(-0.5)＝**元メッシュ内側へ寄せて裏面を隠す**。
   **可視（シルエット）頂点は係数 1.0 のまま**なので太さは保たれる（＝交差部だけ細くならない）。
   境界のジャギは `_smooth_vertex_values`(`OCC_SMOOTH_ITERS`=2)で均す。
+- **太さの安定化**: 可視リムが1頂点幅だとカメラ移動で頂点単位に切り替わり太さがちらつくため、
+  残す頂点を内側へ `OCC_KEEP_DILATE`(=1)リング太らせて帯にし、スムージング後も**残す頂点は必ず
+  係数 1.0 に再クランプ**してフル太さを一定に保つ（`_vertex_adjacency` を dilate/smooth で共有）。
 - 実体は `_update_curv_weights` 末尾で `weights[i] *= occ[i]`（曲率/プロファイルと合成）。`_is_hull_line` のみ対象。
-- 更新は **QTimer(40ms≒25fps) でカメラ行列変化を監視**(`_poll_camera`)＋timeChanged。再計算中は
-  `_occ_busy` で重畳をスキップ（重いメッシュでビューポートが固着しないようにする）。**scriptJob/レイのため
-  バッチレンダー不可・高密度メッシュは追従が落ちる**。真の毎フレーム/バッチ対応には MPxDeformerNode 化が必要（未実装）。
+- 更新は **カメラ transform の worldMatrix 変化コールバック**(om2 `MDagMessage.addWorldMatrixModifiedCallback`
+  →`_on_cam_moved`)で**カメラを動かすたびにリアルタイム**再計算。DG評価中の setAttr 再入を避けるため
+  `_request_occ_refresh` が `QTimer.singleShot(0)` で次ループに1回だけ予約（`_occ_scheduled`）。
+  カメラ切替/新規カメラ用に低頻度ポーリング(`_poll_camera` 250ms)もフォールバックで併用。再計算の重畳は
+  `_occ_busy` でスキップ。コールバックは ON で全カメラに登録・OFF/クローズで `_remove_cam_callbacks`。
+  **scriptJob/レイのためバッチレンダー不可・高密度メッシュは追従が落ちる**。真の毎フレーム/バッチ対応には
+  MPxDeformerNode 化が必要（未実装）。
 
 UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
 ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。

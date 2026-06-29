@@ -65,6 +65,7 @@ CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
 OCC_HIDDEN_WEIGHT = -0.5             # 隠蔽検知ハル: 隠れた頂点の重み（負＝元メッシュ内側へ寄せて隠す）
 OCC_SMOOTH_ITERS  = 2               # 隠蔽係数の近傍スムージング回数（可視/隠蔽境界のジャギ軽減）
+OCC_KEEP_DILATE   = 1               # 可視リム（残す頂点）を内側へ太らせるリング数（太さの安定化）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
@@ -969,19 +970,28 @@ def _active_camera():
     return "perspShape" if cmds.objExists("perspShape") else None
 
 
-def _smooth_vertex_values(dag, vals, iters):
-    """頂点値リストを近傍平均で iters 回スムージングして返す（境界のジャギを均す）。"""
-    n = len(vals)
-    if n == 0 or iters <= 0:
-        return vals
+def _vertex_adjacency(dag, n):
+    """各頂点の近傍頂点リスト（dilate/スムージングで使い回す）。失敗時は None。"""
     try:
         itv = om2.MItMeshVertex(dag)
     except Exception:
-        return vals
+        return None
     adj = [()] * n
     while not itv.isDone():
         adj[itv.index()] = tuple(itv.getConnectedVertices())
         itv.next()
+    return adj
+
+
+def _smooth_vertex_values(dag, vals, iters, adj=None):
+    """頂点値リストを近傍平均で iters 回スムージングして返す（境界のジャギを均す）。"""
+    n = len(vals)
+    if n == 0 or iters <= 0:
+        return vals
+    if adj is None:
+        adj = _vertex_adjacency(dag, n)
+    if adj is None:
+        return vals
     cur = list(vals)
     for _ in range(iters):
         nxt = list(cur)
@@ -1119,10 +1129,21 @@ def _occlusion_factors(line):
         # 手前（カメラ側）に本体があるか / 奥に本体があるか → どちらかで重なり
         if _hit(fwd_org, to_cam, fmax) or _hit(bwd_org, away, far):
             fac[i] = OCC_HIDDEN_WEIGHT
+    adj = _vertex_adjacency(dag, n)
+    kept = [f >= 1.0 for f in fac]
+    # 可視リムが1頂点幅だとカメラ移動で頂点単位に切り替わり太さがちらつく。残す頂点を
+    # 内側へ OCC_KEEP_DILATE リング分太らせて帯にし、太さを安定させる（隠れ側へ食い込む）。
+    if adj is not None and OCC_KEEP_DILATE > 0:
+        for _ring in range(OCC_KEEP_DILATE):
+            add = [i for i in range(n) if not kept[i] and any(kept[c] for c in adj[i])]
+            for i in add:
+                kept[i] = True
+        for i in range(n):
+            if kept[i]:
+                fac[i] = 1.0
     # スムージングは隠す側の段差を均すためだけに使う。可視リム（残す頂点）はスムージングで
     # 1.0 未満に下がると太さが減って起伏になるため、必ず 1.0 に再クランプして太さを一定に保つ。
-    kept = [f >= 1.0 for f in fac]
-    sm = _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
+    sm = _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS, adj=adj)
     for i in range(n):
         if kept[i]:
             sm[i] = 1.0
@@ -1403,6 +1424,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._occ_timer = None         # 隠蔽検知ハル: カメラ移動監視の QTimer
         self._occ_cam_key = None       # 最後に処理したカメラ位置/行列のキー（変化検知用）
         self._occ_busy = False         # 再計算中フラグ（処理の重畳＝ビューポート固着を防ぐ）
+        self._occ_cb_ids = []          # カメラ worldMatrix 変化コールバック id（om2）
+        self._occ_scheduled = False    # 次イベントループでの再計算予約済みフラグ
         self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
         self._build()
         self.refresh_tree()
@@ -1423,6 +1446,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             if self._occ_timer is not None:
                 self._occ_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._remove_cam_callbacks()
         except Exception:
             pass
         super(ToonOutlineUI, self).closeEvent(event)
@@ -1856,33 +1883,81 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 pass
             self._occ_busy = False
 
+    def _request_occ_refresh(self):
+        """カメラ移動コールバックから呼ぶ。次のイベントループで1回だけ再計算を予約
+        （DG評価中の setAttr 再入を避け、連続発火でも重複予約しない）。"""
+        if self._occ_scheduled or not _OCC_ENABLED:
+            return
+        self._occ_scheduled = True
+        QtCore.QTimer.singleShot(0, self._do_scheduled_occ)
+
+    def _do_scheduled_occ(self):
+        self._occ_scheduled = False
+        if _OCC_ENABLED:
+            self._refresh_occlusion()
+
+    def _on_cam_moved(self, *args):
+        """カメラ transform の worldMatrix が変化したとき（=カメラを動かすたび）に発火。"""
+        self._request_occ_refresh()
+
+    def _add_cam_callbacks(self):
+        """全カメラ transform に worldMatrix 変化コールバックを張る（動かすたびに更新）。"""
+        self._remove_cam_callbacks()
+        ids = []
+        for cam in (cmds.ls(type="camera") or []):
+            par = cmds.listRelatives(cam, parent=True, fullPath=True) or []
+            if not par:
+                continue
+            try:
+                sl = om2.MSelectionList(); sl.add(par[0])
+                dag = sl.getDagPath(0)
+                cid = om2.MDagMessage.addWorldMatrixModifiedCallback(dag, self._on_cam_moved, None)
+                ids.append(cid)
+            except Exception:
+                pass
+        self._occ_cb_ids = ids
+
+    def _remove_cam_callbacks(self):
+        for cid in (self._occ_cb_ids or []):
+            try:
+                om2.MMessage.removeCallback(cid)
+            except Exception:
+                pass
+        self._occ_cb_ids = []
+
     def _poll_camera(self):
-        """カメラが動いたら隠蔽係数を再計算（QTimer から定期呼び出し）。"""
+        """フォールバック: カメラ切替や新規カメラに備え、低頻度ポーリングでも変化を拾う。
+        通常の追従は worldMatrix コールバック（_on_cam_moved）が行う。"""
         if not _OCC_ENABLED:
             return
         cam = _active_camera()
         if not cam:
             return
         try:
-            m = cmds.xform(cam, q=True, ws=True, m=True)
+            csl = om2.MSelectionList(); csl.add(cam)
+            m = list(csl.getDagPath(0).inclusiveMatrix())
         except Exception:
             return
         key = (cam, tuple(round(v, 5) for v in m))
         if key == self._occ_cam_key:
             return
         self._occ_cam_key = key
+        # 切替時にコールバック先も貼り直す
+        self._add_cam_callbacks()
         self._refresh_occlusion()
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。
-        ON: カメラ監視タイマー開始＋即再計算。OFF: タイマー停止＋隠蔽なしへ戻す。"""
+        ON: カメラ移動コールバック登録＋低頻度フォールバックタイマー＋即再計算。
+        OFF: コールバック/タイマー解除＋隠蔽なしへ戻す。"""
         global _OCC_ENABLED
         _OCC_ENABLED = bool(state)
         if _OCC_ENABLED:
             self._occ_cam_key = None
+            self._add_cam_callbacks()                       # カメラを動かすたびに更新
             if self._occ_timer is None:
                 self._occ_timer = QtCore.QTimer(self)
-                self._occ_timer.setInterval(40)   # ~25回/秒（busy ガードで重畳しない）
+                self._occ_timer.setInterval(250)            # フォールバック（カメラ切替検知）
                 self._occ_timer.timeout.connect(self._poll_camera)
             self._occ_timer.start()
             self._refresh_occlusion()
@@ -1904,6 +1979,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         else:
             if self._occ_timer is not None:
                 self._occ_timer.stop()
+            self._remove_cam_callbacks()
             # _OCC_ENABLED=False のまま再計算 → 隠蔽係数が外れフル太さに戻る
             self._refresh_occlusion()
 
