@@ -1274,7 +1274,9 @@ def _update_curv_weights(line):
     weights = [w if w > MIN_WEIGHT else MIN_WEIGHT for w in weights]
     # 隠蔽検知ハル（カメラ依存）: 元メッシュに隠れた頂点の重みを内側へ寄せて裏面を隠す。
     # 可視（シルエット）頂点は係数 1.0 のままなので太さは保たれる。
-    if _OCC_ENABLED and _is_hull_line(line):
+    # 重なりマスクを付けたラインは単純な均一ハルとして使う（引き寄せの per-vertex ムラを
+    # かけると二重になり太さが凸凹するため、マスク有のラインは occlusion 対象外）。
+    if _OCC_ENABLED and _is_hull_line(line) and not _mask_of(line):
         occ = _occlusion_factors(line)
         if len(occ) == n:
             weights = [weights[i] * occ[i] for i in range(n)]
@@ -2952,10 +2954,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     if self._remove_overlap_mask(line):
                         removed += 1
                         _ensure_thickness_chain(line)   # 上乗せを外して元の太さへ
+                        _update_curv_weights(line)      # マスク無→occlusion対象に戻る
                 else:
                     if self._create_overlap_mask(line):
                         added += 1
                         _ensure_thickness_chain(line)   # inflate 分を offset に上乗せ
+                        # マスク有のラインは均一ハルにする＝引き寄せの残ウェイトをクリア
+                        _update_curv_weights(line)
             cmds.select(clear=True)
             self._stash_loose_handles()
         finally:

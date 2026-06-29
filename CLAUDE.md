@@ -158,6 +158,9 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 B=元メッシュ複製を面色で膨らませた覆い** の2オブジェクトに分離する方式（ボタン「重なりマスク」、
 `toggle_overlap_mask`、`MASK_TAG`/`MASK_LINK`）:
 - A は通常の単純ハル（occlusion OFF）でフル均一太さ＝安定。B はマスクで内側交差を隠す。
+  **マスク有のラインは occlusion 対象外**（`_update_curv_weights` で `not _mask_of(line)` 条件）。
+  引き寄せの per-vertex ムラと二重がけになって太さが凸凹するのを防ぐ。マスク追加/削除時に
+  `toggle_overlap_mask` が `_update_curv_weights` を呼んで残ウェイトをクリア/復帰。
 - B = 元メッシュの追従複製（`outMesh`→textureDeformer ベース入力＋`parent/scaleConstraint`）に、
   **元と同じシェーディンググループ（面色）を割り当て**、法線方向へ少し膨らませて A の内側交差を覆う。
   B は **ROOT 直下 `MASK_HOLDER`(`ToonMask_grp`) に格納＝別オブジェクトとして可視**（ライン子にすると
