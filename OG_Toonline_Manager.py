@@ -82,6 +82,9 @@ FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名（フ
 SCRN_TAG    = "isToonScreenLine"     # スクリーン空間押し出し輪郭（隙間なし・均一太さ）の識別タグ
 SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uniform 名（太さ駆動先）
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
+MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
+MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
+MASK_INFLATE_FRAC = 0.5              # マスク膨らみ量 = ライン太さ × 係数（線幅 ≒ 太さ×(1-係数)）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -787,6 +790,16 @@ def _ensure_follow(line):
         cmds.scaleConstraint(src, line, maintainOffset=False)
     except Exception:
         pass
+
+
+def _mask_of(line):
+    """ライン A に紐づく重なりマスク（B）を返す。無ければ None。"""
+    if cmds.objExists(line) and cmds.attributeQuery(MASK_LINK, node=line, exists=True):
+        c = [x for x in (cmds.listConnections(line + "." + MASK_LINK, s=True, d=False) or [])
+             if cmds.objExists(x)]
+        if c:
+            return c[0]
+    return None
 
 
 def _connect(src, dst):
@@ -1523,6 +1536,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                  "出ず凸部でも均一太さ。重なり/シルエットのみ・カメラ依存（VP2/DirectX11・テクスチャ表示ON）。")
         self.btn_scrn.clicked.connect(self.create_screen_outline)
         crow.addWidget(self.btn_scrn)
+        self.btn_mask = QtWidgets.QPushButton("重なりマスク")
+        self.btn_mask.setToolTip("選択ハルラインに『元メッシュ複製を面色で少し膨らませた覆い』を追加し、"
+                                 "輪郭の内側交差を隠す（太さは単純ハルのまま安定）。\n"
+                                 "もう一度押すとマスクを削除。膨らみ量=ライン太さ×係数。")
+        self.btn_mask.clicked.connect(self.toggle_overlap_mask)
+        crow.addWidget(self.btn_mask)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -2886,6 +2905,126 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.warning("スクリーン輪郭はハードウェアシェーダです。ビューポートの "
                          "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
 
+    # ========== 重なりマスク（別オブジェクト方式） ==========
+    def toggle_overlap_mask(self, *args):
+        """選択ハルラインに重なりマスク（元メッシュ複製を面色で膨らませた覆い）を追加/削除する。
+        単純な均一ハル（太さ安定）はそのまま、内側交差だけをマスクで隠す。"""
+        lines = [l for l in self._selected_lines() if _is_hull_line(l)]
+        if not lines:
+            cmds.warning("ハルラインをツリーで選択してください（エッジ/フレネル/スクリーンは対象外）")
+            return
+        cmds.undoInfo(openChunk=True)
+        added = removed = 0
+        try:
+            for line in lines:
+                if _mask_of(line):
+                    if self._remove_overlap_mask(line):
+                        removed += 1
+                else:
+                    if self._create_overlap_mask(line):
+                        added += 1
+            cmds.select(clear=True)
+            self._stash_loose_handles()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+        cmds.warning("重なりマスク: 追加 {} / 削除 {}（面色で膨らませて内側交差を覆う方式）"
+                     .format(added, removed))
+
+    def _create_overlap_mask(self, line):
+        """ライン A の元メッシュを複製し、面色で少し膨らませた覆い B を作って交差を隠す。"""
+        src = _line_src_shape(line)
+        if not src or not cmds.objExists(src):
+            return False
+        par = cmds.listRelatives(src, parent=True, f=True) or []
+        if not par:
+            return False
+        srcT = par[0]
+        # 元メッシュを複製（子transform除去・ヒストリ削除で静的化）
+        mask = cmds.duplicate(srcT, name=_short(srcT) + "_omask", rr=True)[0]
+        for k in cmds.listRelatives(mask, children=True, type="transform", f=True) or []:
+            cmds.delete(k)
+        mshape = cmds.listRelatives(mask, shapes=True, type="mesh", ni=True, f=True)
+        if not mshape:
+            cmds.delete(mask); return False
+        mshape = mshape[0]
+        cmds.delete(mask, constructionHistory=True)
+        # 膨らみ（法線方向オフセット）。変形追従は元 outMesh をベース入力へ。
+        td = cmds.textureDeformer(mshape, strength=0, offset=0.0, direction="Normal")
+        mdefm = td[0]
+        handle = None
+        for c in (cmds.listConnections(mdefm, type="transform") or []):
+            if "textureDeformerHandle" in _short(c):
+                handle = c; break
+        if handle is None and len(td) > 1:
+            handle = td[1]
+        try:
+            cmds.connectAttr(src + ".outMesh", mdefm + ".input[0].inputGeometry", f=True)
+        except Exception:
+            cmds.warning("マスクの変形追従の接続に失敗（静的な覆いとして生成）")
+        self._tuck_handle(handle)
+        # 元と同じマテリアル（面色）を割り当て → 覆っても見た目は表面と同じ
+        sgs = cmds.listConnections(src, type="shadingEngine") or []
+        sg = sgs[0] if sgs else "initialShadingGroup"
+        try:
+            cmds.sets(mshape, e=True, forceElement=sg)
+        except Exception:
+            pass
+        # タグ付け → ライン子へ（先に親付けしてから拘束＝親空間で正しく追従させる）
+        if not cmds.attributeQuery(MASK_TAG, node=mask, exists=True):
+            cmds.addAttr(mask, ln=MASK_TAG, at="bool", dv=True)
+        try:
+            mask = cmds.parent(mask, line)[0]
+        except Exception:
+            pass
+        # 移動/回転/スケール追従
+        try:
+            cmds.parentConstraint(srcT, mask, maintainOffset=False)
+            cmds.scaleConstraint(srcT, mask, maintainOffset=False)
+        except Exception:
+            pass
+        # 膨らみ量をライン太さに比例（太さを変えても線幅 ≒ 太さ×(1-係数) を保つ）
+        ldefm = _line_deformer(line)
+        if ldefm:
+            mdl = cmds.createNode("multDoubleLinear", name=_short(mask) + "_inflate")
+            _connect(ldefm + ".offset", mdl + ".input1")
+            try:
+                cmds.setAttr(mdl + ".input2", MASK_INFLATE_FRAC)
+            except Exception:
+                pass
+            _connect(mdl + ".output", mdefm + ".offset")
+        else:
+            try:
+                cmds.setAttr(mdefm + ".offset", DEFAULT_THICK * MASK_INFLATE_FRAC)
+            except Exception:
+                pass
+        # リンク・選択不可
+        if not cmds.attributeQuery(MASK_LINK, node=line, exists=True):
+            cmds.addAttr(line, ln=MASK_LINK, at="message")
+        try:
+            cmds.connectAttr(mask + ".message", line + "." + MASK_LINK, f=True)
+        except Exception:
+            pass
+        self._apply_line_selectable(mask, self._lock_select())
+        return True
+
+    def _remove_overlap_mask(self, line):
+        """ライン A の重なりマスク B（と膨らみ乗算ノード）を削除する。"""
+        mask = _mask_of(line)
+        if not mask:
+            return False
+        infl = _short(mask) + "_inflate"
+        try:
+            cmds.delete(mask)
+        except Exception:
+            pass
+        if cmds.objExists(infl):
+            try:
+                cmds.delete(infl)
+            except Exception:
+                pass
+        return True
+
     # ========== 生成 ==========
     def create_outlines(self, *args, **kwargs):
         # target_group が来ればそのグループへ、無ければコンボの対象グループへ
@@ -3251,6 +3390,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     n2 = _short(c) + s
                     if cmds.objExists(n2):
                         victims.add(n2)
+            # 重なりマスク本体はラインの子なので一緒に消えるが、膨らみ乗算ノードは独立なので拾う
+            m = _mask_of(line)
+            if m:
+                infl = _short(m) + "_inflate"
+                if cmds.objExists(infl):
+                    victims.add(infl)
 
         victims = set(nodes)
         for n in list(nodes):
