@@ -1828,6 +1828,28 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.chk_occlude.toggled.connect(self._on_toggle_occlude)
         lay.addWidget(self.chk_occlude)
 
+        # 隙間埋めパラメータ調整（検証用・最終的に廃止予定）
+        self.grp_gapparams = QtWidgets.QGroupBox("隙間埋め 調整（検証用・後で廃止）")
+        gpl = QtWidgets.QFormLayout(self.grp_gapparams)
+        self.spn_face = QtWidgets.QDoubleSpinBox()
+        self.spn_face.setRange(0.05, 1.0); self.spn_face.setSingleStep(0.05)
+        self.spn_face.setDecimals(2); self.spn_face.setValue(FACING_THRESH)
+        self.spn_face.setToolTip("シルエット帯の広さ（facing しきい値）。大きいほど押し出す帯が広い")
+        self.spn_face.valueChanged.connect(self._on_gap_param_changed)
+        gpl.addRow("帯の広さ (FACING_THRESH)", self.spn_face)
+        self.spn_tuck = QtWidgets.QDoubleSpinBox()
+        self.spn_tuck.setRange(-3.0, 0.0); self.spn_tuck.setSingleStep(0.1)
+        self.spn_tuck.setDecimals(2); self.spn_tuck.setValue(GAPFILL_TUCK)
+        self.spn_tuck.setToolTip("シルエット以外を表面の裏へ潜らせる深さ（負）。浅いと面乗り、深いと安全")
+        self.spn_tuck.valueChanged.connect(self._on_gap_param_changed)
+        gpl.addRow("裏潜り深さ (GAPFILL_TUCK)", self.spn_tuck)
+        self.spn_smooth = QtWidgets.QSpinBox()
+        self.spn_smooth.setRange(0, 8); self.spn_smooth.setValue(GAPFILL_SMOOTH_ITERS)
+        self.spn_smooth.setToolTip("ウェイトの近傍スムージング回数（境界のジャギ軽減）")
+        self.spn_smooth.valueChanged.connect(self._on_gap_param_changed)
+        gpl.addRow("スムージング回数", self.spn_smooth)
+        lay.addWidget(self.grp_gapparams)
+
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
@@ -2128,6 +2150,32 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if self._occ_timer is not None:
                 self._occ_timer.stop()
             self._remove_cam_callbacks()
+
+    def _on_gap_param_changed(self, *args):
+        """検証用: 隙間埋めパラメータ（帯の広さ/裏潜り深さ/スムージング）を反映して再計算。
+        ※ これらはモジュール定数を直接書き換える（最終的にこの調整UIは廃止予定）。"""
+        global FACING_THRESH, GAPFILL_TUCK, GAPFILL_SMOOTH_ITERS
+        try:
+            FACING_THRESH = float(self.spn_face.value())
+            GAPFILL_TUCK = float(self.spn_tuck.value())
+            GAPFILL_SMOOTH_ITERS = int(self.spn_smooth.value())
+        except Exception:
+            return
+        gaps = _all_gapfills()
+        if not gaps:
+            return
+        try:
+            cmds.undoInfo(swf=False)
+        except Exception:
+            pass
+        try:
+            for b in gaps:
+                _update_gapfill_weights(b)
+        finally:
+            try:
+                cmds.undoInfo(swf=True)
+            except Exception:
+                pass
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
