@@ -1402,6 +1402,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._time_job = None          # timeChanged scriptJob
         self._occ_timer = None         # 隠蔽検知ハル: カメラ移動監視の QTimer
         self._occ_cam_key = None       # 最後に処理したカメラ位置/行列のキー（変化検知用）
+        self._occ_busy = False         # 再計算中フラグ（処理の重畳＝ビューポート固着を防ぐ）
         self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
         self._build()
         self.refresh_tree()
@@ -1833,10 +1834,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return [l for l in self._all_lines() if _is_hull_line(l)]
 
     def _refresh_occlusion(self):
-        """全ハルラインの頂点ウェイトを再計算（隠蔽係数を反映）。undo は汚さない。"""
+        """全ハルラインの頂点ウェイトを再計算（隠蔽係数を反映）。undo は汚さない。
+        再計算中（_occ_busy）は重畳を避けてスキップ＝重いメッシュでもビューポートが固まらない。"""
+        if self._occ_busy:
+            return
         lines = self._hull_lines()
         if not lines:
             return
+        self._occ_busy = True
         try:
             cmds.undoInfo(swf=False)
         except Exception:
@@ -1849,6 +1854,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.undoInfo(swf=True)
             except Exception:
                 pass
+            self._occ_busy = False
 
     def _poll_camera(self):
         """カメラが動いたら隠蔽係数を再計算（QTimer から定期呼び出し）。"""
@@ -1876,7 +1882,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._occ_cam_key = None
             if self._occ_timer is None:
                 self._occ_timer = QtCore.QTimer(self)
-                self._occ_timer.setInterval(150)
+                self._occ_timer.setInterval(40)   # ~25回/秒（busy ガードで重畳しない）
                 self._occ_timer.timeout.connect(self._poll_camera)
             self._occ_timer.start()
             self._refresh_occlusion()
