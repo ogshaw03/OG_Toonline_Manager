@@ -1034,7 +1034,9 @@ def _occlusion_factors(line):
     if not camsh:
         return []
     try:
-        campos = cmds.xform(camsh, q=True, ws=True, t=True)
+        csl = om2.MSelectionList(); csl.add(camsh)
+        cmat = csl.getDagPath(0).inclusiveMatrix()
+        campos = (cmat[12], cmat[13], cmat[14])   # カメラのワールド位置（行列の並進成分）
     except Exception:
         return []
     try:
@@ -1110,6 +1112,30 @@ def _occlusion_factors(line):
                 fac[i] = OCC_HIDDEN_WEIGHT
                 break
     return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
+
+
+def _occlusion_debug(line):
+    """隠蔽検知が 0/0 になる原因を切り分けるための診断文字列を返す。"""
+    src = _line_src_shape(line)
+    if not src or not cmds.objExists(src):
+        return "src shape 取得失敗 (src={})".format(src)
+    cam = _active_camera()
+    if not cam:
+        return "アクティブカメラ取得失敗"
+    try:
+        csl = om2.MSelectionList(); csl.add(cam)
+        cmat = csl.getDagPath(0).inclusiveMatrix()
+        cpos = (round(cmat[12], 2), round(cmat[13], 2), round(cmat[14], 2))
+    except Exception as e:
+        return "カメラ行列取得失敗: {} (cam={})".format(e, cam)
+    try:
+        sl = om2.MSelectionList(); sl.add(src)
+        dag = sl.getDagPath(0)
+        mfn = om2.MFnMesh(dag)
+        np = len(mfn.getPoints(om2.MSpace.kObject))
+    except Exception as e:
+        return "om2 メッシュ取得失敗: {} (src={})".format(e, _short(src))
+    return "src={} verts={} cam={} pos={}".format(_short(src), np, _short(cam), cpos)
 
 
 def _update_curv_weights(line):
@@ -1847,9 +1873,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     occ = _occlusion_factors(l)
                     total += len(occ)
                     flagged += sum(1 for v in occ if v < 1.0)
-                cmds.warning("隠蔽検知ハル: {} ライン中 {}/{} 頂点を引き寄せ検出"
-                             "（0なら検出失敗。テクスチャ/カメラ/メッシュをご確認ください）"
-                             .format(len(lines), flagged, total))
+                msg = ("隠蔽検知ハル: {} ライン中 {}/{} 頂点を引き寄せ検出"
+                       .format(len(lines), flagged, total))
+                if total == 0 and lines:
+                    msg += " ／ 診断: " + _occlusion_debug(lines[0])
+                cmds.warning(msg)
             except Exception:
                 pass
         else:
