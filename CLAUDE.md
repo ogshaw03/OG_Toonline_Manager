@@ -187,13 +187,12 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
   の頂点位置（= A の offset）まで押し出し、**正面/背面の面 → weight 0**＝元メッシュ表面に張り付く。
   → シルエットから表面へ滑らかに戻る「スカート」になり、A の浮き隙間を線色で塞ぐ（`_update_gapfill_weights`、
   `weight=(FACING_THRESH−facing)/FACING_THRESH` を `clamp0`＋`_smooth_vertex_values`、om2・レイ不要で軽い）。
-- B は **両面表示（`doubleSided=1`/`opposite=0`、背面法にしない）**。スカートの壁＝カメラを向いた面を
-  見せて隙間を線色で塞ぐ（背面法だと壁がカリングされ二重線＋隙間になる）。シルエット以外の面は
-  weight を `GAPFILL_TUCK`(-1.0) まで負にして**元メッシュ表面の裏へ潜らせ本体に隠す**（面乗り防止）。
-  **本体上に黒い面が出るのは押し出す帯が広いとき**なので `FACING_THRESH`(既定0.2)を**狭く**して、B が
-  シルエットのフチで**接線方向（隙間側）にだけ膨らみ本体の上には膨らまない**ようにする（黒面/二重線回避の要）。
+- B は **裏面のみ表示（`opposite=1`/`doubleSided=0`）**＝表面（前面）を見せないので**本体の上に黒い面が
+  出ない**（両面表示だと本体上に黒面＋膨らみ由来の太さムラが出るため不可）。見える線はフチの膨らみ（=隙間を
+  塞ぐ部分・背景側）の裏面と、A のリム。二重線の内側の縁を消すため、**シルエット以外と膨らみ壁の本体側を
+  `GAPFILL_TUCK`(-2.0) で本体の裏へ深く沈めて隠す**。膨らみは `FACING_THRESH`(0.2)でフチに限定。
   A と同じ線色SG。`offset` は **A の `textureDeformer.offset` に接続**（A の太さに追従＝A の頂点位置に届く）。
-  元へ `outMesh`+`parent/scaleConstraint` で追従。
+  元へ `outMesh`+`parent/scaleConstraint` で追従。見える太さは均一ハル A のリム基準なので安定。
 - 更新は隠蔽検知と共通のカメラ追従基盤（`_on_cam_moved`→`_request_occ_refresh`→`_refresh_occlusion` が
   ハルの occlusion と gapfill の両方を再計算）。`_ensure_cam_tracking` が **occlusion ON または gapfill 存在**
   のときコールバック＋250msフォールバックを起動/解除。ライン削除で B も `_gather` で一緒に消す。

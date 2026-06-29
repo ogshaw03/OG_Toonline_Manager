@@ -93,7 +93,8 @@ GAPFILL_HOLDER = "ToonGapFill_grp"   # 隙間埋めオブジェクトの格納�
 FACING_THRESH = 0.2                  # facing(=|N·視線|) がこれ未満で押し出し開始（シルエット帯の広さ）
                                      # 小さいほど帯が狭く＝フチでだけ接線方向に膨らみ本体上の黒面を防ぐ
 GAPFILL_SMOOTH_ITERS = 1             # 隙間埋めウェイトの近傍スムージング回数
-GAPFILL_TUCK = -1.0                  # シルエット以外（正面/背面の面）の weight 下限（負＝表面の裏へ潜らせ隠す）
+GAPFILL_TUCK = -2.0                  # シルエット以外と膨らみ壁の本体側を本体の裏へ深く沈める weight 下限
+                                     # （負で深いほど二重線の内側の縁が本体に隠れる。裏面表示時の二重線対策）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -3015,12 +3016,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 両面表示（背面法にしない）。スカートの壁＝カメラを向いた面を見せて隙間を線色で塞ぐ。
-        # 背面法だと壁がカリングされ二重線になる。本体上の黒い面は FACING_THRESH を狭くして防ぐ
-        # （B はシルエットのフチで接線方向＝隙間側にだけ膨らみ、本体の上には膨らまない）。
+        # 裏面のみ表示（opposite=1/doubleSided=0）＝表面（前面）を見せないので本体の上に黒い面が出ない。
+        # 二重線を避けるため、シルエット以外と膨らみ壁の本体側は GAPFILL_TUCK で本体の裏へ深く沈め、
+        # 見える裏面はフチの膨らみ（隙間を塞ぐ部分・背景側）だけにする。
         try:
-            cmds.setAttr(bshape + ".doubleSided", 1)
-            cmds.setAttr(bshape + ".opposite", 0)
+            cmds.setAttr(bshape + ".doubleSided", 0)
+            cmds.setAttr(bshape + ".opposite", 1)
         except Exception:
             pass
         # A と同じシェーディング（線色）を割り当て
