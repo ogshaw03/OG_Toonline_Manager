@@ -90,7 +90,8 @@ MASK_HOLDER = "ToonMask_grp"         # 重なりマスクの格納グループ�
 GAPFILL_TAG  = "isToonGapFill"       # 隙間埋めオブジェクト（facing で寝た面をベースの位置へ押し出す）の識別タグ
 GAPFILL_LINK = "toonGapFill"         # line(A) → gapfill(B) への message
 GAPFILL_HOLDER = "ToonGapFill_grp"   # 隙間埋めオブジェクトの格納グループ（ROOT 直下）
-FACING_THRESH = 0.5                  # facing(=|N·視線|) がこれ未満で押し出し開始（シルエット帯の広さ）
+FACING_THRESH = 0.2                  # facing(=|N·視線|) がこれ未満で押し出し開始（シルエット帯の広さ）
+                                     # 小さいほど帯が狭く＝フチでだけ接線方向に膨らみ本体上の黒面を防ぐ
 GAPFILL_SMOOTH_ITERS = 1             # 隙間埋めウェイトの近傍スムージング回数
 GAPFILL_TUCK = -1.0                  # シルエット以外（正面/背面の面）の weight 下限（負＝表面の裏へ潜らせ隠す）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
@@ -3014,10 +3015,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 裏面のみ表示（バックフェースのみ）= opposite=1 + doubleSided=0。ハル A と同じ見え方。
+        # 両面表示（背面法にしない）。スカートの壁＝カメラを向いた面を見せて隙間を線色で塞ぐ。
+        # 背面法だと壁がカリングされ二重線になる。本体上の黒い面は FACING_THRESH を狭くして防ぐ
+        # （B はシルエットのフチで接線方向＝隙間側にだけ膨らみ、本体の上には膨らまない）。
         try:
-            cmds.setAttr(bshape + ".doubleSided", 0)
-            cmds.setAttr(bshape + ".opposite", 1)
+            cmds.setAttr(bshape + ".doubleSided", 1)
+            cmds.setAttr(bshape + ".opposite", 0)
         except Exception:
             pass
         # A と同じシェーディング（線色）を割り当て

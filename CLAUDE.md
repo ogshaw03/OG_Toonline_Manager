@@ -187,8 +187,11 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
   の頂点位置（= A の offset）まで押し出し、**正面/背面の面 → weight 0**＝元メッシュ表面に張り付く。
   → シルエットから表面へ滑らかに戻る「スカート」になり、A の浮き隙間を線色で塞ぐ（`_update_gapfill_weights`、
   `weight=(FACING_THRESH−facing)/FACING_THRESH` を `clamp0`＋`_smooth_vertex_values`、om2・レイ不要で軽い）。
-- B は **裏面のみ表示（`opposite=1`/`doubleSided=0`）**＝ハル A と同じ見え方。シルエット以外の面は
+- B は **両面表示（`doubleSided=1`/`opposite=0`、背面法にしない）**。スカートの壁＝カメラを向いた面を
+  見せて隙間を線色で塞ぐ（背面法だと壁がカリングされ二重線＋隙間になる）。シルエット以外の面は
   weight を `GAPFILL_TUCK`(-1.0) まで負にして**元メッシュ表面の裏へ潜らせ本体に隠す**（面乗り防止）。
+  **本体上に黒い面が出るのは押し出す帯が広いとき**なので `FACING_THRESH`(既定0.2)を**狭く**して、B が
+  シルエットのフチで**接線方向（隙間側）にだけ膨らみ本体の上には膨らまない**ようにする（黒面/二重線回避の要）。
   A と同じ線色SG。`offset` は **A の `textureDeformer.offset` に接続**（A の太さに追従＝A の頂点位置に届く）。
   元へ `outMesh`+`parent/scaleConstraint` で追従。
 - 更新は隠蔽検知と共通のカメラ追従基盤（`_on_cam_moved`→`_request_occ_refresh`→`_refresh_occlusion` が
