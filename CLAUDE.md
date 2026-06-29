@@ -160,10 +160,11 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
 - A は通常の単純ハル（occlusion OFF）でフル均一太さ＝安定。B はマスクで内側交差を隠す。
 - B = 元メッシュの追従複製（`outMesh`→textureDeformer ベース入力＋`parent/scaleConstraint`）に、
   **元と同じシェーディンググループ（面色）を割り当て**、法線方向へ少し膨らませて A の内側交差を覆う。
-  B はラインの子。膨らみ量 = ライン太さ × `MASK_INFLATE_FRAC`(0.5) を `multDoubleLinear`(`<mask>_inflate`)
-  で接続し、太さを変えても **線幅 ≒ 太さ×(1-係数)** を保つ（A_off − inflate がそのまま見える線幅＝均一）。
-- ボタンはトグル: 既にマスクがあれば削除（`_remove_overlap_mask`）。ライン削除時は子の B は一緒に消え、
-  独立した `<mask>_inflate` を `delete_selected` の `_gather` で拾って消す。`_mask_of` で関連付け取得。
+  B は **ROOT 直下 `MASK_HOLDER`(`ToonMask_grp`) に格納＝別オブジェクトとして可視**（ライン子にすると
+  最上位で1つにしか見えず分かりにくいため）。膨らみ量 = ライン太さ × `MASK_INFLATE_FRAC`(0.5) を
+  `multDoubleLinear`(`<mask>_inflate`)で接続し、太さを変えても **線幅 ≒ 太さ×(1-係数)** を保つ。
+- ボタンはトグル: 既にマスクがあれば削除（`_remove_overlap_mask`）。ライン削除時は `_gather` が
+  `_mask_of` で B 本体と `<mask>_inflate` を victims に加えて一緒に消す（空 `MASK_HOLDER` も掃除）。
 - カメラ非依存・DG のみ＝**VP2/バッチ対応・毎フレーム追従**。注意: B が法線方向に inflate する分だけ
   モデルのシルエットがわずかに太る。極端なグラジング角では交差の出っ張りが inflate を超えて少し漏れる
   （inflate を上げると覆えるが線が細る）。

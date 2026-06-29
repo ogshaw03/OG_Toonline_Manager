@@ -85,6 +85,7 @@ SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出し
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 0.5              # マスク膨らみ量 = ライン太さ × 係数（線幅 ≒ 太さ×(1-係数)）
+MASK_HOLDER = "ToonMask_grp"         # 重なりマスクの格納グループ（ROOT 直下・別オブジェクトとして可視）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -2970,11 +2971,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.sets(mshape, e=True, forceElement=sg)
         except Exception:
             pass
-        # タグ付け → ライン子へ（先に親付けしてから拘束＝親空間で正しく追従させる）
+        # タグ付け → 専用ホルダーへ（別オブジェクトとして可視。先に親付けしてから拘束）
         if not cmds.attributeQuery(MASK_TAG, node=mask, exists=True):
             cmds.addAttr(mask, ln=MASK_TAG, at="bool", dv=True)
+        _ensure_root()
+        if not cmds.objExists(MASK_HOLDER):
+            cmds.group(em=True, name=MASK_HOLDER, parent=ROOT)
         try:
-            mask = cmds.parent(mask, line)[0]
+            mask = cmds.parent(mask, MASK_HOLDER)[0]
         except Exception:
             pass
         # 移動/回転/スケール追従
@@ -3390,9 +3394,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     n2 = _short(c) + s
                     if cmds.objExists(n2):
                         victims.add(n2)
-            # 重なりマスク本体はラインの子なので一緒に消えるが、膨らみ乗算ノードは独立なので拾う
+            # 重なりマスク本体（別ホルダー）と膨らみ乗算ノードもラインと一緒に削除する
             m = _mask_of(line)
             if m:
+                victims.add(m)
                 infl = _short(m) + "_inflate"
                 if cmds.objExists(infl):
                     victims.add(infl)
@@ -3416,6 +3421,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._cleanup_orphan_ctrls()
             if cmds.objExists(LINE_HOLDER) and not (cmds.listRelatives(LINE_HOLDER, c=True) or []):
                 cmds.delete(LINE_HOLDER)
+            if cmds.objExists(MASK_HOLDER) and not (cmds.listRelatives(MASK_HOLDER, c=True) or []):
+                cmds.delete(MASK_HOLDER)
             # 空になった ROOT は片付ける
             if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
                 cmds.delete(ROOT)
