@@ -1119,7 +1119,14 @@ def _occlusion_factors(line):
         # 手前（カメラ側）に本体があるか / 奥に本体があるか → どちらかで重なり
         if _hit(fwd_org, to_cam, fmax) or _hit(bwd_org, away, far):
             fac[i] = OCC_HIDDEN_WEIGHT
-    return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
+    # スムージングは隠す側の段差を均すためだけに使う。可視リム（残す頂点）はスムージングで
+    # 1.0 未満に下がると太さが減って起伏になるため、必ず 1.0 に再クランプして太さを一定に保つ。
+    kept = [f >= 1.0 for f in fac]
+    sm = _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
+    for i in range(n):
+        if kept[i]:
+            sm[i] = 1.0
+    return sm
 
 
 def _occlusion_debug(line):
