@@ -996,9 +996,13 @@ def _smooth_vertex_values(dag, vals, iters):
 
 
 def _occlusion_factors(line):
-    """カメラから見て元メッシュ（同一オブジェクト）に隠れている頂点を検出する係数リスト。
-    隠れている頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて裏面を隠す）、可視 → 1.0。
-    各頂点から法線方向へ微小に出した点からカメラへレイを飛ばし、元メッシュに当たれば隠蔽と判定。
+    """カメラから見てオフセット後のハル頂点が本体（元メッシュ）に重なっているかを判定する係数リスト。
+    重なっている頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて隠す）、フチ（背景に抜ける）→ 1.0。
+
+    悪さをするのは表面上の頂点 P ではなく、法線方向にオフセットされた**シェル頂点 S=P+N*太さ**が
+    本体の手前に飛び出して見える分。そこで S から**カメラ方向（手前）と逆方向（奥）の両方**へレイを
+    飛ばし、どちらかで元メッシュに当たれば「画面上で本体に重なっている」＝引き寄せ対象とする。
+    両方外れる＝シルエットのフチ（背景に抜ける）だけ太さを残す。
     オブジェクト空間で計算（MFnMesh のレイ交差はオブジェクト空間が確実なため）。"""
     src = _line_src_shape(line)
     if not src or not cmds.objExists(src):
@@ -1030,54 +1034,73 @@ def _occlusion_factors(line):
         is_ortho = bool(cmds.getAttr(camsh + ".orthographic"))
     except Exception:
         is_ortho = False
-    vdir = None
+    vdir = None   # ortho: 頂点→カメラ方向（一定）
     if is_ortho:
         try:
             m = cmds.xform(camsh, q=True, ws=True, m=True)   # カメラのワールド行列
             fwd = om2.MVector(-m[8], -m[9], -m[10])           # カメラ前方 = -Z
             fwd_o = (fwd * wim).normal()
-            vdir = om2.MFloatVector(-fwd_o.x, -fwd_o.y, -fwd_o.z)  # 頂点→カメラ方向
+            vdir = om2.MFloatVector(-fwd_o.x, -fwd_o.y, -fwd_o.z)
         except Exception:
             is_ortho = False
-    # オブジェクト空間 bbox からバイアス/最大距離を決定
+    # オブジェクト空間 bbox から最大距離を決定
     try:
         bb = mfn.boundingBox
         diag = (bb.width ** 2 + bb.height ** 2 + bb.depth ** 2) ** 0.5
     except Exception:
         diag = 1.0
-    eps = max(diag * 1e-4, 1e-6)
     far = max(diag * 4.0, 1.0)
+    # シェルのオフセット量（= textureDeformer.offset の実太さ）。0 なら bbox から微小量。
+    off = 0.0
+    defm = _line_deformer(line)
+    if defm:
+        try:
+            off = abs(cmds.getAttr(defm + ".offset"))
+        except Exception:
+            off = 0.0
+    if off <= 1e-6:
+        off = max(diag * 5e-3, 1e-4)
+    bias = max(off * 1e-2, 1e-5)   # 自己交差回避の微小バイアス
     try:
         accel = mfn.autoUniformGridParams()
     except Exception:
         accel = None
     kob = om2.MSpace.kObject
+
+    def _hit(origin, d, maxp):
+        if maxp <= 0.0:
+            return False
+        try:
+            if accel is not None:
+                r = mfn.anyIntersection(origin, d, kob, maxp, False, accelParams=accel)
+            else:
+                r = mfn.anyIntersection(origin, d, kob, maxp, False)
+        except Exception:
+            return False
+        return bool(r)
+
     fac = [1.0] * n
     for i in range(n):
         p = pts[i]; nv = nrm[i]
-        sx = p.x + nv.x * eps; sy = p.y + nv.y * eps; sz = p.z + nv.z * eps
-        src_pt = om2.MFloatPoint(sx, sy, sz)
+        # オフセット後のシェル頂点 S
+        sx = p.x + nv.x * off; sy = p.y + nv.y * off; sz = p.z + nv.z * off
         if is_ortho and vdir is not None:
-            d = vdir
-            maxp = far
+            to_cam = vdir
+            dist = far
         else:
             dx = cam.x - sx; dy = cam.y - sy; dz = cam.z - sz
-            d = om2.MFloatVector(dx, dy, dz)
-            dist = d.length()
+            to_cam = om2.MFloatVector(dx, dy, dz)
+            dist = to_cam.length()
             if dist < 1e-6:
                 continue
-            d = d / dist
-            maxp = dist - eps * 2.0
-            if maxp <= 0.0:
-                continue
-        try:
-            if accel is not None:
-                hit = mfn.anyIntersection(src_pt, d, kob, maxp, False, accelParams=accel)
-            else:
-                hit = mfn.anyIntersection(src_pt, d, kob, maxp, False)
-        except Exception:
-            hit = ()
-        if hit:   # 元メッシュに遮られている＝隠れている
+            to_cam = to_cam / dist
+        away = om2.MFloatVector(-to_cam.x, -to_cam.y, -to_cam.z)
+        # バイアス分だけ視線方向にずらした始点（自己交差回避）
+        fwd_org = om2.MFloatPoint(sx + to_cam.x * bias, sy + to_cam.y * bias, sz + to_cam.z * bias)
+        bwd_org = om2.MFloatPoint(sx + away.x * bias, sy + away.y * bias, sz + away.z * bias)
+        fmax = (dist - bias * 2.0) if not (is_ortho and vdir is not None) else far
+        # 手前（カメラ側）に本体があるか / 奥に本体があるか → どちらかで重なり
+        if _hit(fwd_org, to_cam, fmax) or _hit(bwd_org, away, far):
             fac[i] = OCC_HIDDEN_WEIGHT
     return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
 
