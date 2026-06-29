@@ -235,6 +235,13 @@ UIパネルは選択で切替: 全体倍率は常に最上部。グループ選�
 inverted hull とは別に、**選択ポリゴンエッジに沿ったチューブ状ライン**を追加できる
 （`create_edge_line`、ボタン「選択エッジにライン」）。`polyToCurve`(履歴付=変形/移動追従)
 → 円プロファイル `circle` を `extrude` でカーブに沿わせ → `nurbsToPoly` でチューブ poly 化。
+
+**クリース/境界の自動エッジライン**（`create_crease_lines`、ボタン「クリース/境界にライン」）:
+pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`CREASE_ANGLE`=30°の折れ目）＋ボーダー
+（開境界）**を om2 `MItMeshEdge`(`onBoundary`/隣接2面法線の内積)で検出し、そのエッジを選択して
+`create_edge_line` でチューブ化（`_crease_border_edges`）。**カメラ非依存・静的・全レンダラー/バッチ対応**。
+※ シルエット（プロファイル＝重なり/浮き隙間）は**カメラ依存**のためここでは対象外（滑らかな閉曲面は
+折れ目が無く線が出ない）。隙間問題の本命はシルエットエッジ検出（カメラ依存・別途）。
 - `EDGE_TAG`(`isToonEdgeLine`) で識別。中間ノード(カーブ/円/NURBS面)はラインの子に隠して保持。
   円プロファイルは細い固定半径(0.01)で、実太さはチューブ表面の **textureDeformer** で出す。
   ※ extrude の向き次第でチューブ法線が**内向き**になると textureDeformer が内側へ押し込み、

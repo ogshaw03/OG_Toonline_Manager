@@ -22,6 +22,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 使い方の概要は README.md を参照。
 """
 import os
+import math
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 import maya.api.OpenMaya as om2
@@ -95,6 +96,7 @@ FACING_THRESH = 0.2                  # facing(=|N·視線|) がこれ未満で�
 GAPFILL_SMOOTH_ITERS = 1             # 隙間埋めウェイトの近傍スムージング回数
 GAPFILL_TUCK = -2.0                  # シルエット以外と膨らみ壁の本体側を本体の裏へ深く沈める weight 下限
                                      # （負で深いほど二重線の内側の縁が本体に隠れる。裏面表示時の二重線対策）
+CREASE_ANGLE = 30.0                  # クリース判定の二面角しきい値（度）。これ超で折れ目エッジとみなす
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -1232,6 +1234,41 @@ def _occlusion_debug(line):
     return "src={} verts={} cam={} pos={}".format(_short(src), np, _short(cam), cpos)
 
 
+def _crease_border_edges(shape, tform, angle_deg=CREASE_ANGLE):
+    """シェイプのクリース（二面角がしきい値超）＋ボーダー（開境界）エッジの
+    コンポーネント名リスト（"<tform>.e[i]"）を返す。カメラ非依存・静的。"""
+    try:
+        sl = om2.MSelectionList(); sl.add(shape)
+        dag = sl.getDagPath(0)
+        mfn = om2.MFnMesh(dag)
+        ite = om2.MItMeshEdge(dag)
+    except Exception:
+        return []
+    cos_thr = math.cos(math.radians(max(0.0, min(179.0, angle_deg))))
+    short = _short(tform)
+    out = []
+    while not ite.isDone():
+        idx = ite.index()
+        crease = False
+        try:
+            if ite.onBoundary():
+                crease = True
+            else:
+                faces = ite.getConnectedFaces()
+                if len(faces) >= 2:
+                    n0 = mfn.getPolygonNormal(faces[0], om2.MSpace.kObject)
+                    n1 = mfn.getPolygonNormal(faces[1], om2.MSpace.kObject)
+                    # 法線の内積 < cos(しきい角) ⇔ 面の成す角がしきい角超＝折れ目
+                    if (n0 * n1) < cos_thr:
+                        crease = True
+        except Exception:
+            crease = False
+        if crease:
+            out.append("{}.e[{}]".format(short, idx))
+        ite.next()
+    return out
+
+
 def _gapfill_of(line):
     """ライン A に紐づく隙間埋めオブジェクト B を返す。無ければ None。"""
     if cmds.objExists(line) and cmds.attributeQuery(GAPFILL_LINK, node=line, exists=True):
@@ -1675,6 +1712,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
         self.btn_edge.clicked.connect(self.create_edge_line)
         crow.addWidget(self.btn_edge)
+        self.btn_crease = QtWidgets.QPushButton("クリース/境界にライン")
+        self.btn_crease.setToolTip("選択メッシュの折れ目(二面角>{:.0f}°)＋開境界エッジを自動検出して"
+                                   "チューブラインを生成（カメラ非依存・全レンダラー/バッチ対応）。\n"
+                                   "※ 滑らかな閉曲面は折れ目が無いため線は出ません。"
+                                   "シルエット/重なりはカメラ依存のため対象外。".format(CREASE_ANGLE))
+        self.btn_crease.clicked.connect(self.create_crease_lines)
+        crow.addWidget(self.btn_crease)
         self.btn_gap = QtWidgets.QPushButton("隙間埋め")
         self.btn_gap.setToolTip("選択ハルラインに『隙間埋めオブジェクト』を追加/削除（トグル）。"
                                 "元メッシュ複製(線色・背面法)で、カメラに対して寝た面=シルエットの頂点だけ"
@@ -3184,6 +3228,39 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
 
     # ========== エッジライン（チューブ） ==========
+    def create_crease_lines(self, *args):
+        """選択メッシュのクリース（折れ目）＋ボーダー（開境界）エッジを自動検出し、
+        そこにチューブ状のエッジラインを生成する（カメラ非依存・全レンダラー/バッチ対応）。
+        ※ シルエット（重なり/浮き隙間）はカメラ依存のため別途。ここでは折れ目/境界のみ。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        made = 0
+        skipped = 0
+        cmds.undoInfo(openChunk=True)
+        try:
+            for obj in sel:
+                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
+                if not shps:
+                    continue
+                edges = _crease_border_edges(shps[0], obj, CREASE_ANGLE)
+                if not edges:
+                    skipped += 1
+                    continue
+                cmds.select(edges, r=True)
+                self.create_edge_line()   # 選択エッジからチューブラインを生成
+                made += 1
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        cmds.select(clear=True)
+        self.refresh_tree()
+        if made:
+            cmds.warning("クリース/境界エッジにラインを生成しました（{} メッシュ）。"
+                         "折れ目/境界が無いメッシュは生成されません。".format(made))
+        elif skipped:
+            cmds.warning("クリース（二面角>{:.0f}°）も境界エッジも見つかりませんでした"
+                         "（滑らかな閉曲面では折れ目が無いため線は出ません）。".format(CREASE_ANGLE))
+
     def create_edge_line(self, *args):
         """選択ポリゴンエッジに沿ってチューブ状のラインを追加（太さ調整可・元に追従）。"""
         sel = cmds.ls(sl=True, fl=True) or []
