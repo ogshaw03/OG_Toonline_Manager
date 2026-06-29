@@ -3014,11 +3014,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 両面表示にする（背面法にしない）。スカートの壁＝カメラを向いた面を見せて隙間を線色で塞ぐ。
-        # 背面法（doubleSided=0）だと壁がカリングされて二重線＋隙間になるため使わない。
+        # 裏面のみ表示（バックフェースのみ）= opposite=1 + doubleSided=0。ハル A と同じ見え方。
         try:
-            cmds.setAttr(bshape + ".doubleSided", 1)
-            cmds.setAttr(bshape + ".opposite", 0)
+            cmds.setAttr(bshape + ".doubleSided", 0)
+            cmds.setAttr(bshape + ".opposite", 1)
         except Exception:
             pass
         # A と同じシェーディング（線色）を割り当て
