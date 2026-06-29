@@ -184,15 +184,16 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
 これを **B=元メッシュ複製(線色・背面法)** で塞ぐ方式（ボタン「隙間埋め」、`toggle_gapfill`、
 `GAPFILL_TAG`/`GAPFILL_LINK`、`GAPFILL_HOLDER`=`ToonGapFill_grp`）:
 - B の各頂点を **符号付き内積 d=法線·視線 で駆動**（`_update_gapfill_weights`、om2・レイ不要で軽い）。
-  `facing=|d|` の絶対値で判定すると**シルエットの手前側と奥側の両方が膨らんで二重線**になるため、符号で分ける:
-  - **手前側の寝た面（0≤d<FACING_THRESH）**: `weight=(thr−d)/thr` で 1 まで → ベース A の頂点位置(=offset)へ
-    押し出し、隙間を**1本で**埋める。
-  - **正面を向いた面（d≥thr）**: `weight` 負（`GAPFILL_TUCK`(-2.0)）で本体の裏へ深く沈め隠す（黒面/面乗り防止）。
-  - **奥側＝背面（d<0）**: `weight=0` で元メッシュ表面に張り付く（膨らませない＝二重線の内側の線を出さない）。
-- B は **両面表示（`doubleSided=1`/`opposite=0`）**。手前側の膨らみ面（前面）を見せて隙間を埋める（裏面のみだと
-  前面がカリングで消える）。本体の黒い面は上記の tuck で隠すので両面でも黒くならない。A と同じ線色SG。
-  `offset` は **A の `textureDeformer.offset` に接続**（A の太さに追従＝A の頂点位置に届く）。
-  元へ `outMesh`+`parent/scaleConstraint` で追従。見える太さは均一ハル A のリム基準なので安定。
+  `facing=|d|` の絶対値で判定すると**シルエットの手前側と奥側の両方が膨らんで二重線**になるため、符号で分ける。
+  **裏面のみ表示なので見える面＝背面側(d<0)**。頂点を膨らませるとシルエット付近で背面がカメラ方向を向くため、
+  その背面で隙間を埋める:
+  - **背面側の寝た面（-thr≤d≤0）**: `weight=(thr+d)/thr` で 1 まで → ベース A の頂点位置(=offset)へ押し出し、
+    隙間を**1本で**埋める（裏面表示で見える）。
+  - **深い背面（d<-thr）**: `weight` 負（`GAPFILL_TUCK`(-2.0)）で本体の裏へ深く沈め隠す。
+  - **正面側（d>0）**: `weight=0` で元メッシュ表面に張り付く（裏面表示で前面はカリング＝本体に黒面が出ない）。
+- B は **裏面のみ表示（`opposite=1`/`doubleSided=0`）**＝ハル A と同じ。膨らんだ背面が見えて隙間を埋め、
+  正面（本体側）はカリングされ黒面が出ない。A と同じ線色SG。`offset` は **A の `textureDeformer.offset` に接続**
+  （A の太さに追従＝A の頂点位置に届く）。元へ `outMesh`+`parent/scaleConstraint` で追従。太さは A のリム基準で安定。
 - 更新は隠蔽検知と共通のカメラ追従基盤（`_on_cam_moved`→`_request_occ_refresh`→`_refresh_occlusion` が
   ハルの occlusion と gapfill の両方を再計算）。`_ensure_cam_tracking` が **occlusion ON または gapfill 存在**
   のときコールバック＋250msフォールバックを起動/解除。ライン削除で B も `_gather` で一緒に消す。

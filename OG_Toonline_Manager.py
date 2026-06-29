@@ -1321,12 +1321,12 @@ def _update_gapfill_weights(b):
             if vl < 1e-9:
                 continue
             vx, vy, vz = vx / vl, vy / vl, vz / vl
-        d = nx * vx + ny * vy + nz * vz   # 符号付き: >0=手前(法線がカメラ向き) / <0=奥(背面)
-        # シルエットの「手前側」の寝た面（0<=d<thr）だけ A 位置まで膨らませる（=隙間を1本で埋める）。
-        # 正面を向いた面（d>=thr）は裏へ深く沈めて本体に隠す。奥側（d<0）は元メッシュに張り付く（膨らまない）
-        # → 手前/奥の両方が膨らんで二重線になるのを防ぐ。
-        if d >= 0.0:
-            wt = (thr - d) / thr
+        d = nx * vx + ny * vy + nz * vz   # 符号付き: >0=手前(法線カメラ向き) / <0=奥(背面)
+        # 裏面のみ表示では「見える面＝背面側(d<0)」。背面側の寝た面(-thr<=d<=0)だけ A 位置まで膨らませて
+        # 隙間を1本で埋める。深い背面(d<-thr)は裏へ沈め、正面側(d>0)は張り付き(裏面表示でカリング)。
+        # → 手前/奥の両方を膨らませて二重線になるのを防ぐ。
+        if d <= 0.0:
+            wt = (thr + d) / thr          # d=0→1(最大), d=-thr→0, d<-thr→負(裏へ沈める)
             if wt > 1.0:
                 wt = 1.0
             elif wt < GAPFILL_TUCK:
@@ -3020,12 +3020,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 両面表示。手前側シルエットの膨らみ面（前面）を見せて隙間を埋める（裏面のみだとカリングで消える）。
-        # 本体の黒い面は「正面を向いた面を裏へ深く沈める(GAPFILL_TUCK)」で隠すので両面でも黒くならない。
-        # 奥側（背面）は膨らませず張り付かせるので二重線にならない。
+        # 裏面のみ表示（opposite=1/doubleSided=0）。頂点を膨らませるとシルエット付近で背面がカメラ方向を
+        # 向くので、その背面が見えて隙間を埋める。正面側(d>0)は前面なのでカリングされ本体に黒面が出ない。
         try:
-            cmds.setAttr(bshape + ".doubleSided", 1)
-            cmds.setAttr(bshape + ".opposite", 0)
+            cmds.setAttr(bshape + ".doubleSided", 0)
+            cmds.setAttr(bshape + ".opposite", 1)
         except Exception:
             pass
         # A と同じシェーディング（線色）を割り当て
