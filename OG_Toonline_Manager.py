@@ -92,6 +92,7 @@ GAPFILL_LINK = "toonGapFill"         # line(A) → gapfill(B) への message
 GAPFILL_HOLDER = "ToonGapFill_grp"   # 隙間埋めオブジェクトの格納グループ（ROOT 直下）
 FACING_THRESH = 0.5                  # facing(=|N·視線|) がこれ未満で押し出し開始（シルエット帯の広さ）
 GAPFILL_SMOOTH_ITERS = 1             # 隙間埋めウェイトの近傍スムージング回数
+GAPFILL_TUCK = -1.0                  # シルエット以外（正面/背面の面）の weight 下限（負＝表面の裏へ潜らせ隠す）
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -1319,8 +1320,14 @@ def _update_gapfill_weights(b):
                 continue
             vx, vy, vz = vx / vl, vy / vl, vz / vl
         facing = abs(nx * vx + ny * vy + nz * vz)   # 0=寝た面(シルエット) / 1=正面・背面
-        wt = (thr - facing) / thr                   # facing<thr で押し出し、grazing→1
-        w[i] = wt if wt > 0.0 else 0.0
+        # facing<thr: 正方向（外へ押し出してベース A 位置へ＝隙間をスカートで埋める）
+        # facing>thr: 負（元メッシュ表面の裏へ潜らせ本体に隠す＝二重線/面乗りを防ぐ）
+        wt = (thr - facing) / thr
+        if wt > 1.0:
+            wt = 1.0
+        elif wt < GAPFILL_TUCK:
+            wt = GAPFILL_TUCK
+        w[i] = wt
     w = _smooth_vertex_values(dag, w, GAPFILL_SMOOTH_ITERS)
     try:
         cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *w)
@@ -2959,10 +2966,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 背面法（前面カリング）＝ A と同じ見え方
-        cmds.setAttr(bshape + ".doubleSided", 0)
+        # 両面表示にする（背面法にしない）。スカートの壁＝カメラを向いた面を見せて隙間を線色で塞ぐ。
+        # 背面法（doubleSided=0）だと壁がカリングされて二重線＋隙間になるため使わない。
         try:
-            cmds.setAttr(bshape + ".opposite", 1)
+            cmds.setAttr(bshape + ".doubleSided", 1)
+            cmds.setAttr(bshape + ".opposite", 0)
         except Exception:
             pass
         # A と同じシェーディング（線色）を割り当て
