@@ -161,8 +161,12 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
 - B = 元メッシュの追従複製（`outMesh`→textureDeformer ベース入力＋`parent/scaleConstraint`）に、
   **元と同じシェーディンググループ（面色）を割り当て**、法線方向へ少し膨らませて A の内側交差を覆う。
   B は **ROOT 直下 `MASK_HOLDER`(`ToonMask_grp`) に格納＝別オブジェクトとして可視**（ライン子にすると
-  最上位で1つにしか見えず分かりにくいため）。膨らみ量 = ライン太さ × `MASK_INFLATE_FRAC`(0.5) を
-  `multDoubleLinear`(`<mask>_inflate`)で接続し、太さを変えても **線幅 ≒ 太さ×(1-係数)** を保つ。
+  最上位で1つにしか見えず分かりにくいため）。膨らみ量 = 総太さ(mB.output) × `MASK_INFLATE_FRAC`(0.5) を
+  `multDoubleLinear`(`<mask>_inflate`)で接続。
+- **線が細くならない補正**: マスクは inflate 分だけ線を覆うので、その分だけハル A の offset を上乗せして
+  見える線幅＝設定太さを保つ。`_ensure_thickness_chain` の hull 分岐がマスク有のとき
+  `offset = mB.output×(1+MASK_INFLATE_FRAC)`(`<ctrl>_thkMaskBoost`)に張り替え、マスク無で外す。
+  `toggle_overlap_mask` が追加/削除後に `_ensure_thickness_chain` を呼んで切替。線幅 = A_off − inflate = mB.output。
 - ボタンはトグル: 既にマスクがあれば削除（`_remove_overlap_mask`）。ライン削除時は `_gather` が
   `_mask_of` で B 本体と `<mask>_inflate` を victims に加えて一緒に消す（空 `MASK_HOLDER` も掃除）。
 - カメラ非依存・DG のみ＝**VP2/バッチ対応・毎フレーム追従**。注意: B が法線方向に inflate する分だけ

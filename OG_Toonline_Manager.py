@@ -920,7 +920,37 @@ def _ensure_thickness_chain(line):
             pass
         _connect(mS + ".output", target)
     else:
-        _connect(mB + ".output", target)
+        # hull: 重なりマスクがある場合は、マスクが覆う inflate 分だけ offset を上乗せして
+        # 見える線幅（= mB.output = 設定太さ）を保つ。offset = mB.output * (1 + MASK_INFLATE_FRAC)。
+        mBoost = base + "_thkMaskBoost"
+        if _mask_of(line):
+            if not cmds.objExists(mBoost):
+                mBoost = cmds.createNode("multDoubleLinear", name=mBoost)
+            _connect(mB + ".output", mBoost + ".input1")
+            try:
+                cmds.setAttr(mBoost + ".input2", 1.0 + MASK_INFLATE_FRAC)
+            except Exception:
+                pass
+            for p in (cmds.listConnections(target, s=True, d=False, p=True) or []):
+                if p != mBoost + ".output":
+                    try:
+                        cmds.disconnectAttr(p, target)
+                    except Exception:
+                        pass
+            _connect(mBoost + ".output", target)
+        else:
+            if cmds.objExists(mBoost):
+                try:
+                    cmds.delete(mBoost)
+                except Exception:
+                    pass
+            for p in (cmds.listConnections(target, s=True, d=False, p=True) or []):
+                if p != mB + ".output":
+                    try:
+                        cmds.disconnectAttr(p, target)
+                    except Exception:
+                        pass
+            _connect(mB + ".output", target)
 
     # エッジラインは円プロファイルの基準半径があるため、太さ(offset)が 0 でも
     # チューブが残る。総太さ(mB.output)が ~0 のときシェイプ可視を 0 にして消す。
@@ -2921,9 +2951,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if _mask_of(line):
                     if self._remove_overlap_mask(line):
                         removed += 1
+                        _ensure_thickness_chain(line)   # 上乗せを外して元の太さへ
                 else:
                     if self._create_overlap_mask(line):
                         added += 1
+                        _ensure_thickness_chain(line)   # inflate 分を offset に上乗せ
             cmds.select(clear=True)
             self._stash_loose_handles()
         finally:
@@ -2987,11 +3019,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.scaleConstraint(srcT, mask, maintainOffset=False)
         except Exception:
             pass
-        # 膨らみ量をライン太さに比例（太さを変えても線幅 ≒ 太さ×(1-係数) を保つ）
-        ldefm = _line_deformer(line)
-        if ldefm:
+        # 膨らみ量 = 総太さ(mB.output) × 係数。ライン側は同じ係数分 offset を上乗せするので
+        # 見える線幅 = 総太さ（設定太さ）を保つ。mB はライン太さチェーンの最終段。
+        ctrln = _ctrl_of(line)
+        mB = (_short(ctrln) + "_thkB") if ctrln else None
+        if mB and cmds.objExists(mB):
             mdl = cmds.createNode("multDoubleLinear", name=_short(mask) + "_inflate")
-            _connect(ldefm + ".offset", mdl + ".input1")
+            _connect(mB + ".output", mdl + ".input1")
             try:
                 cmds.setAttr(mdl + ".input2", MASK_INFLATE_FRAC)
             except Exception:
@@ -3390,7 +3424,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             c = _ctrl_of(line)
             if c:
                 victims.add(c)
-                for s in ("_thkA", "_thkB"):
+                for s in ("_thkA", "_thkB", "_thkMaskBoost"):
                     n2 = _short(c) + s
                     if cmds.objExists(n2):
                         victims.add(n2)
