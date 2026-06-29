@@ -1896,6 +1896,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_smooth.setToolTip("ウェイトの近傍スムージング回数（境界のジャギ軽減）")
         self.spn_smooth.valueChanged.connect(self._on_gap_param_changed)
         gpl.addRow("スムージング回数", self.spn_smooth)
+        self.spn_crease = QtWidgets.QDoubleSpinBox()
+        self.spn_crease.setRange(1.0, 179.0); self.spn_crease.setSingleStep(5.0)
+        self.spn_crease.setDecimals(0); self.spn_crease.setValue(CREASE_ANGLE)
+        self.spn_crease.setToolTip("クリース判定の二面角しきい値（度）。大きいほど鋭い折れ目だけに線。"
+                                   "変更後に「クリース/境界にライン」を押すと反映")
+        self.spn_crease.valueChanged.connect(self._on_crease_angle_changed)
+        gpl.addRow("クリース角(°)", self.spn_crease)
         lay.addWidget(self.grp_gapparams)
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
@@ -2224,6 +2231,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.undoInfo(swf=True)
             except Exception:
                 pass
+
+    def _on_crease_angle_changed(self, *args):
+        """検証用: クリース判定の二面角しきい値を更新（次回「クリース/境界にライン」で反映）。"""
+        global CREASE_ANGLE
+        try:
+            CREASE_ANGLE = float(self.spn_crease.value())
+        except Exception:
+            pass
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
