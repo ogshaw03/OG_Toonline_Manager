@@ -1322,17 +1322,15 @@ def _update_gapfill_weights(b):
                 continue
             vx, vy, vz = vx / vl, vy / vl, vz / vl
         d = nx * vx + ny * vy + nz * vz   # 符号付き: >0=手前(法線カメラ向き) / <0=奥(背面)
-        # 裏面のみ表示では「見える面＝背面側(d<0)」。背面側の寝た面(-thr<=d<=0)だけ A 位置まで膨らませて
-        # 隙間を1本で埋める。深い背面(d<-thr)は裏へ沈め、正面側(d>0)は張り付き(裏面表示でカリング)。
-        # → 手前/奥の両方を膨らませて二重線になるのを防ぐ。
-        if d <= 0.0:
-            wt = (thr + d) / thr          # d=0→1(最大), d=-thr→0, d<-thr→負(裏へ沈める)
-            if wt > 1.0:
-                wt = 1.0
-            elif wt < GAPFILL_TUCK:
-                wt = GAPFILL_TUCK
+        # 裏面のみ表示では「見える面＝背面側(d<0)」。背面側の寝た面(-thr<=d<=0)は weight=1 で平らに保ち、
+        # B を A の位置にぴったり重ねる（ランプにすると端で表面に戻る縁が薄い二重線になるため平ら）。
+        # それより奥(d<-thr)は一気に裏へ沈めて隠す。正面側(d>0)は張り付き(裏面表示でカリング)。
+        if d > 0.0:
+            wt = 0.0                       # 正面側＝張り付き（前面はカリングで黒面なし）
+        elif d >= -thr:
+            wt = 1.0                       # 背面側の寝た面＝A にぴったり重ねる（隙間を埋める・二重線なし）
         else:
-            wt = 0.0
+            wt = GAPFILL_TUCK              # 深い背面＝裏へ沈めて隠す
         w[i] = wt
     w = _smooth_vertex_values(dag, w, GAPFILL_SMOOTH_ITERS)
     try:
