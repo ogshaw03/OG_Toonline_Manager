@@ -65,7 +65,8 @@ CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
 OCC_HIDDEN_WEIGHT = -1.5             # 隠蔽検知ハル: 隠れた頂点の重み（負＝元メッシュ内側へ深く寄せて隠す）
 OCC_SMOOTH_ITERS  = 2               # 隠蔽係数の近傍スムージング回数（可視/隠蔽境界のジャギ軽減）
-OCC_KEEP_DILATE   = 1               # 可視リム（残す頂点）を内側へ太らせるリング数（太さの安定化）
+OCC_KEEP_DILATE   = 0               # 可視リムを内側へ太らせるリング数（>0は太さ安定するが重なり部が浮く）
+OCC_HIDE_CEIL     = -0.1            # 隠す頂点の上限係数（必ず表面の裏に入れて張り付かせる・スムージング後にクランプ）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
@@ -1141,12 +1142,16 @@ def _occlusion_factors(line):
         for i in range(n):
             if kept[i]:
                 fac[i] = 1.0
-    # スムージングは隠す側の段差を均すためだけに使う。可視リム（残す頂点）はスムージングで
-    # 1.0 未満に下がると太さが減って起伏になるため、必ず 1.0 に再クランプして太さを一定に保つ。
+    # スムージングは隠す側の段差を均すためだけに使う。
+    # ・可視リム（残す頂点）: スムージングで 1.0 未満に下がると太さが減るため必ず 1.0 に再クランプ。
+    # ・隠す頂点: スムージングで 0 付近まで上がると表面手前に残って張り付かないため、必ず
+    #   OCC_HIDE_CEIL 以下（表面の裏）にクランプして確実に潜らせる。
     sm = _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS, adj=adj)
     for i in range(n):
         if kept[i]:
             sm[i] = 1.0
+        elif sm[i] > OCC_HIDE_CEIL:
+            sm[i] = OCC_HIDE_CEIL
     return sm
 
 
