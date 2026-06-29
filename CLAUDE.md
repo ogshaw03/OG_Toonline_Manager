@@ -122,6 +122,20 @@ UI: グループは展開式（プルダウン）のツリー項目。ライン/
 - 追従: 変形（スキン等）は `outMesh→inMesh` で追従。元トランスフォームの移動/回転/スケールは
   `parentConstraint`+`scaleConstraint`（`_ensure_follow`）でラインを元に拘束して追従させる。
 
+#### 隠蔽検知ハル（カメラ依存・検証中／ビューポート専用）
+
+ハルはワールド法線オフセットのため、元メッシュとラインの間に 3D の隙間ができ、グラジング角で
+その隙間が横から見えて輪郭が浮く/面に乗る。これを抑える試験機能（UIチェック「ハルの隠れた面を
+元メッシュに寄せる」、既定OFF。`_OCC_ENABLED`/`_on_toggle_occlude`）:
+- 各頂点から法線方向へ微小に出した点から**カメラへレイ**を飛ばし、**元メッシュに当たれば隠蔽**と判定
+  （`_occlusion_factors`、om2 `MFnMesh.anyIntersection`、オブジェクト空間。ortho はビュー方向一定）。
+- 隠れた頂点の weightList 係数を `OCC_HIDDEN_WEIGHT`(-0.5)＝**元メッシュ内側へ寄せて裏面を隠す**。
+  **可視（シルエット）頂点は係数 1.0 のまま**なので太さは保たれる（＝交差部だけ細くならない）。
+  境界のジャギは `_smooth_vertex_values`(`OCC_SMOOTH_ITERS`=2)で均す。
+- 実体は `_update_curv_weights` 末尾で `weights[i] *= occ[i]`（曲率/プロファイルと合成）。`_is_hull_line` のみ対象。
+- 更新は **QTimer(150ms) でカメラ行列変化を監視**(`_poll_camera`)＋timeChanged。**重い・scriptJob/レイのため
+  バッチレンダー不可・高密度メッシュ注意**。バッチ対応にするには MPxDeformerNode 化が必要（未実装）。
+
 UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
 ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。
 

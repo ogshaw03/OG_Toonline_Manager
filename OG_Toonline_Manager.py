@@ -63,6 +63,8 @@ DEFAULT_CAP   = 3.0                   # 〃 初期曲率上限
 DEFAULT_CMIN  = 1.0                   # 〃 初期曲率下限（1.0=平らな所を細くしない）
 CTRL_TAPER  = "endTaper"             # 末端細り（0=なし / 1=端をほぼ0に）
 MIN_WEIGHT  = 0.05                    # 頂点ウェイトの下限（チューブが点に潰れる/反転するのを防ぐ）
+OCC_HIDDEN_WEIGHT = -0.5             # 隠蔽検知ハル: 隠れた頂点の重み（負＝元メッシュ内側へ寄せて隠す）
+OCC_SMOOTH_ITERS  = 2               # 隠蔽係数の近傍スムージング回数（可視/隠蔽境界のジャギ軽減）
 CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル（"x:y,x:y,..." 文字列）
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
@@ -87,6 +89,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
 _TAPER_CACHE = {}  # line名 -> 各頂点の長手方向パラメータ t(0..1)（エッジライン用）
+_OCC_ENABLED = False  # 隠蔽検知ハル（カメラ依存）の有効フラグ（UIチェックで切替・モジュール共有）
 
 
 def _maya_main():
@@ -929,6 +932,156 @@ def _ensure_thickness_chain(line):
             _connect(cnd + ".outColorR", lshape + ".visibility")
 
 
+def _is_hull_line(line):
+    """背面法ハルライン（エッジ/フレネル/スクリーン以外）か。隠蔽検知の対象判定に使う。"""
+    if not cmds.attributeQuery(TAG, node=line, exists=True):
+        return False
+    for t in (EDGE_TAG, FRES_TAG, SCRN_TAG):
+        if cmds.attributeQuery(t, node=line, exists=True):
+            return False
+    return True
+
+
+def _active_camera():
+    """アクティブなモデルパネルのカメラ shape を返す。無ければ persp。"""
+    def _cam_shape(c):
+        if not c:
+            return None
+        if cmds.nodeType(c) == "camera":
+            return c
+        sh = cmds.listRelatives(c, shapes=True, type="camera", f=True) or []
+        return sh[0] if sh else None
+    try:
+        p = cmds.getPanel(withFocus=True)
+        if p and cmds.getPanel(typeOf=p) == "modelPanel":
+            sh = _cam_shape(cmds.modelEditor(p, q=True, camera=True))
+            if sh:
+                return sh
+    except Exception:
+        pass
+    for p in (cmds.getPanel(type="modelPanel") or []):
+        try:
+            sh = _cam_shape(cmds.modelEditor(p, q=True, camera=True))
+            if sh:
+                return sh
+        except Exception:
+            pass
+    return "perspShape" if cmds.objExists("perspShape") else None
+
+
+def _smooth_vertex_values(dag, vals, iters):
+    """頂点値リストを近傍平均で iters 回スムージングして返す（境界のジャギを均す）。"""
+    n = len(vals)
+    if n == 0 or iters <= 0:
+        return vals
+    try:
+        itv = om2.MItMeshVertex(dag)
+    except Exception:
+        return vals
+    adj = [()] * n
+    while not itv.isDone():
+        adj[itv.index()] = tuple(itv.getConnectedVertices())
+        itv.next()
+    cur = list(vals)
+    for _ in range(iters):
+        nxt = list(cur)
+        for i, a in enumerate(adj):
+            if a:
+                s = cur[i]
+                for c in a:
+                    s += cur[c]
+                nxt[i] = s / (len(a) + 1)
+        cur = nxt
+    return cur
+
+
+def _occlusion_factors(line):
+    """カメラから見て元メッシュ（同一オブジェクト）に隠れている頂点を検出する係数リスト。
+    隠れている頂点 → OCC_HIDDEN_WEIGHT（負＝元メッシュ内側へ寄せて裏面を隠す）、可視 → 1.0。
+    各頂点から法線方向へ微小に出した点からカメラへレイを飛ばし、元メッシュに当たれば隠蔽と判定。
+    オブジェクト空間で計算（MFnMesh のレイ交差はオブジェクト空間が確実なため）。"""
+    src = _line_src_shape(line)
+    if not src or not cmds.objExists(src):
+        return []
+    camsh = _active_camera()
+    if not camsh:
+        return []
+    try:
+        campos = cmds.xform(camsh, q=True, ws=True, t=True)
+    except Exception:
+        return []
+    try:
+        sl = om2.MSelectionList(); sl.add(src)
+        dag = sl.getDagPath(0)
+        mfn = om2.MFnMesh(dag)
+        pts = mfn.getPoints(om2.MSpace.kObject)
+        nrm = mfn.getVertexNormals(False, om2.MSpace.kObject)
+    except Exception:
+        return []
+    n = len(pts)
+    if n == 0:
+        return []
+    # ワールド→オブジェクト変換でカメラ位置/向きをオブジェクト空間へ
+    wim = dag.inclusiveMatrixInverse()
+    cam_o = om2.MPoint(campos[0], campos[1], campos[2]) * wim
+    cam = om2.MFloatPoint(cam_o.x, cam_o.y, cam_o.z)
+    is_ortho = False
+    try:
+        is_ortho = bool(cmds.getAttr(camsh + ".orthographic"))
+    except Exception:
+        is_ortho = False
+    vdir = None
+    if is_ortho:
+        try:
+            m = cmds.xform(camsh, q=True, ws=True, m=True)   # カメラのワールド行列
+            fwd = om2.MVector(-m[8], -m[9], -m[10])           # カメラ前方 = -Z
+            fwd_o = (fwd * wim).normal()
+            vdir = om2.MFloatVector(-fwd_o.x, -fwd_o.y, -fwd_o.z)  # 頂点→カメラ方向
+        except Exception:
+            is_ortho = False
+    # オブジェクト空間 bbox からバイアス/最大距離を決定
+    try:
+        bb = mfn.boundingBox
+        diag = (bb.width ** 2 + bb.height ** 2 + bb.depth ** 2) ** 0.5
+    except Exception:
+        diag = 1.0
+    eps = max(diag * 1e-4, 1e-6)
+    far = max(diag * 4.0, 1.0)
+    try:
+        accel = mfn.autoUniformGridParams()
+    except Exception:
+        accel = None
+    kob = om2.MSpace.kObject
+    fac = [1.0] * n
+    for i in range(n):
+        p = pts[i]; nv = nrm[i]
+        sx = p.x + nv.x * eps; sy = p.y + nv.y * eps; sz = p.z + nv.z * eps
+        src_pt = om2.MFloatPoint(sx, sy, sz)
+        if is_ortho and vdir is not None:
+            d = vdir
+            maxp = far
+        else:
+            dx = cam.x - sx; dy = cam.y - sy; dz = cam.z - sz
+            d = om2.MFloatVector(dx, dy, dz)
+            dist = d.length()
+            if dist < 1e-6:
+                continue
+            d = d / dist
+            maxp = dist - eps * 2.0
+            if maxp <= 0.0:
+                continue
+        try:
+            if accel is not None:
+                hit = mfn.anyIntersection(src_pt, d, kob, maxp, False, accelParams=accel)
+            else:
+                hit = mfn.anyIntersection(src_pt, d, kob, maxp, False)
+        except Exception:
+            hit = ()
+        if hit:   # 元メッシュに遮られている＝隠れている
+            fac[i] = OCC_HIDDEN_WEIGHT
+    return _smooth_vertex_values(dag, fac, OCC_SMOOTH_ITERS)
+
+
 def _update_curv_weights(line):
     """コントローラーの curvature / curvatureCap から頂点ウェイトを再計算。
     scriptJob からも呼ばれる（アニメーション時の追従用）。"""
@@ -978,6 +1131,12 @@ def _update_curv_weights(line):
     # 末端細り/プロファイルでウェイトが 0 まで落ちるとチューブが基準半径(点)に潰れて
     # スピンドル状に尖る（場合により反転して -値に見える）。下限を入れて潰れを防ぐ。
     weights = [w if w > MIN_WEIGHT else MIN_WEIGHT for w in weights]
+    # 隠蔽検知ハル（カメラ依存）: 元メッシュに隠れた頂点の重みを内側へ寄せて裏面を隠す。
+    # 可視（シルエット）頂点は係数 1.0 のままなので太さは保たれる。
+    if _OCC_ENABLED and _is_hull_line(line):
+        occ = _occlusion_factors(line)
+        if len(occ) == n:
+            weights = [weights[i] * occ[i] for i in range(n)]
     try:
         cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
     except Exception:
@@ -1170,6 +1329,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
         self._time_job = None          # timeChanged scriptJob
+        self._occ_timer = None         # 隠蔽検知ハル: カメラ移動監視の QTimer
+        self._occ_cam_key = None       # 最後に処理したカメラ位置/行列のキー（変化検知用）
         self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
         self._build()
         self.refresh_tree()
@@ -1185,6 +1346,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         try:
             if self._time_job and cmds.scriptJob(exists=self._time_job):
                 cmds.scriptJob(kill=self._time_job, force=True)
+        except Exception:
+            pass
+        try:
+            if self._occ_timer is not None:
+                self._occ_timer.stop()
         except Exception:
             pass
         super(ToonOutlineUI, self).closeEvent(event)
@@ -1394,6 +1560,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.chk_lock_select.toggled.connect(self._on_toggle_lock_select)
         lay.addWidget(self.chk_lock_select)
 
+        self.chk_occlude = QtWidgets.QCheckBox("ハルの隠れた面を元メッシュに寄せる（カメラ依存・検証中）")
+        self.chk_occlude.setChecked(False)
+        self.chk_occlude.setToolTip(
+            "ON: カメラから見て元メッシュに隠れたハルの裏面頂点を元メッシュ内側へ寄せ、"
+            "オフセットの隙間が横から見えるのを抑えます。シルエット部の太さは保たれます。\n"
+            "※ scriptJob/頂点レイのため重く、ビューポート専用（バッチレンダー不可）。高密度メッシュ注意。")
+        self.chk_occlude.toggled.connect(self._on_toggle_occlude)
+        lay.addWidget(self.chk_occlude)
+
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
@@ -1581,6 +1756,64 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self._apply_line_selectable(line, lock)
         finally:
             cmds.undoInfo(closeChunk=True)
+
+    def _hull_lines(self):
+        """管理下のハルライン（隠蔽検知の対象）。"""
+        return [l for l in self._all_lines() if _is_hull_line(l)]
+
+    def _refresh_occlusion(self):
+        """全ハルラインの頂点ウェイトを再計算（隠蔽係数を反映）。undo は汚さない。"""
+        lines = self._hull_lines()
+        if not lines:
+            return
+        try:
+            cmds.undoInfo(swf=False)
+        except Exception:
+            pass
+        try:
+            for l in lines:
+                _update_curv_weights(l)
+        finally:
+            try:
+                cmds.undoInfo(swf=True)
+            except Exception:
+                pass
+
+    def _poll_camera(self):
+        """カメラが動いたら隠蔽係数を再計算（QTimer から定期呼び出し）。"""
+        if not _OCC_ENABLED:
+            return
+        cam = _active_camera()
+        if not cam:
+            return
+        try:
+            m = cmds.xform(cam, q=True, ws=True, m=True)
+        except Exception:
+            return
+        key = (cam, tuple(round(v, 5) for v in m))
+        if key == self._occ_cam_key:
+            return
+        self._occ_cam_key = key
+        self._refresh_occlusion()
+
+    def _on_toggle_occlude(self, state):
+        """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。
+        ON: カメラ監視タイマー開始＋即再計算。OFF: タイマー停止＋隠蔽なしへ戻す。"""
+        global _OCC_ENABLED
+        _OCC_ENABLED = bool(state)
+        if _OCC_ENABLED:
+            self._occ_cam_key = None
+            if self._occ_timer is None:
+                self._occ_timer = QtCore.QTimer(self)
+                self._occ_timer.setInterval(150)
+                self._occ_timer.timeout.connect(self._poll_camera)
+            self._occ_timer.start()
+            self._refresh_occlusion()
+        else:
+            if self._occ_timer is not None:
+                self._occ_timer.stop()
+            # _OCC_ENABLED=False のまま再計算 → 隠蔽係数が外れフル太さに戻る
+            self._refresh_occlusion()
 
     def _stash_loose_handles(self):
         """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
@@ -2244,6 +2477,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._set_mult_widgets()
         self._update_mult_labels()
         self._update_key_colors()
+        # 隠蔽検知ハル: 再生/スクラブでメッシュ変形→シルエットが変わるので再計算
+        if _OCC_ENABLED:
+            self._occ_cam_key = None   # 次の poll で必ず更新されるようリセット
+            self._refresh_occlusion()
 
     # ========== カラー ==========
     def _refresh_swatch(self):
