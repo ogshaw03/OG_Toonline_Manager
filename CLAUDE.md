@@ -175,6 +175,24 @@ B=元メッシュ複製を面色で膨らませた覆い** の2オブジェク�
 - カメラ非依存・DG のみ＝**VP2/バッチ対応・毎フレーム追従**。注意: B が法線方向に inflate する分だけ
   モデルのシルエットがわずかに太る。極端なグラジング角では交差の出っ張りが inflate を超えて少し漏れる
   （inflate を上げると覆えるが線が細る）。
+- ※ **UIボタンと生成は廃止済み**（ユーザー要望）。`toggle_overlap_mask`/`_create/_remove_overlap_mask`・
+  `MASK_*` 定数・`_mask_of`・`_ensure_thickness_chain` のマスク分岐などの裏コードは後方互換で残置。
+
+#### 隙間埋め（facing 駆動・2オブジェクト／カメラ依存・VP2/バッチ対応）【現行の推奨】
+
+背面法ハル A は法線オフセットのため、グラジング角でフチが表面から浮いて隙間（背景が透ける）が出る。
+これを **B=元メッシュ複製(線色・背面法)** で塞ぐ方式（ボタン「隙間埋め」、`toggle_gapfill`、
+`GAPFILL_TAG`/`GAPFILL_LINK`、`GAPFILL_HOLDER`=`ToonGapFill_grp`）:
+- B の各頂点を **facing=|法線·視線| で駆動**。カメラに対して**寝た面（シルエット）→ weight 1**＝ベース A
+  の頂点位置（= A の offset）まで押し出し、**正面/背面の面 → weight 0**＝元メッシュ表面に張り付く。
+  → シルエットから表面へ滑らかに戻る「スカート」になり、A の浮き隙間を線色で塞ぐ（`_update_gapfill_weights`、
+  `weight=(FACING_THRESH−facing)/FACING_THRESH` を `clamp0`＋`_smooth_vertex_values`、om2・レイ不要で軽い）。
+- B は背面法（`opposite=1`/`doubleSided=0`）でA と同じ線色SG。`offset` は **A の `textureDeformer.offset` に接続**
+  （A の太さに追従＝A の頂点位置に届く）。元へ `outMesh`+`parent/scaleConstraint` で追従。
+- 更新は隠蔽検知と共通のカメラ追従基盤（`_on_cam_moved`→`_request_occ_refresh`→`_refresh_occlusion` が
+  ハルの occlusion と gapfill の両方を再計算）。`_ensure_cam_tracking` が **occlusion ON または gapfill 存在**
+  のときコールバック＋250msフォールバックを起動/解除。ライン削除で B も `_gather` で一緒に消す。
+- レイ検知の引き寄せ（occlusion）より滑らか・軽量で太さも安定しやすい。**カメラ依存・VP2/Hardware バッチ対応**。
 
 UIパネルは選択で切替: 全体倍率は常に最上部。グループ選択時はグループ倍率＋全体のみ、
 ライン選択時は太さ/曲率起伏/曲率上限＋全体のみ表示（`_update_panels` で w_line/w_group をトグル）。

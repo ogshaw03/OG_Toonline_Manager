@@ -87,6 +87,11 @@ MASK_LINK   = "toonMask"             # line → mask への message（重なり�
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
                                      # （太さは上乗せ補正で一定。係数↑＝覆う力↑だがモデルが膨らむ）
 MASK_HOLDER = "ToonMask_grp"         # 重なりマスクの格納グループ（ROOT 直下・別オブジェクトとして可視）
+GAPFILL_TAG  = "isToonGapFill"       # 隙間埋めオブジェクト（facing で寝た面をベースの位置へ押し出す）の識別タグ
+GAPFILL_LINK = "toonGapFill"         # line(A) → gapfill(B) への message
+GAPFILL_HOLDER = "ToonGapFill_grp"   # 隙間埋めオブジェクトの格納グループ（ROOT 直下）
+FACING_THRESH = 0.5                  # facing(=|N·視線|) がこれ未満で押し出し開始（シルエット帯の広さ）
+GAPFILL_SMOOTH_ITERS = 1             # 隙間埋めウェイトの近傍スムージング回数
 GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コントローラー階層の親）
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
@@ -1224,6 +1229,105 @@ def _occlusion_debug(line):
     return "src={} verts={} cam={} pos={}".format(_short(src), np, _short(cam), cpos)
 
 
+def _gapfill_of(line):
+    """ライン A に紐づく隙間埋めオブジェクト B を返す。無ければ None。"""
+    if cmds.objExists(line) and cmds.attributeQuery(GAPFILL_LINK, node=line, exists=True):
+        c = [x for x in (cmds.listConnections(line + "." + GAPFILL_LINK, s=True, d=False) or [])
+             if cmds.objExists(x)]
+        if c:
+            return c[0]
+    return None
+
+
+def _all_gapfills():
+    """シーン内の全隙間埋めオブジェクト（GAPFILL_TAG 付き transform）。"""
+    return [t for t in (cmds.ls(type="transform") or [])
+            if cmds.attributeQuery(GAPFILL_TAG, node=t, exists=True)]
+
+
+def _gapfill_src_shape(b):
+    """隙間埋め B の元メッシュ shape（textureDeformer のベース入力）。"""
+    defm = cmds.ls(cmds.listHistory(b) or [], type=THICK_TYPE)
+    if defm:
+        conn = cmds.listConnections(defm[0] + ".input[0].inputGeometry",
+                                    s=True, d=False, sh=True) or []
+        if conn:
+            return conn[0]
+    return None
+
+
+def _update_gapfill_weights(b):
+    """隙間埋め B の weightList を facing（=|法線·視線|）で再計算。
+    寝た面（カメラに対して横向き＝シルエット）→ 1（ベース位置=offset まで押し出す）、
+    正面/背面を向いた面 → 0（元メッシュ表面に張り付き）。カメラ依存・レイ不要で軽い。"""
+    if not cmds.objExists(b):
+        return
+    dl = cmds.ls(cmds.listHistory(b) or [], type=THICK_TYPE)
+    if not dl:
+        return
+    defm = dl[0]
+    src = _gapfill_src_shape(b)
+    if not src or not cmds.objExists(src):
+        return
+    cam = _active_camera()
+    if not cam:
+        return
+    try:
+        csl = om2.MSelectionList(); csl.add(cam)
+        cmat = csl.getDagPath(0).inclusiveMatrix()
+        campos = (cmat[12], cmat[13], cmat[14])
+    except Exception:
+        return
+    try:
+        sl = om2.MSelectionList(); sl.add(src)
+        dag = sl.getDagPath(0)
+        mfn = om2.MFnMesh(dag)
+        pts = mfn.getPoints(om2.MSpace.kObject)
+        nrm = mfn.getVertexNormals(False, om2.MSpace.kObject)
+    except Exception:
+        return
+    n = len(pts)
+    if n == 0:
+        return
+    wim = dag.inclusiveMatrixInverse()
+    cam_o = om2.MPoint(campos[0], campos[1], campos[2]) * wim
+    is_ortho = False
+    try:
+        is_ortho = bool(cmds.getAttr(cam + ".orthographic"))
+    except Exception:
+        is_ortho = False
+    vdir = None
+    if is_ortho:
+        try:
+            m = cmds.xform(cam, q=True, ws=True, m=True)
+            fwd = om2.MVector(-m[8], -m[9], -m[10])
+            vdir = (fwd * wim).normal()
+        except Exception:
+            is_ortho = False
+    thr = FACING_THRESH if FACING_THRESH > 1e-4 else 0.5
+    w = [0.0] * n
+    for i in range(n):
+        p = pts[i]; nv = nrm[i]
+        nl = (nv.x * nv.x + nv.y * nv.y + nv.z * nv.z) ** 0.5 or 1.0
+        nx, ny, nz = nv.x / nl, nv.y / nl, nv.z / nl
+        if is_ortho and vdir is not None:
+            vx, vy, vz = vdir.x, vdir.y, vdir.z
+        else:
+            vx = cam_o.x - p.x; vy = cam_o.y - p.y; vz = cam_o.z - p.z
+            vl = (vx * vx + vy * vy + vz * vz) ** 0.5
+            if vl < 1e-9:
+                continue
+            vx, vy, vz = vx / vl, vy / vl, vz / vl
+        facing = abs(nx * vx + ny * vy + nz * vz)   # 0=寝た面(シルエット) / 1=正面・背面
+        wt = (thr - facing) / thr                   # facing<thr で押し出し、grazing→1
+        w[i] = wt if wt > 0.0 else 0.0
+    w = _smooth_vertex_values(dag, w, GAPFILL_SMOOTH_ITERS)
+    try:
+        cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *w)
+    except Exception:
+        pass
+
+
 def _update_curv_weights(line):
     """コントローラーの curvature / curvatureCap から頂点ウェイトを再計算。
     scriptJob からも呼ばれる（アニメーション時の追従用）。"""
@@ -1560,22 +1664,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
         self.btn_edge.clicked.connect(self.create_edge_line)
         crow.addWidget(self.btn_edge)
-        self.btn_fres = QtWidgets.QPushButton("フレネル輪郭")
-        self.btn_fres.setToolTip("カメラから見た輪郭（シルエット/凹み縁）にラインを出す方式。"
-                                 "背面法の凹凸ズレが出ず、VP2/Maya Software のバッチで反映・カメラ依存。")
-        self.btn_fres.clicked.connect(self.create_fresnel_outline)
-        crow.addWidget(self.btn_fres)
-        self.btn_scrn = QtWidgets.QPushButton("スクリーン輪郭")
-        self.btn_scrn.setToolTip("クリップ空間に一定ピクセル押し出す輪郭。ワールド押し出しの隙間/浮きが"
-                                 "出ず凸部でも均一太さ。重なり/シルエットのみ・カメラ依存（VP2/DirectX11・テクスチャ表示ON）。")
-        self.btn_scrn.clicked.connect(self.create_screen_outline)
-        crow.addWidget(self.btn_scrn)
-        self.btn_mask = QtWidgets.QPushButton("重なりマスク")
-        self.btn_mask.setToolTip("選択ハルラインに『元メッシュ複製を面色で少し膨らませた覆い』を追加し、"
-                                 "輪郭の内側交差を隠す（太さは単純ハルのまま安定）。\n"
-                                 "もう一度押すとマスクを削除。膨らみ量=ライン太さ×係数。")
-        self.btn_mask.clicked.connect(self.toggle_overlap_mask)
-        crow.addWidget(self.btn_mask)
+        self.btn_gap = QtWidgets.QPushButton("隙間埋め")
+        self.btn_gap.setToolTip("選択ハルラインに『隙間埋めオブジェクト』を追加/削除（トグル）。"
+                                "元メッシュ複製(線色・背面法)で、カメラに対して寝た面=シルエットの頂点だけ"
+                                "ベースのライン位置まで押し出し、正面の面は表面に張り付かせて輪郭の浮き隙間を塞ぐ。"
+                                "カメラ依存・レイ不要で軽い。")
+        self.btn_gap.clicked.connect(self.toggle_gapfill)
+        crow.addWidget(self.btn_gap)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -1918,13 +2013,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
         """管理下のハルライン（隠蔽検知の対象）。"""
         return [l for l in self._all_lines() if _is_hull_line(l)]
 
+    def _cam_tracking_needed(self):
+        """カメラ追従の再計算が必要か（隠蔽検知ON、または隙間埋めオブジェクトが存在）。"""
+        return _OCC_ENABLED or bool(_all_gapfills())
+
     def _refresh_occlusion(self):
-        """全ハルラインの頂点ウェイトを再計算（隠蔽係数を反映）。undo は汚さない。
+        """カメラ依存の頂点ウェイトを再計算（隠蔽検知ハル＋隙間埋め）。undo は汚さない。
         再計算中（_occ_busy）は重畳を避けてスキップ＝重いメッシュでもビューポートが固まらない。"""
         if self._occ_busy:
             return
-        lines = self._hull_lines()
-        if not lines:
+        gaps = _all_gapfills()
+        lines = self._hull_lines() if _OCC_ENABLED else []
+        if not lines and not gaps:
             return
         self._occ_busy = True
         try:
@@ -1933,7 +2033,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
         try:
             for l in lines:
-                _update_curv_weights(l)
+                _update_curv_weights(l)        # 隠蔽検知ハル（occlusion ON のとき）
+            for b in gaps:
+                _update_gapfill_weights(b)      # 隙間埋め（facing 駆動）
         finally:
             try:
                 cmds.undoInfo(swf=True)
@@ -1944,14 +2046,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _request_occ_refresh(self):
         """カメラ移動コールバックから呼ぶ。次のイベントループで1回だけ再計算を予約
         （DG評価中の setAttr 再入を避け、連続発火でも重複予約しない）。"""
-        if self._occ_scheduled or not _OCC_ENABLED:
+        if self._occ_scheduled or not self._cam_tracking_needed():
             return
         self._occ_scheduled = True
         QtCore.QTimer.singleShot(0, self._do_scheduled_occ)
 
     def _do_scheduled_occ(self):
         self._occ_scheduled = False
-        if _OCC_ENABLED:
+        if self._cam_tracking_needed():
             self._refresh_occlusion()
 
     def _on_cam_moved(self, *args):
@@ -1986,7 +2088,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _poll_camera(self):
         """フォールバック: カメラ切替や新規カメラに備え、低頻度ポーリングでも変化を拾う。
         通常の追従は worldMatrix コールバック（_on_cam_moved）が行う。"""
-        if not _OCC_ENABLED:
+        if not self._cam_tracking_needed():
             return
         cam = _active_camera()
         if not cam:
@@ -2004,13 +2106,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._add_cam_callbacks()
         self._refresh_occlusion()
 
-    def _on_toggle_occlude(self, state):
-        """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。
-        ON: カメラ移動コールバック登録＋低頻度フォールバックタイマー＋即再計算。
-        OFF: コールバック/タイマー解除＋隠蔽なしへ戻す。"""
-        global _OCC_ENABLED
-        _OCC_ENABLED = bool(state)
-        if _OCC_ENABLED:
+    def _ensure_cam_tracking(self):
+        """カメラ追従が必要なら worldMatrix コールバック＋低頻度フォールバックタイマーを起動、
+        不要なら解除する（隠蔽検知ON または 隙間埋めオブジェクトが存在するときに必要）。"""
+        if self._cam_tracking_needed():
             self._occ_cam_key = None
             self._add_cam_callbacks()                       # カメラを動かすたびに更新
             if self._occ_timer is None:
@@ -2018,7 +2117,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self._occ_timer.setInterval(250)            # フォールバック（カメラ切替検知）
                 self._occ_timer.timeout.connect(self._poll_camera)
             self._occ_timer.start()
-            self._refresh_occlusion()
+        else:
+            if self._occ_timer is not None:
+                self._occ_timer.stop()
+            self._remove_cam_callbacks()
+
+    def _on_toggle_occlude(self, state):
+        """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
+        global _OCC_ENABLED
+        _OCC_ENABLED = bool(state)
+        self._ensure_cam_tracking()
+        self._refresh_occlusion()
+        if _OCC_ENABLED:
             # 検出できているか切り分け用に頂点数を報告（0なら検出失敗＝レイ/カメラ要確認）
             try:
                 total = flagged = 0
@@ -2034,12 +2144,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.warning(msg)
             except Exception:
                 pass
-        else:
-            if self._occ_timer is not None:
-                self._occ_timer.stop()
-            self._remove_cam_callbacks()
-            # _OCC_ENABLED=False のまま再計算 → 隠蔽係数が外れフル太さに戻る
-            self._refresh_occlusion()
 
     def _stash_loose_handles(self):
         """全 textureDeformerHandle をその場で隠す。旧ハンドルグループがあれば解体する。"""
@@ -2197,6 +2301,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._apply_line_selectable(line, lock)
         self._populating = False
         self._refresh_group_combo()
+        # 既存シーンに隙間埋めがあればカメラ追従を起動（再取得/再起動時）
+        try:
+            self._ensure_cam_tracking()
+        except Exception:
+            pass
 
     def _refresh_group_combo(self):
         cur = self.group_combo.currentText()
@@ -2791,187 +2900,36 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
 
-    # ========== フレネル輪郭（カメラ依存・VP2/バッチ対応） ==========
-    def create_fresnel_outline(self, *args):
-        """選択メッシュにフレネル輪郭ライン（カメラから見て寝た縁＝シルエット/凹みに線）を生成。
-        背面法の凹凸ズレが出ず、VP2/Maya Software のバッチでも反映。カメラ依存。"""
-        sel = cmds.ls(sl=True, long=True, type="transform")
-        if not sel:
-            cmds.warning("メッシュを選択してください"); return
-        thick = DEFAULT_THICK
-        grp = self._current_group()
-
-        cmds.undoInfo(openChunk=True)
-        made = []
-        try:
-            for obj in sel:
-                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
-                if not shps:
-                    continue
-                src = shps[0]
-
-                # 元と同じ位置に複製 → 履歴削除で静的化
-                dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
-                for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
-                    cmds.delete(k)
-                dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
-                cmds.delete(dup, constructionHistory=True)
-
-                # z-fighting 回避の微小オフセット + 変形追従（hull と同じ deformer ベース入力方式）
-                td = cmds.textureDeformer(dshape, strength=0, offset=FRES_ZOFFSET, direction="Normal")
-                defm = td[0]
-                handle = None
-                for c in (cmds.listConnections(defm, type="transform") or []):
-                    if "textureDeformerHandle" in _short(c):
-                        handle = c
-                        break
-                if handle is None and len(td) > 1:
-                    handle = td[1]
-                try:
-                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
-                except Exception:
-                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
-                self._tuck_handle(handle)
-                # 微小オフセットは固定（太さは facingRatio しきい値で制御）→ weightList は使わない
-                try:
-                    cmds.setAttr(defm + ".offset", FRES_ZOFFSET, lock=True)
-                except Exception:
-                    pass
-
-                # フレネルシェーダ（dx11Shader + HLSL、VP2 ハードウェア）を割り当て
-                _build_fresnel_network(dup, dshape, self._color)
-
-                if not cmds.attributeQuery(TAG, node=dup, exists=True):
-                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
-                if not cmds.attributeQuery(FRES_TAG, node=dup, exists=True):
-                    cmds.addAttr(dup, ln=FRES_TAG, at="bool", dv=True)
-
-                dup = cmds.parent(dup, grp)[0]
-                ctrl = _ensure_line_anim(dup, thick)   # 太さ→しきい値、追従。曲率ジョブは張らない
-                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
-                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
-                               (CTRL_TAPER, 0.0)):
-                    if cmds.attributeQuery(at, node=ctrl, exists=True):
-                        try:
-                            cmds.setAttr(ctrl + "." + at, dv)
-                        except Exception:
-                            pass
-                self._apply_line_selectable(dup, self._lock_select())
-                made.append(dup)
-            cmds.select(clear=True)
-            self._stash_loose_handles()
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
-        if made:
-            cmds.warning("フレネル輪郭はハードウェアシェーダです。ビューポートの "
-                         "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
-
-    # ========== スクリーン輪郭（クリップ空間押し出し・隙間なし均一太さ） ==========
-    def create_screen_outline(self, *args):
-        """選択メッシュにスクリーン輪郭（dx11 頂点シェーダでクリップ空間に一定px押し出し）を生成。
-        ワールド押し出しの隙間/浮きが出ず、凸部でも均一太さ。重なり/シルエットのみ・カメラ依存。"""
-        sel = cmds.ls(sl=True, long=True, type="transform")
-        if not sel:
-            cmds.warning("メッシュを選択してください"); return
-        thick = DEFAULT_THICK
-        grp = self._current_group()
-
-        cmds.undoInfo(openChunk=True)
-        made = []
-        try:
-            for obj in sel:
-                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
-                if not shps:
-                    continue
-                src = shps[0]
-                dup = cmds.duplicate(obj, name=_short(obj) + "_screen", rr=True)[0]
-                for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
-                    cmds.delete(k)
-                dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
-                cmds.delete(dup, constructionHistory=True)
-
-                # 変形追従用に textureDeformer(offset=0)。押し出しはシェーダで行うので 0 固定。
-                td = cmds.textureDeformer(dshape, strength=0, offset=0.0, direction="Normal")
-                defm = td[0]
-                handle = None
-                for c in (cmds.listConnections(defm, type="transform") or []):
-                    if "textureDeformerHandle" in _short(c):
-                        handle = c
-                        break
-                if handle is None and len(td) > 1:
-                    handle = td[1]
-                try:
-                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
-                except Exception:
-                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
-                self._tuck_handle(handle)
-                try:
-                    cmds.setAttr(defm + ".offset", 0.0, lock=True)
-                except Exception:
-                    pass
-
-                _build_screen_network(dup, dshape, self._color)
-
-                if not cmds.attributeQuery(TAG, node=dup, exists=True):
-                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
-                if not cmds.attributeQuery(SCRN_TAG, node=dup, exists=True):
-                    cmds.addAttr(dup, ln=SCRN_TAG, at="bool", dv=True)
-
-                dup = cmds.parent(dup, grp)[0]
-                ctrl = _ensure_line_anim(dup, thick)
-                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
-                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
-                               (CTRL_TAPER, 0.0)):
-                    if cmds.attributeQuery(at, node=ctrl, exists=True):
-                        try:
-                            cmds.setAttr(ctrl + "." + at, dv)
-                        except Exception:
-                            pass
-                self._apply_line_selectable(dup, self._lock_select())
-                made.append(dup)
-            cmds.select(clear=True)
-            self._stash_loose_handles()
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
-        if made:
-            cmds.warning("スクリーン輪郭はハードウェアシェーダです。ビューポートの "
-                         "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
-
-    # ========== 重なりマスク（別オブジェクト方式） ==========
-    def toggle_overlap_mask(self, *args):
-        """選択ハルラインに重なりマスク（元メッシュ複製を面色で膨らませた覆い）を追加/削除する。
-        単純な均一ハル（太さ安定）はそのまま、内側交差だけをマスクで隠す。"""
+    # ========== 隙間埋め（2オブジェクト・facing 駆動／カメラ依存・VP2/バッチ対応） ==========
+    def toggle_gapfill(self, *args):
+        """選択ハルライン A に『隙間埋めオブジェクト B』を追加/削除（トグル）。
+        B = 元メッシュ複製(線色・背面法)。カメラに対して寝た面（シルエット）の頂点だけ
+        ベース A の頂点位置(= A の offset)まで押し出し、正面/背面の面は元メッシュ表面に
+        張り付かせる。A の輪郭が浮いて見える隙間を B のスカートで塞ぐ。"""
         lines = [l for l in self._selected_lines() if _is_hull_line(l)]
         if not lines:
-            cmds.warning("ハルラインをツリーで選択してください（エッジ/フレネル/スクリーンは対象外）")
-            return
+            cmds.warning("ハルラインをツリーで選択してください"); return
         cmds.undoInfo(openChunk=True)
         added = removed = 0
         try:
             for line in lines:
-                if _mask_of(line):
-                    if self._remove_overlap_mask(line):
+                if _gapfill_of(line):
+                    if self._remove_gapfill(line):
                         removed += 1
-                        _ensure_thickness_chain(line)   # 上乗せを外して元の太さへ
-                        _update_curv_weights(line)      # マスク無→occlusion対象に戻る
                 else:
-                    if self._create_overlap_mask(line):
+                    if self._create_gapfill(line):
                         added += 1
-                        _ensure_thickness_chain(line)   # inflate 分を offset に上乗せ
-                        # マスク有のラインは均一ハルにする＝引き寄せの残ウェイトをクリア
-                        _update_curv_weights(line)
             cmds.select(clear=True)
             self._stash_loose_handles()
+            self._ensure_cam_tracking()
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
-        cmds.warning("重なりマスク: 追加 {} / 削除 {}（面色で膨らませて内側交差を覆う方式）"
+        cmds.warning("隙間埋め: 追加 {} / 削除 {}（facing で寝た面を押し出してスカートで塞ぐ）"
                      .format(added, removed))
 
-    def _create_overlap_mask(self, line):
-        """ライン A の元メッシュを複製し、面色で少し膨らませた覆い B を作って交差を隠す。"""
+    def _create_gapfill(self, line):
+        """ライン A の元メッシュを複製し、facing 駆動で隙間を塞ぐ背面法オブジェクト B を作る。"""
         src = _line_src_shape(line)
         if not src or not cmds.objExists(src):
             return False
@@ -2979,94 +2937,87 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not par:
             return False
         srcT = par[0]
-        # 元メッシュを複製（子transform除去・ヒストリ削除で静的化）
-        mask = cmds.duplicate(srcT, name=_short(srcT) + "_omask", rr=True)[0]
-        for k in cmds.listRelatives(mask, children=True, type="transform", f=True) or []:
+        b = cmds.duplicate(srcT, name=_short(srcT) + "_gapfill", rr=True)[0]
+        for k in cmds.listRelatives(b, children=True, type="transform", f=True) or []:
             cmds.delete(k)
-        mshape = cmds.listRelatives(mask, shapes=True, type="mesh", ni=True, f=True)
-        if not mshape:
-            cmds.delete(mask); return False
-        mshape = mshape[0]
-        cmds.delete(mask, constructionHistory=True)
-        # 膨らみ（法線方向オフセット）。変形追従は元 outMesh をベース入力へ。
-        td = cmds.textureDeformer(mshape, strength=0, offset=0.0, direction="Normal")
-        mdefm = td[0]
+        bsh = cmds.listRelatives(b, shapes=True, type="mesh", ni=True, f=True)
+        if not bsh:
+            cmds.delete(b); return False
+        bshape = bsh[0]
+        cmds.delete(b, constructionHistory=True)
+        # 変形追従の textureDeformer（offset は後で A の太さに接続。weightList=facing）
+        td = cmds.textureDeformer(bshape, strength=0, offset=0.0, direction="Normal")
+        bdefm = td[0]
         handle = None
-        for c in (cmds.listConnections(mdefm, type="transform") or []):
+        for c in (cmds.listConnections(bdefm, type="transform") or []):
             if "textureDeformerHandle" in _short(c):
                 handle = c; break
         if handle is None and len(td) > 1:
             handle = td[1]
         try:
-            cmds.connectAttr(src + ".outMesh", mdefm + ".input[0].inputGeometry", f=True)
+            cmds.connectAttr(src + ".outMesh", bdefm + ".input[0].inputGeometry", f=True)
         except Exception:
-            cmds.warning("マスクの変形追従の接続に失敗（静的な覆いとして生成）")
+            cmds.warning("隙間埋めの変形追従の接続に失敗（静的に生成）")
         self._tuck_handle(handle)
-        # 元と同じマテリアル（面色）を割り当て → 覆っても見た目は表面と同じ
-        sgs = cmds.listConnections(src, type="shadingEngine") or []
-        sg = sgs[0] if sgs else "initialShadingGroup"
+        # 背面法（前面カリング）＝ A と同じ見え方
+        cmds.setAttr(bshape + ".doubleSided", 0)
         try:
-            cmds.sets(mshape, e=True, forceElement=sg)
+            cmds.setAttr(bshape + ".opposite", 1)
         except Exception:
             pass
-        # タグ付け → 専用ホルダーへ（別オブジェクトとして可視。先に親付けしてから拘束）
-        if not cmds.attributeQuery(MASK_TAG, node=mask, exists=True):
-            cmds.addAttr(mask, ln=MASK_TAG, at="bool", dv=True)
+        # A と同じシェーディング（線色）を割り当て
+        sgs = cmds.listConnections(self._shape_of(line), type="shadingEngine") or []
+        sg = sgs[0] if sgs else None
+        if not sg:
+            _, sg = _ensure_shader(self._color)
+        try:
+            cmds.sets(bshape, e=True, forceElement=sg)
+        except Exception:
+            pass
+        # タグ → ホルダーへ（先に親付けしてから拘束）
+        if not cmds.attributeQuery(GAPFILL_TAG, node=b, exists=True):
+            cmds.addAttr(b, ln=GAPFILL_TAG, at="bool", dv=True)
         _ensure_root()
-        if not cmds.objExists(MASK_HOLDER):
-            cmds.group(em=True, name=MASK_HOLDER, parent=ROOT)
+        if not cmds.objExists(GAPFILL_HOLDER):
+            cmds.group(em=True, name=GAPFILL_HOLDER, parent=ROOT)
         try:
-            mask = cmds.parent(mask, MASK_HOLDER)[0]
+            b = cmds.parent(b, GAPFILL_HOLDER)[0]
         except Exception:
             pass
-        # 移動/回転/スケール追従
         try:
-            cmds.parentConstraint(srcT, mask, maintainOffset=False)
-            cmds.scaleConstraint(srcT, mask, maintainOffset=False)
+            cmds.parentConstraint(srcT, b, maintainOffset=False)
+            cmds.scaleConstraint(srcT, b, maintainOffset=False)
         except Exception:
             pass
-        # 膨らみ量 = 総太さ(mB.output) × 係数。ライン側は同じ係数分 offset を上乗せするので
-        # 見える線幅 = 総太さ（設定太さ）を保つ。mB はライン太さチェーンの最終段。
-        ctrln = _ctrl_of(line)
-        mB = (_short(ctrln) + "_thkB") if ctrln else None
-        if mB and cmds.objExists(mB):
-            mdl = cmds.createNode("multDoubleLinear", name=_short(mask) + "_inflate")
-            _connect(mB + ".output", mdl + ".input1")
-            try:
-                cmds.setAttr(mdl + ".input2", MASK_INFLATE_FRAC)
-            except Exception:
-                pass
-            _connect(mdl + ".output", mdefm + ".offset")
+        # offset = A の太さ（押し出した頂点が A の頂点位置に届く）
+        ldefm = _line_deformer(line)
+        if ldefm:
+            _connect(ldefm + ".offset", bdefm + ".offset")
         else:
             try:
-                cmds.setAttr(mdefm + ".offset", DEFAULT_THICK * MASK_INFLATE_FRAC)
+                cmds.setAttr(bdefm + ".offset", DEFAULT_THICK)
             except Exception:
                 pass
-        # リンク・選択不可
-        if not cmds.attributeQuery(MASK_LINK, node=line, exists=True):
-            cmds.addAttr(line, ln=MASK_LINK, at="message")
+        # リンク・選択不可・初回 facing 計算
+        if not cmds.attributeQuery(GAPFILL_LINK, node=line, exists=True):
+            cmds.addAttr(line, ln=GAPFILL_LINK, at="message")
         try:
-            cmds.connectAttr(mask + ".message", line + "." + MASK_LINK, f=True)
+            cmds.connectAttr(b + ".message", line + "." + GAPFILL_LINK, f=True)
         except Exception:
             pass
-        self._apply_line_selectable(mask, self._lock_select())
+        self._apply_line_selectable(b, self._lock_select())
+        _update_gapfill_weights(b)
         return True
 
-    def _remove_overlap_mask(self, line):
-        """ライン A の重なりマスク B（と膨らみ乗算ノード）を削除する。"""
-        mask = _mask_of(line)
-        if not mask:
+    def _remove_gapfill(self, line):
+        """ライン A の隙間埋めオブジェクト B を削除する。"""
+        b = _gapfill_of(line)
+        if not b:
             return False
-        infl = _short(mask) + "_inflate"
         try:
-            cmds.delete(mask)
+            cmds.delete(b)
         except Exception:
             pass
-        if cmds.objExists(infl):
-            try:
-                cmds.delete(infl)
-            except Exception:
-                pass
         return True
 
     # ========== 生成 ==========
@@ -3441,6 +3392,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 infl = _short(m) + "_inflate"
                 if cmds.objExists(infl):
                     victims.add(infl)
+            # 隙間埋めオブジェクトもラインと一緒に削除する
+            g = _gapfill_of(line)
+            if g:
+                victims.add(g)
 
         victims = set(nodes)
         for n in list(nodes):
@@ -3463,12 +3418,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.delete(LINE_HOLDER)
             if cmds.objExists(MASK_HOLDER) and not (cmds.listRelatives(MASK_HOLDER, c=True) or []):
                 cmds.delete(MASK_HOLDER)
+            if cmds.objExists(GAPFILL_HOLDER) and not (cmds.listRelatives(GAPFILL_HOLDER, c=True) or []):
+                cmds.delete(GAPFILL_HOLDER)
             # 空になった ROOT は片付ける
             if cmds.objExists(ROOT) and not (cmds.listRelatives(ROOT, c=True) or []):
                 cmds.delete(ROOT)
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
+        self._ensure_cam_tracking()   # 隙間埋めが無くなればカメラ追従を止める
 
 
 _toon_win = None
