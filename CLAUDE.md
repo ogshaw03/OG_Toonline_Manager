@@ -322,6 +322,9 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   カメラ依存。元へ `outMesh`+`parent/scaleConstraint` で追従、z-fight 回避に `textureDeformer` 微小オフセット(lock)。
 - 色は dx11Shader の `lineColor` uniform（`FRES_COLOR`）を直接変更。SG 差し替えはしない（線が消えるため）。
   曲率起伏/上限/下限/プロファイルは無効（UIには出るが効かない）。
+- ※ 一度 UI を廃止したが、スクリーン輪郭が出せない「内側の折れ目/溝（重なり部の occluding contour）」に
+  線を出す用途で**復活**（`create_fresnel_outline`＋ボタン「フレネル輪郭」）。スクリーン輪郭（外周）と
+  併用する運用。溝の出方は太さ＝facing しきい値で調整。
 
 ### スクリーン輪郭（クリップ空間押し出し・隙間なし均一太さ）
 

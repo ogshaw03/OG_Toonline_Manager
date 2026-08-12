@@ -1812,6 +1812,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ VP2/DirectX11 前提・カメラ依存。ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示。")
         self.btn_screen.clicked.connect(self.create_screen_outline)
         crow.addWidget(self.btn_screen)
+        self.btn_fresnel = QtWidgets.QPushButton("フレネル輪郭")
+        self.btn_fresnel.setToolTip(
+            "選択メッシュにフレネル輪郭を生成（カメラから見て寝た縁＝シルエット/凹み/溝に線）。\n"
+            "背面法ハルが苦手な内側の折れ目・溝（重なり部）にも線が出やすい。\n"
+            "太さ=facing しきい値、色は共通。曲率/プロファイルは無効。\n"
+            "※ VP2/DirectX11 前提・カメラ依存。ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示。")
+        self.btn_fresnel.clicked.connect(self.create_fresnel_outline)
+        crow.addWidget(self.btn_fresnel)
         self.btn_edge = QtWidgets.QPushButton("選択エッジにライン")
         self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
         self.btn_edge.clicked.connect(self.create_edge_line)
@@ -3361,6 +3369,81 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.refresh_tree()
 
     # ========== エッジライン（チューブ） ==========
+    def create_fresnel_outline(self, *args):
+        """選択メッシュにフレネル輪郭ライン（カメラから見て寝た縁＝シルエット/凹みに線）を生成。
+        背面法の凹凸ズレが出ず、VP2/Maya Software のバッチでも反映。カメラ依存。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        thick = DEFAULT_THICK
+        grp = self._current_group()
+
+        cmds.undoInfo(openChunk=True)
+        made = []
+        try:
+            for obj in sel:
+                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
+                if not shps:
+                    continue
+                src = shps[0]
+
+                # 元と同じ位置に複製 → 履歴削除で静的化
+                dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
+                for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
+                    cmds.delete(k)
+                dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
+                cmds.delete(dup, constructionHistory=True)
+
+                # z-fighting 回避の微小オフセット + 変形追従（hull と同じ deformer ベース入力方式）
+                td = cmds.textureDeformer(dshape, strength=0, offset=FRES_ZOFFSET, direction="Normal")
+                defm = td[0]
+                handle = None
+                for c in (cmds.listConnections(defm, type="transform") or []):
+                    if "textureDeformerHandle" in _short(c):
+                        handle = c
+                        break
+                if handle is None and len(td) > 1:
+                    handle = td[1]
+                try:
+                    cmds.connectAttr(src + ".outMesh", defm + ".input[0].inputGeometry", f=True)
+                except Exception:
+                    cmds.warning("変形追従の接続に失敗（静的な輪郭として生成）")
+                self._tuck_handle(handle)
+                # 微小オフセットは固定（太さは facingRatio しきい値で制御）→ weightList は使わない
+                try:
+                    cmds.setAttr(defm + ".offset", FRES_ZOFFSET, lock=True)
+                except Exception:
+                    pass
+
+                # フレネルシェーダ（dx11Shader + HLSL、VP2 ハードウェア）を割り当て
+                _build_fresnel_network(dup, dshape, self._color)
+
+                if not cmds.attributeQuery(TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
+                if not cmds.attributeQuery(FRES_TAG, node=dup, exists=True):
+                    cmds.addAttr(dup, ln=FRES_TAG, at="bool", dv=True)
+
+                dup = cmds.parent(dup, grp)[0]
+                ctrl = _ensure_line_anim(dup, thick)   # 太さ→しきい値、追従。曲率ジョブは張らない
+                for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
+                               (CTRL_CAP, DEFAULT_CAP), (CTRL_CMIN, DEFAULT_CMIN),
+                               (CTRL_TAPER, 0.0)):
+                    if cmds.attributeQuery(at, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + at, dv)
+                        except Exception:
+                            pass
+                self._apply_line_selectable(dup, self._lock_select())
+                made.append(dup)
+            cmds.select(clear=True)
+            self._stash_loose_handles()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+        if made:
+            cmds.warning("フレネル輪郭はハードウェアシェーダです。ビューポートの "
+                         "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
+
     def create_screen_outline(self, *args):
         """選択メッシュにスクリーン輪郭（dx11 頂点シェーダでクリップ空間に一定px押し出し）を生成。
         ワールド押し出しの隙間/浮きが出ず、凸部でも均一太さ。重なり/シルエットのみ・カメラ依存。"""
