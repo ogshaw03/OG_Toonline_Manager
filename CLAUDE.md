@@ -319,8 +319,14 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
     facing を自前計算するのが VP2/Hardware 2.0 バッチで効く唯一の方法。**DirectX11 VP2 前提**（OpenGL は要 GLSL 版）。
   ※ **dx11Shader はビューポートの「テクスチャ表示 ON（ホットキー 6）」でないと表示されない**（生成時に警告で案内）。
     カメラ位置/行列インデックス（ViewInverse[3]）は行/列メジャーで不安定なので使わず、ビュー空間法線 z で算出。
-- **太さ=dx11Shader の `threshold` uniform**（`FRES_THRESH`）。`_thick_target` が FRES のとき `shd.threshold` を返し、
-  `_ensure_thickness_chain` が `mB.output × FRES_SCALE`(0.3) を流す。line→dx11Shader は `FRES_LINK` message で特定。
+- **太さ=dx11Shader の `threshold` uniform**（`FRES_THRESH`＝facing しきい値＝実質「角度」。大きいほど寝た面を
+  広く拾う）。`_thick_target` が FRES のとき `shd.threshold` を返し、`_ensure_thickness_chain` が
+  `mB.output × FRES_SCALE`(0.3) を流す。line→dx11Shader は `FRES_LINK` message で特定。
+- **帯の画面px幅の上限（ムラ対策）** `maxWidthPx`(`FRES_MAXW`): facing は面の曲がり方で変化速度が違うため帯の
+  画面幅が不均一（ムラ）になる。PS で **シルエットからの画面px距離 `sd=facing/fwidth(facing)`** を出し、
+  `a=aBand×aCap`（`aCap=1-smoothstep(maxWidthPx±1, sd)`）で **`maxWidthPx` を超えて広がらないよう頭打ち**。
+  `_ensure_thickness_chain` の FRES 分岐が **`mB.output × SCRN_SCALE`(=`<ctrl>_fresMaxW`) を `maxWidthPx` へ接続**＝
+  同じ太さのスクリーン輪郭の px 幅と同換算 → **フレネルがスクリーン輪郭より太くならない**。HLSL 既定は 1000(無制限)。
 - **scriptJob 不要**（曲率の頂点ウェイトは使わない＝`_ensure_line_anim` で curv ジョブをスキップ）。
   カメラ依存。元へ `outMesh`+`parent/scaleConstraint` で追従、z-fight 回避に `textureDeformer` 微小オフセット(lock)。
 - 色は dx11Shader の `lineColor` uniform（`FRES_COLOR`）を直接変更。SG 差し替えはしない（線が消えるため）。

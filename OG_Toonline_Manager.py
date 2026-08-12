@@ -81,6 +81,7 @@ FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(th
                                      # 「太さ」スライダーが実質フレネルの角度調整（大きいほど寝た面を広く拾う）
 FRES_ZOFFSET = 0.001                 # 極小の法線オフセット（手前に出して見えるように・二重線最小）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
+FRES_MAXW   = "maxWidthPx"           # フレネル帯の画面上ピクセル幅の上限 uniform 名（太さ×SCRN_SCALE で駆動）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名（フレネル/スクリーン共通）
 SCRN_TAG    = "isToonScreenLine"     # スクリーン空間押し出し輪郭（隙間なし・均一太さ）の識別タグ
 SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uniform 名（太さ駆動先）
@@ -158,6 +159,13 @@ float threshold <
     float UIStep = 0.001;
 > = 0.15;
 
+float maxWidthPx <
+    string UIName = "Max Width (px)";
+    float UIMin = 0.0;
+    float UIMax = 64.0;
+    float UIStep = 0.1;
+> = 1000.0;   // 既定は実質無制限（未接続時はキャップしない）。太さチェーンから px 上限が接続される。
+
 float3 lineColor <
     string UIName = "Line Color";
     string UIWidget = "Color";
@@ -180,7 +188,13 @@ float4 PShader(V2P IN) : SV_Target
     float facing = abs(N.z);                              // 1=正面, 0=シルエット
     // facing < threshold の帯を「くっきり」不透明に（トゥーン線）。縁だけ fwidth で1px AA。
     float w = max(fwidth(facing), 1e-5f);
-    float a = 1.0f - smoothstep(threshold - w, threshold + w, facing);
+    float aBand = 1.0f - smoothstep(threshold - w, threshold + w, facing);
+    // ムラ対策: facing は面の曲がり方で変化速度が違うため帯の画面幅が不均一になる。
+    // シルエット(facing=0)からの画面上ピクセル距離 sd で上限を設け、帯がこの px を超えて
+    // 広がらないようにする（=スクリーン輪郭の太さ以上に太くならない）。
+    float sd = facing / w;                                // ≒ シルエットからのピクセル距離
+    float aCap = 1.0f - smoothstep(maxWidthPx - 1.0f, maxWidthPx + 1.0f, sd);
+    float a = aBand * aCap;
     if (a <= 0.002f) discard;
     return float4(lineColor, a);
 }
@@ -941,6 +955,19 @@ def _ensure_thickness_chain(line):
         except Exception:
             pass
         _connect(mS + ".output", target)
+        # 帯の画面px幅の上限 = UI太さ×SCRN_SCALE（スクリーン輪郭と同じ px 換算）。
+        # → 同じ太さのスクリーン輪郭より太くならず、ムラで広がっても頭打ちになる。
+        shd_fres = target.rsplit(".", 1)[0]
+        if cmds.attributeQuery(FRES_MAXW, node=shd_fres, exists=True):
+            mW = base + "_fresMaxW"
+            if not cmds.objExists(mW):
+                mW = cmds.createNode("multDoubleLinear", name=mW)
+            _connect(mB + ".output", mW + ".input1")
+            try:
+                cmds.setAttr(mW + ".input2", SCRN_SCALE)
+            except Exception:
+                pass
+            _connect(mW + ".output", shd_fres + "." + FRES_MAXW)
     elif cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
         # スクリーン輪郭は UI 太さ×SCRN_SCALE をピクセル太さ(thickness uniform)へ。
         mS = base + "_scrnScale"
