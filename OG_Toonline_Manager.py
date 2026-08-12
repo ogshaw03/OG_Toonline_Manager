@@ -103,6 +103,19 @@ COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
 COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
 WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起動の防止に使用）
 
+# ---- バージョン & GitHub ホットアップデート設定 ----
+# install.py が __version__ を before/after ダイアログとバージョン表示に使う。
+# 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
+__version__ = "0.1.0"
+
+# 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
+_GITHUB_OWNER  = "ogshaw03"
+_GITHUB_REPO   = "OG_Toonline_Manager"
+_GITHUB_BRANCH = "claude/repository-handoff-review-k54kwk"
+_PACKAGE       = "OG_Toonline_Manager"   # このファイル自身のモジュール名（install.py の _MODULE と一致）
+_GITHUB_API      = "https://api.github.com/repos/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
+_GITHUB_RAW_BASE = "https://raw.githubusercontent.com/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
+
 _CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
 _CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
 _TAPER_CACHE = {}  # line名 -> 各頂点の長手方向パラメータ t(0..1)（エッジライン用）
@@ -1615,7 +1628,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if parent is None:
             parent = _maya_main()
         super(ToonOutlineUI, self).__init__(parent)
-        self.setWindowTitle("OG_Toonline_Manager")
+        self.setWindowTitle("OG_Toonline_Manager  —  v{0}".format(__version__))
         self.setObjectName(WINDOW_OBJ)
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
@@ -1916,6 +1929,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
+
+        # ---- フッター: バージョン表示 + GitHub から更新（ホットアップデート）----
+        frow = QtWidgets.QHBoxLayout()
+        self.lbl_version = QtWidgets.QLabel("OG_Toonline_Manager  v{0}".format(__version__))
+        self.lbl_version.setStyleSheet("color:#888;")
+        frow.addWidget(self.lbl_version, 1)
+        self.btn_update = QtWidgets.QPushButton("GitHub から更新")
+        self.btn_update.setToolTip(
+            "GitHub の最新版を取得してこのツールを更新します（Maya 再起動不要）。\n"
+            "取得元ブランチ: {0}\n"
+            "※ ネットワーク接続と Maya 2022+（Python3）が必要。".format(_GITHUB_BRANCH))
+        self.btn_update.clicked.connect(update_from_github)
+        frow.addWidget(self.btn_update)
+        lay.addLayout(frow)
 
     # ========== シーン走査ヘルパ ==========
     def _ensure_line_holder(self):
@@ -3661,6 +3688,137 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
 
 _toon_win = None
+
+
+# --------------------------------------------------------------------------- #
+# GitHub ホットアップデート（maya-hot-update-patterns.md §1-7/§1-8/§1-9 準拠）
+#   ・SHA-pinned URL で CDN キャッシュ回避（§1-7）
+#   ・ドラッグ&ドロップに依存せず UI ボタンから更新（§1-8）
+#   ・evalDeferred 3 段でウィンドウ破棄→install→再オープン（§1-9）
+#   ※ 取得は Python3 の urllib.request 前提（Maya 2022+）。f-string は使わず
+#     本体を Py2 でも import 可能なまま保つ。
+# --------------------------------------------------------------------------- #
+
+def _resolve_latest_sha():
+    """raw.githubusercontent.com はパスのみを cache key にするため、確実な
+    cache-buster は SHA-pinned URL のみ。API で対象ブランチの先頭 commit を取得。"""
+    import json
+    import random
+    import time
+    import urllib.request
+    salt = "{0:.6f}_{1}".format(time.time(), random.randint(0, 2 ** 32))
+    req = urllib.request.Request(
+        "{0}/branches/{1}?_={2}".format(_GITHUB_API, _GITHUB_BRANCH, salt),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Cache-Control": "no-cache",
+            "User-Agent": "{0}-updater/{1}".format(_PACKAGE, salt),
+        },
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+        return json.loads(resp.read().decode("utf-8"))["commit"]["sha"]
+    except Exception as exc:
+        print("[{0}] SHA lookup failed ({1}); falling back to {2}".format(
+            _PACKAGE, exc, _GITHUB_BRANCH))
+        return _GITHUB_BRANCH
+
+
+def update_from_github(*_args):
+    """UI ボタンのコールバック。即 return し、実処理は次の Maya idle で走らせる
+    （このコールバックをホストするウィンドウを、コールバック実行中に壊さないため）。"""
+    cmds.evalDeferred(_run_update, lowestPriority=True)
+
+
+def _close_tool_windows():
+    """モジュールグローバル参照＋同名 objectName のツールウィンドウを全て閉じる（PySide）。"""
+    try:
+        global _toon_win
+        _toon_win.close(); _toon_win.deleteLater()
+    except Exception:
+        pass
+    try:
+        for w in QtWidgets.QApplication.topLevelWidgets():
+            try:
+                if w.objectName() == WINDOW_OBJ:
+                    w.close(); w.deleteLater()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _run_update():
+    """SHA-pinned で install.py を取得 → 自ウィンドウを閉じて exec → 再オープンを defer。"""
+    import sys
+    import traceback
+    import urllib.request
+    sha = _resolve_latest_sha()
+    url = "{0}/{1}/install.py".format(_GITHUB_RAW_BASE, sha)
+    print("[{0}] update: fetching {1}".format(_PACKAGE, url))
+    try:
+        req = urllib.request.Request(url, headers={
+            "Cache-Control": "no-cache",
+            "User-Agent": "{0}-updater/{1}".format(_PACKAGE, sha[:10]),
+        })
+        source = urllib.request.urlopen(req, timeout=30).read()
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            cmds.confirmDialog(title="Update failed",
+                               message="install.py の取得に失敗しました:\n{0}".format(exc),
+                               button=["OK"])
+        except Exception:
+            pass
+        return
+
+    _close_tool_windows()
+
+    ns = {"__name__": "install", "__file__": "<github>"}
+    try:
+        exec(compile(source, "install.py (from GitHub)", "exec"), ns)
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            cmds.confirmDialog(
+                title="Update failed",
+                message=("install.py 実行でエラー:\n{0}: {1}\n\n"
+                         "詳細は Script Editor を確認してください。").format(
+                             type(exc).__name__, exc),
+                button=["OK"])
+        except Exception:
+            pass
+        return
+
+    # 自分自身を sys.modules から落とし、次の import でディスクの最新を読ませる（§1-6）
+    for m in [k for k in list(sys.modules) if k == _PACKAGE]:
+        sys.modules.pop(m, None)
+
+    # install() の confirmDialog が閉じ切ってから再オープン（§1-9）
+    cmds.evalDeferred(_reopen_after_update, lowestPriority=True)
+
+
+def _reopen_after_update():
+    """更新後、ディスクの最新モジュールを fresh import して show()。"""
+    import importlib
+    import sys
+    import traceback
+    try:
+        if _PACKAGE in sys.modules:
+            importlib.reload(sys.modules[_PACKAGE])
+        mod = importlib.import_module(_PACKAGE)
+        mod.show()
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            cmds.confirmDialog(
+                title="Reopen failed",
+                message=("更新は完了しましたが、ウィンドウの再オープンに失敗しました:\n"
+                         "{0}: {1}\n\nシェルフボタンから開き直してください。").format(
+                             type(exc).__name__, exc),
+                button=["OK"])
+        except Exception:
+            pass
 
 
 def show():
