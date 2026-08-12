@@ -1812,32 +1812,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ VP2/DirectX11 前提・カメラ依存。ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示。")
         self.btn_screen.clicked.connect(self.create_screen_outline)
         crow.addWidget(self.btn_screen)
-        self.btn_fresnel = QtWidgets.QPushButton("フレネル輪郭")
-        self.btn_fresnel.setToolTip(
-            "選択メッシュにフレネル輪郭を生成（カメラから見て寝た縁＝シルエット/凹み/溝に線）。\n"
-            "背面法ハルが苦手な内側の折れ目・溝（重なり部）にも線が出やすい。\n"
-            "太さ=facing しきい値、色は共通。曲率/プロファイルは無効。\n"
-            "※ VP2/DirectX11 前提・カメラ依存。ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示。")
-        self.btn_fresnel.clicked.connect(self.create_fresnel_outline)
-        crow.addWidget(self.btn_fresnel)
         self.btn_edge = QtWidgets.QPushButton("選択エッジにライン")
         self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
         self.btn_edge.clicked.connect(self.create_edge_line)
         crow.addWidget(self.btn_edge)
-        self.btn_crease = QtWidgets.QPushButton("クリース/境界にライン")
-        self.btn_crease.setToolTip("選択メッシュの折れ目(二面角>{:.0f}°)＋開境界エッジを自動検出して"
-                                   "チューブラインを生成（カメラ非依存・全レンダラー/バッチ対応）。\n"
-                                   "※ 滑らかな閉曲面は折れ目が無いため線は出ません。"
-                                   "シルエット/重なりはカメラ依存のため対象外。".format(CREASE_ANGLE))
-        self.btn_crease.clicked.connect(self.create_crease_lines)
-        crow.addWidget(self.btn_crease)
-        self.btn_gap = QtWidgets.QPushButton("隙間埋め")
-        self.btn_gap.setToolTip("選択ハルラインに『隙間埋めオブジェクト』を追加/削除（トグル）。"
-                                "元メッシュ複製(線色・背面法)で、カメラに対して寝た面=シルエットの頂点だけ"
-                                "ベースのライン位置まで押し出し、正面の面は表面に張り付かせて輪郭の浮き隙間を塞ぐ。"
-                                "カメラ依存・レイ不要で軽い。")
-        self.btn_gap.clicked.connect(self.toggle_gapfill)
-        crow.addWidget(self.btn_gap)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -1845,6 +1823,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_ref.clicked.connect(self.refresh_tree)
         crow.addWidget(b_ref)
         lay.addLayout(crow)
+
+        # スクリーン輪郭のオプション: 内側の折れ目/溝（重なり部）用にフレネル輪郭も一緒に生成
+        self.chk_scrn_fresnel = QtWidgets.QCheckBox("スクリーン輪郭に溝ライン（フレネル）も生成")
+        self.chk_scrn_fresnel.setChecked(False)
+        self.chk_scrn_fresnel.setToolTip(
+            "ON にすると「スクリーン輪郭」生成時に、同じメッシュへフレネル輪郭も一緒に作ります。\n"
+            "スクリーン輪郭＝外周、フレネル＝カメラから見て寝た内側の折れ目/溝（重なり部）に線。\n"
+            "※ フレネルも VP2/DirectX11・テクスチャ表示 ON（6）で表示。")
+        lay.addWidget(self.chk_scrn_fresnel)
 
         # 対象グループ（生成先）
         crow2 = QtWidgets.QHBoxLayout()
@@ -1987,35 +1974,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ scriptJob/頂点レイのため重く、ビューポート専用（バッチレンダー不可）。高密度メッシュ注意。")
         self.chk_occlude.toggled.connect(self._on_toggle_occlude)
         lay.addWidget(self.chk_occlude)
-
-        # 隙間埋めパラメータ調整（検証用・最終的に廃止予定）
-        self.grp_gapparams = QtWidgets.QGroupBox("隙間埋め 調整（検証用・後で廃止）")
-        gpl = QtWidgets.QFormLayout(self.grp_gapparams)
-        self.spn_face = QtWidgets.QDoubleSpinBox()
-        self.spn_face.setRange(0.05, 1.0); self.spn_face.setSingleStep(0.05)
-        self.spn_face.setDecimals(2); self.spn_face.setValue(FACING_THRESH)
-        self.spn_face.setToolTip("シルエット帯の広さ（facing しきい値）。大きいほど押し出す帯が広い")
-        self.spn_face.valueChanged.connect(self._on_gap_param_changed)
-        gpl.addRow("帯の広さ (FACING_THRESH)", self.spn_face)
-        self.spn_tuck = QtWidgets.QDoubleSpinBox()
-        self.spn_tuck.setRange(-3.0, 0.0); self.spn_tuck.setSingleStep(0.1)
-        self.spn_tuck.setDecimals(2); self.spn_tuck.setValue(GAPFILL_TUCK)
-        self.spn_tuck.setToolTip("シルエット以外を表面の裏へ潜らせる深さ（負）。浅いと面乗り、深いと安全")
-        self.spn_tuck.valueChanged.connect(self._on_gap_param_changed)
-        gpl.addRow("裏潜り深さ (GAPFILL_TUCK)", self.spn_tuck)
-        self.spn_smooth = QtWidgets.QSpinBox()
-        self.spn_smooth.setRange(0, 8); self.spn_smooth.setValue(GAPFILL_SMOOTH_ITERS)
-        self.spn_smooth.setToolTip("ウェイトの近傍スムージング回数（境界のジャギ軽減）")
-        self.spn_smooth.valueChanged.connect(self._on_gap_param_changed)
-        gpl.addRow("スムージング回数", self.spn_smooth)
-        self.spn_crease = QtWidgets.QDoubleSpinBox()
-        self.spn_crease.setRange(1.0, 179.0); self.spn_crease.setSingleStep(5.0)
-        self.spn_crease.setDecimals(0); self.spn_crease.setValue(CREASE_ANGLE)
-        self.spn_crease.setToolTip("クリース判定の二面角しきい値（度）。大きいほど鋭い折れ目だけに線。"
-                                   "変更後に「クリース/境界にライン」を押すと反映")
-        self.spn_crease.valueChanged.connect(self._on_crease_angle_changed)
-        gpl.addRow("クリース角(°)", self.spn_crease)
-        lay.addWidget(self.grp_gapparams)
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
@@ -2331,40 +2289,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if self._occ_timer is not None:
                 self._occ_timer.stop()
             self._remove_cam_callbacks()
-
-    def _on_gap_param_changed(self, *args):
-        """検証用: 隙間埋めパラメータ（帯の広さ/裏潜り深さ/スムージング）を反映して再計算。
-        ※ これらはモジュール定数を直接書き換える（最終的にこの調整UIは廃止予定）。"""
-        global FACING_THRESH, GAPFILL_TUCK, GAPFILL_SMOOTH_ITERS
-        try:
-            FACING_THRESH = float(self.spn_face.value())
-            GAPFILL_TUCK = float(self.spn_tuck.value())
-            GAPFILL_SMOOTH_ITERS = int(self.spn_smooth.value())
-        except Exception:
-            return
-        gaps = _all_gapfills()
-        if not gaps:
-            return
-        try:
-            cmds.undoInfo(swf=False)
-        except Exception:
-            pass
-        try:
-            for b in gaps:
-                _update_gapfill_weights(b)
-        finally:
-            try:
-                cmds.undoInfo(swf=True)
-            except Exception:
-                pass
-
-    def _on_crease_angle_changed(self, *args):
-        """検証用: クリース判定の二面角しきい値を更新（次回「クリース/境界にライン」で反映）。"""
-        global CREASE_ANGLE
-        try:
-            CREASE_ANGLE = float(self.spn_crease.value())
-        except Exception:
-            pass
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
@@ -3520,6 +3444,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if made:
             cmds.warning("スクリーン輪郭はハードウェアシェーダです。ビューポートの "
                          "「テクスチャ表示 ON（ホットキー 6）」で表示されます。")
+        # オプション: 内側の折れ目/溝用にフレネル輪郭も一緒に生成
+        if made and getattr(self, "chk_scrn_fresnel", None) is not None \
+                and self.chk_scrn_fresnel.isChecked() and sel:
+            try:
+                cmds.select(sel, r=True)
+            except Exception:
+                pass
+            self.create_fresnel_outline()
 
     def create_crease_lines(self, *args):
         """選択メッシュのクリース（折れ目）＋ボーダー（開境界）エッジを自動検出し、
