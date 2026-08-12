@@ -297,16 +297,22 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
 
 ジオメトリ式ハル（textureDeformer のワールド法線オフセット）は、押し出しで元メッシュとライン
 メッシュの間に**3D の隙間**ができ、グラジング角でその隙間が見えて輪郭が浮く/交差する。これを
-解決するのが `create_screen_outline`（ボタン「スクリーン輪郭」、`SCRN_TAG`）:
+解決するのが `create_screen_outline`（ボタン「スクリーン輪郭」、`SCRN_TAG`）。**ビューポート/リアルタイム
+用途では、ワールド押し出しハルの『浮き隙間』もチューブラインの『継ぎ目隙間』も出さない本命方式**（元メッシュ
+自身の連続シェルを画面上で広げるだけなので、両方の隙間が原理的に出ない）:
 - dx11Shader の**頂点シェーダでクリップ空間（画面上）へ一定ピクセル押し出す**（`_SCRN_FX_HLSL`）。
   `clip = pos×WVP`、ビュー空間法線 xy 方向へ `clip.xy += normalize(sn) * thickness * (2/viewport) * clip.w`。
   押し出しが**元シルエットと同じ深度のまま画面上で広がる**ので隙間が出ず、`clip.w` 補正で**均一ピクセル太さ**。
-- `RasterizerState CullMode=Front`（背面のみ）で外周リング＝輪郭。元は別オブジェクトの深度で内側を覆う。
+- カリングは使わず、頂点シェーダで **深度を僅かに奥へ押し込む**（`gZBias`×clip.w）。膨らんだシェルが少し
+  奥に沈むので、**別オブジェクトの元メッシュがシェルの内側を覆い、外周リングだけが残る**＝輪郭。
 - 太さ＝dx11Shader の `thickness`(px) uniform。`_thick_target` が SCRN のとき返し、`_ensure_thickness_chain`
   が `mB.output × SCRN_SCALE`(6.0) を流す。色は `lineColor`（フレネルと共通の dx11 線色処理）。
 - 元へ `outMesh`(offset=0 lock)+`parent/scaleConstraint` で追従。曲率/プロファイルは無効・scriptJob 不要。
 - **VP2(DirectX11)・テクスチャ表示 ON(6) 前提**、カメラ依存、Hardware 2.0 バッチ対応。
 - 別案として **スクリーンスペース深度エッジ検出**（`OG_Edge_Outline.py` / `MRenderOverride`）も試験的に用意。
+- ※ 一度 UI を廃止したが、ビューポート用途では隙間問題の唯一の幾何解のため**復活**（`create_screen_outline`
+  ＋ボタン「スクリーン輪郭」）。弱点は「手前の別オブジェクトにリングが隠れる」＝正しい遮蔽挙動で、`gZBias`
+  の押し込み量で詰める。
 
 ### 互換性の注意
 
