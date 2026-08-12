@@ -160,11 +160,11 @@ float threshold <
 > = 0.15;
 
 float maxWidthPx <
-    string UIName = "Max Width (px)";
+    string UIName = "Width (px)";
     float UIMin = 0.0;
     float UIMax = 64.0;
     float UIStep = 0.1;
-> = 1000.0;   // 既定は実質無制限（未接続時はキャップしない）。太さチェーンから px 上限が接続される。
+> = 3.0;   // 輪郭線の画面px幅。太さチェーン(UI太さ×SCRN_SCALE)から接続される。既定は約3px。
 
 float3 lineColor <
     string UIName = "Line Color";
@@ -185,16 +185,14 @@ V2P VShader(APPDATA IN)
 float4 PShader(V2P IN) : SV_Target
 {
     float3 N = normalize(IN.VN);
-    float facing = abs(N.z);                              // 1=正面, 0=シルエット
-    // facing < threshold の帯を「くっきり」不透明に（トゥーン線）。縁だけ fwidth で1px AA。
-    float w = max(fwidth(facing), 1e-5f);
-    float aBand = 1.0f - smoothstep(threshold - w, threshold + w, facing);
-    // ムラ対策: facing は面の曲がり方で変化速度が違うため帯の画面幅が不均一になる。
-    // シルエット(facing=0)からの画面上ピクセル距離 sd で上限を設け、帯がこの px を超えて
-    // 広がらないようにする（=スクリーン輪郭の太さ以上に太くならない）。
-    float sd = facing / w;                                // ≒ シルエットからのピクセル距離
-    float aCap = 1.0f - smoothstep(maxWidthPx - 1.0f, maxWidthPx + 1.0f, sd);
-    float a = aBand * aCap;
+    float facing = abs(N.z);                              // 1=正面, 0=シルエット/輪郭
+    // 一定「画面ピクセル幅」の輪郭線。facing の帯(threshold 幅)は面の曲がり方で画面幅が
+    // 変わり“ムラ”になるので使わない。代わりに シルエット(facing=0)からの画面px距離
+    // sd = facing / fwidth(facing) を出し、sd < maxWidthPx の一定幅だけ線にする。
+    // 平らな面は fwidth≈0 → sd 巨大 → 線が出ない（ムラ源のワイドな帯そのものが消える）。
+    float w = max(fwidth(facing), 1e-6f);
+    float sd = facing / w;                                // ≒ シルエット/輪郭からのピクセル距離
+    float a = 1.0f - smoothstep(maxWidthPx - 1.0f, maxWidthPx + 1.0f, sd);
     if (a <= 0.002f) discard;
     return float4(lineColor, a);
 }
