@@ -9,17 +9,17 @@
 - **`main` への直接プッシュは、ユーザーから明示的な指示があった場合のみ** 行う。
   指示がなければ main には触れない。
 
-## 配布・ホットアップデート（`install.py`）
+## 配布・ホットアップデート（`OG_Toonline_Manager_install.py`）
 
-`maya-hot-update-patterns.md` 準拠の「install.py ドラッグ&ドロップ＋UIボタンで
+`maya-hot-update-patterns.md` 準拠の「OG_Toonline_Manager_install.py ドラッグ&ドロップ＋UIボタンで
 GitHub 最新版へ更新（Maya 再起動不要）」運用。**単一ファイルツール**構成。
 
-- **配布物**: `install.py` の raw URL のみ。ユーザーはブラウザ保存 → Maya ビューポートに
+- **配布物**: `OG_Toonline_Manager_install.py` の raw URL のみ。ユーザーはブラウザ保存 → Maya ビューポートに
   ドラッグ。以降は UI フッター「GitHub から更新」または シェルフボタン右クリック → Update。
 - **取得元ブランチ**: 現在は開発ブランチ `claude/repository-handoff-review-k54kwk`
-  （`install.py` の `_GITHUB_BRANCH` と `OG_Toonline_Manager.py` の `_GITHUB_BRANCH` の
+  （`OG_Toonline_Manager_install.py` の `_GITHUB_BRANCH` と `OG_Toonline_Manager.py` の `_GITHUB_BRANCH` の
   **2箇所を必ず一致**させる）。安定運用に移すときは両方を `main` に変え、main へマージする。
-- **install.py**（`_MODULE="OG_Toonline_Manager"` / `_SHELF_BUTTON_LABEL="OGToon"`）:
+- **OG_Toonline_Manager_install.py**（`_MODULE="OG_Toonline_Manager"` / `_SHELF_BUTTON_LABEL="OGToon"`）:
   SHA-pinned raw URL で取得（§1-7 CDN キャッシュ回避）・atomic write（§1-4）・
   `__pycache__` 掃除（§1-5）・`sys.modules` flush（§1-6）・シェルフボタン（左=起動/右=Update, §1-8）。
   ローカル反復は環境変数 `OG_TOONLINE_MANAGER_USE_LOCAL=1`。**Py3(Maya2022+)前提**（f-string使用）。
@@ -28,12 +28,12 @@ GitHub 最新版へ更新（Maya 再起動不要）」運用。**単一ファイ
     （`_source_bytes`/`_fetch_icon`/`_add_shelf_button(icon_path)`）。取得失敗時は `pythonFamily.png`
     ＋オーバーレイラベルにフォールバック（非致命）。アイコンを差し替えるなら repo ルートの
     同名 PNG を置き換えるだけ。モジュール本体とアイコンの**2ファイル**を取得する（§1-10 の対象が増えた点に注意）。
-- **本体側の更新フロー**（`OG_Toonline_Manager.py`）: `__version__`（install.py が正規表現で読む・
+- **本体側の更新フロー**（`OG_Toonline_Manager.py`）: `__version__`（インストーラが正規表現で読む・
   上げてから push すると previous→current が変わる）、`update_from_github`/`_run_update`/
   `_reopen_after_update`（evalDeferred 3段, §1-9）、フッターの「GitHub から更新」ボタン。
   **本体は Py2 でも import 可能なまま保つため f-string 禁止（`.format()` を使う）**。urllib.request は
   関数内 import なので Py2 では更新ボタン実行時のみ失敗（import 自体は通る）。
-- **重要（§1-10）**: 将来 `.py` を複数ファイルに分割したら、`install.py` を単一DLから
+- **重要（§1-10）**: 将来 `.py` を複数ファイルに分割したら、インストーラを単一DLから
   ファイル一覧DL（`_REMOTE_FILES` タプル）に拡張し、**新規 .py は必ず同じ commit で追記**する。
   現状は単一ファイルなので `_REMOTE_FILES` は無い。
 - **§8 拡張（バージョンロールバック/新版通知/Changelog 等）はユーザーが明示的に希望しない限り

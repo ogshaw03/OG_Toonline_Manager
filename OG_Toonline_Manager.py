@@ -112,7 +112,8 @@ __version__ = "0.1.0"
 _GITHUB_OWNER  = "ogshaw03"
 _GITHUB_REPO   = "OG_Toonline_Manager"
 _GITHUB_BRANCH = "claude/repository-handoff-review-k54kwk"
-_PACKAGE       = "OG_Toonline_Manager"   # このファイル自身のモジュール名（install.py の _MODULE と一致）
+_PACKAGE       = "OG_Toonline_Manager"   # このファイル自身のモジュール名（installer の _MODULE と一致）
+_INSTALLER_FILE = "OG_Toonline_Manager_install.py"   # 更新時に再取得するインストーラのファイル名
 _GITHUB_API      = "https://api.github.com/repos/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
 _GITHUB_RAW_BASE = "https://raw.githubusercontent.com/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
 
@@ -3749,12 +3750,12 @@ def _close_tool_windows():
 
 
 def _run_update():
-    """SHA-pinned で install.py を取得 → 自ウィンドウを閉じて exec → 再オープンを defer。"""
+    """SHA-pinned でインストーラを取得 → 自ウィンドウを閉じて exec → 再オープンを defer。"""
     import sys
     import traceback
     import urllib.request
     sha = _resolve_latest_sha()
-    url = "{0}/{1}/install.py".format(_GITHUB_RAW_BASE, sha)
+    url = "{0}/{1}/{2}".format(_GITHUB_RAW_BASE, sha, _INSTALLER_FILE)
     print("[{0}] update: fetching {1}".format(_PACKAGE, url))
     try:
         req = urllib.request.Request(url, headers={
@@ -3766,7 +3767,7 @@ def _run_update():
         traceback.print_exc()
         try:
             cmds.confirmDialog(title="Update failed",
-                               message="install.py の取得に失敗しました:\n{0}".format(exc),
+                               message="{0} の取得に失敗しました:\n{1}".format(_INSTALLER_FILE, exc),
                                button=["OK"])
         except Exception:
             pass
@@ -3776,15 +3777,15 @@ def _run_update():
 
     ns = {"__name__": "install", "__file__": "<github>"}
     try:
-        exec(compile(source, "install.py (from GitHub)", "exec"), ns)
+        exec(compile(source, _INSTALLER_FILE + " (from GitHub)", "exec"), ns)
     except Exception as exc:
         traceback.print_exc()
         try:
             cmds.confirmDialog(
                 title="Update failed",
-                message=("install.py 実行でエラー:\n{0}: {1}\n\n"
+                message=("{0} 実行でエラー:\n{1}: {2}\n\n"
                          "詳細は Script Editor を確認してください。").format(
-                             type(exc).__name__, exc),
+                             _INSTALLER_FILE, type(exc).__name__, exc),
                 button=["OK"])
         except Exception:
             pass

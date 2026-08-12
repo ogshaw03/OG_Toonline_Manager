@@ -10,9 +10,9 @@ Autodesk Maya（PySide6 / PySide2 両対応 ／ 2025 含む）
 
 ## インストール（かんたん・推奨）
 
-`install.py` を Maya のビューポートに**ドラッグ&ドロップ**するだけ。
+`OG_Toonline_Manager_install.py` を Maya のビューポートに**ドラッグ&ドロップ**するだけ。
 
-1. `install.py` をダウンロード（GitHub の raw URL をブラウザ保存）
+1. `OG_Toonline_Manager_install.py` をダウンロード（GitHub の raw URL をブラウザ保存）
 2. Maya のビューポートにドラッグ → セットアップ完了ダイアログ
 3. シェルフに **`OGToon`** ボタンが追加される（**左クリックで起動**）
 
