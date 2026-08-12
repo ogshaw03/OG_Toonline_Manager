@@ -83,6 +83,7 @@ FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名（フ
 SCRN_TAG    = "isToonScreenLine"     # スクリーン空間押し出し輪郭（隙間なし・均一太さ）の識別タグ
 SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uniform 名（太さ駆動先）
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
+SCRN_CSET   = "toonScrnCurv"         # スクリーン輪郭の曲率倍率を格納する頂点カラーセット名
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -273,7 +274,7 @@ float3 lineColor <
 
 static const float gZBias = 0.0015f;   // 元メッシュに内側を隠させる深度押し込み量
 
-struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
+struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; float4 Color : COLOR0; };
 struct V2P { float4 HPos : SV_Position; };
 
 V2P VShader(APPDATA IN)
@@ -284,9 +285,13 @@ V2P VShader(APPDATA IN)
     float2 sn = vn.xy;
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
+    // 頂点カラー R = 曲率による太さ倍率（1.0=一定・曲がった所ほど大）。
+    // カラー未設定/黒(0)は 1.0 扱いにして「曲率カラーが無くても線が消えない」ようにする。
+    float w = IN.Color.r;
+    if (w < 0.001f) w = 1.0f;
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
-    clip.xy += sn * thickness * px * clip.w;
+    clip.xy += sn * thickness * w * px * clip.w;
     clip.z += gZBias * clip.w;          // 奥へ押し込む → 元メッシュが内側を覆う＝外周だけ残る
     OUT.HPos = clip;
     return OUT;
@@ -772,11 +777,12 @@ def _ensure_line_anim(line, default_thick=0.05):
     # フレネルラインは hull 同様に拘束で追従させるが、曲率の頂点ウェイトは使わない。
     is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
     is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
-    is_scrn = cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
     if not is_edge:
         _ensure_follow(line)
         _ensure_smooth_link(line)
-    if not is_fres and not is_scrn:
+    # 曲率ジョブ: フレネル以外（背面法ハル/エッジ/スクリーン）で張る。スクリーンは頂点カラー、
+    # それ以外は deformer weightList へ書き込む（_update_line_weights が振り分け）。
+    if not is_fres:
         _ensure_curv_jobs(line)
     return ctrl
 
@@ -1390,20 +1396,18 @@ def _update_gapfill_weights(b):
         pass
 
 
-def _update_curv_weights(line):
-    """コントローラーの curvature / curvatureCap から頂点ウェイトを再計算。
-    scriptJob からも呼ばれる（アニメーション時の追従用）。"""
-    if not cmds.objExists(line):
-        return
-    defm = _line_deformer(line)
+def _line_weights(line):
+    """コントローラーの curvature / curvatureCap / curvatureMin / 末端細り / プロファイルから
+    頂点ウェイト（太さ倍率）のリストを計算して返す。背面法ハル(=deformer weightList)と
+    スクリーン輪郭(=頂点カラー)で共通利用。occlusion は含まない（呼び出し側で合成）。"""
     ctrl = _ctrl_of(line)
-    if not defm or not ctrl:
-        return
+    if not ctrl:
+        return []
     try:
         influence = cmds.getAttr(ctrl + "." + CTRL_CURV)
         cap = cmds.getAttr(ctrl + "." + CTRL_CAP)
     except Exception:
-        return
+        return []
     # 曲率下限: 曲率が小さい所（平らな所）の太さ倍率の基準。1.0=細くしない、<1.0で細く。
     cmin = DEFAULT_CMIN
     if cmds.attributeQuery(CTRL_CMIN, node=ctrl, exists=True):
@@ -1414,7 +1418,7 @@ def _update_curv_weights(line):
     curv = _line_curvature(line)
     n = len(curv)
     if n == 0:
-        return
+        return []
     # 平らな所=cmin、曲がっている所ほど influence で増えて cap で頭打ち
     weights = [min(cap, max(0.0, cmin + influence * abs(c))) for c in curv]
     # 長手方向の太さ強弱（末端細り＋プロファイルカーブ）。長手 t を一度だけ算出して合成。
@@ -1439,6 +1443,28 @@ def _update_curv_weights(line):
     # 末端細り/プロファイルでウェイトが 0 まで落ちるとチューブが基準半径(点)に潰れて
     # スピンドル状に尖る（場合により反転して -値に見える）。下限を入れて潰れを防ぐ。
     weights = [w if w > MIN_WEIGHT else MIN_WEIGHT for w in weights]
+    return weights
+
+
+def _update_line_weights(line):
+    """ライン種別に応じて曲率ウェイトの書き込み先を振り分ける（scriptJob のディスパッチャ）。"""
+    if cmds.objExists(line) and cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
+        _update_scrn_curv_weights(line)
+    else:
+        _update_curv_weights(line)
+
+
+def _update_curv_weights(line):
+    """背面法ハル/エッジ: 曲率ウェイトを textureDeformer の weightList に書き込む。"""
+    if not cmds.objExists(line):
+        return
+    defm = _line_deformer(line)
+    if not defm:
+        return
+    weights = _line_weights(line)
+    n = len(weights)
+    if n == 0:
+        return
     # 隠蔽検知ハル（カメラ依存）: 元メッシュに隠れた頂点の重みを内側へ寄せて裏面を隠す。
     # 可視（シルエット）頂点は係数 1.0 のままなので太さは保たれる。
     # 重なりマスクを付けたラインは単純な均一ハルとして使う（引き寄せの per-vertex ムラを
@@ -1449,6 +1475,62 @@ def _update_curv_weights(line):
             weights = [weights[i] * occ[i] for i in range(n)]
     try:
         cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
+    except Exception:
+        pass
+
+
+def _init_scrn_color_set(shape):
+    """スクリーン輪郭ラインに曲率用カラーセット(SCRN_CSET)を作り、全頂点を白(倍率1.0)で初期化。
+    dx11 頂点シェーダの COLOR0.r がこの倍率を太さに乗算する。textureDeformer より下流に
+    polyColorPerVertex を積む形になるので、変形後の頂点に対して倍率が残る。"""
+    try:
+        existing = cmds.polyColorSet(shape, q=True, allColorSets=True) or []
+        if SCRN_CSET not in existing:
+            cmds.polyColorSet(shape, create=True, colorSet=SCRN_CSET,
+                              clamped=False, representation="RGBA")
+        cmds.polyColorSet(shape, currentColorSet=True, colorSet=SCRN_CSET)
+        cmds.polyColorPerVertex(shape + ".vtx[*]", r=1.0, g=1.0, b=1.0, a=1.0)
+    except Exception:
+        cmds.warning("スクリーン輪郭の曲率用カラーセット作成に失敗（曲率は一定太さになります）")
+
+
+def _update_scrn_curv_weights(line):
+    """スクリーン輪郭: 曲率倍率を頂点カラー R(=SCRN_CSET) に書き込む（シェーダが push に乗算）。
+    ※ カラーセットが無い/頂点数不一致のときは何もしない（線は一定太さのまま=安全）。"""
+    if not cmds.objExists(line):
+        return
+    if not cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
+        return
+    shps = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True) or []
+    if not shps:
+        return
+    shape = shps[0]
+    weights = _line_weights(line)
+    n = len(weights)
+    if n == 0:
+        return
+    try:
+        sl = om2.MSelectionList(); sl.add(shape)
+        dag = sl.getDagPath(0)
+        mfn = om2.MFnMesh(dag)
+    except Exception:
+        return
+    try:
+        if SCRN_CSET not in mfn.getColorSetNames():
+            return
+        mfn.setCurrentColorSetName(SCRN_CSET)
+    except Exception:
+        pass
+    if n != mfn.numVertices:
+        return
+    cols = om2.MColorArray()
+    verts = om2.MIntArray()
+    for i in range(n):
+        w = weights[i]
+        cols.append(om2.MColor((w, w, w, 1.0)))
+        verts.append(i)
+    try:
+        mfn.setVertexColors(cols, verts)
     except Exception:
         pass
 
@@ -1478,7 +1560,7 @@ def _ensure_curv_jobs(line):
             continue
         try:
             jid = cmds.scriptJob(attributeChange=[ctrl + "." + at,
-                                                  lambda ln=line: _update_curv_weights(ln)])
+                                                  lambda ln=line: _update_line_weights(ln)])
             jobs.append(jid)
         except Exception:
             pass
@@ -3329,6 +3411,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if not cmds.attributeQuery(SCRN_TAG, node=dup, exists=True):
                     cmds.addAttr(dup, ln=SCRN_TAG, at="bool", dv=True)
 
+                # 曲率用カラーセット（頂点カラー R = 太さ倍率）を deformer より下流に用意。
+                dshape2 = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)
+                if dshape2:
+                    _init_scrn_color_set(dshape2[0])
+
                 dup = cmds.parent(dup, grp)[0]
                 ctrl = _ensure_line_anim(dup, thick)
                 for at, dv in ((CTRL_THICK, DEFAULT_THICK), (CTRL_CURV, DEFAULT_CURV),
@@ -3339,6 +3426,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                             cmds.setAttr(ctrl + "." + at, dv)
                         except Exception:
                             pass
+                _update_scrn_curv_weights(dup)   # 初期の曲率倍率を頂点カラーへ反映
                 self._apply_line_selectable(dup, self._lock_select())
                 made.append(dup)
             cmds.select(clear=True)

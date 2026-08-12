@@ -337,7 +337,15 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   奥に沈むので、**別オブジェクトの元メッシュがシェルの内側を覆い、外周リングだけが残る**＝輪郭。
 - 太さ＝dx11Shader の `thickness`(px) uniform。`_thick_target` が SCRN のとき返し、`_ensure_thickness_chain`
   が `mB.output × SCRN_SCALE`(6.0) を流す。色は `lineColor`（フレネルと共通の dx11 線色処理）。
-- 元へ `outMesh`(offset=0 lock)+`parent/scaleConstraint` で追従。曲率/プロファイルは無効・scriptJob 不要。
+- 元へ `outMesh`(offset=0 lock)+`parent/scaleConstraint` で追従。
+- **曲率起伏に対応（頂点カラー駆動）**: 頂点シェーダが **`COLOR0.r`＝太さ倍率**を push に乗算する
+  （`_SCRN_FX_HLSL`。カラー未設定/0 は 1.0 扱いで線が消えない安全策）。ラインに曲率用カラーセット
+  `SCRN_CSET`(`toonScrnCurv`, clamped=False, deformer より下流の polyColorPerVertex)を作り
+  （`_init_scrn_color_set`）、`_update_scrn_curv_weights` が hull と同じ重み計算(`_line_weights`＝
+  curvature/cap/cmin/末端細り/プロファイル)を om2 `setVertexColors` で R へ書く。`_ensure_curv_jobs` の
+  scriptJob は `_update_line_weights`(ディスパッチャ)経由で SCRN は頂点カラー、それ以外は deformer
+  weightList へ振り分け。曲率の再計算タイミングは hull と同じ（スライダー変更時。再生の毎フレームでは
+  再計算しない）。プロファイル/末端細りは長手カーブが無いため実質無効（curvature のみ効く）。
 - **VP2(DirectX11)・テクスチャ表示 ON(6) 前提**、カメラ依存、Hardware 2.0 バッチ対応。
 - 別案として **スクリーンスペース深度エッジ検出**（`OG_Edge_Outline.py` / `MRenderOverride`）も試験的に用意。
 - ※ 一度 UI を廃止したが、ビューポート用途では隙間問題の唯一の幾何解のため**復活**（`create_screen_outline`
