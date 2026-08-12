@@ -40,6 +40,7 @@ _GITHUB_BRANCH = "claude/repository-handoff-review-k54kwk"
 
 _MODULE = "OG_Toonline_Manager"          # tool's .py filename (without .py)
 _SHELF_BUTTON_LABEL = "OGToon"           # short label on the shelf button
+_ICON_FILE = "icon_OG_Toonline_Manager.png"   # shelf button icon (repo root); "" to use default
 # ─── END CUSTOMIZE ────────────────────────────────────────────────────────
 
 
@@ -109,35 +110,54 @@ def _resolve_latest_sha() -> str:
         return _GITHUB_BRANCH
 
 
-def _fetch_module(dest_root: str) -> None:
-    """Default: always pull from GitHub. Developers who want to
-    iterate on the local checkout set ``OG_TOONLINE_MANAGER_USE_LOCAL=1``."""
+def _source_bytes(rel_path: str, sha: str, use_local: bool) -> bytes:
+    """Return ``rel_path``'s bytes: from the local checkout when
+    ``use_local`` (dev flag), otherwise a SHA-pinned GitHub raw URL."""
     from urllib.request import Request, urlopen
 
-    env_flag = f"{_MODULE.upper()}_USE_LOCAL"
-    use_local = os.environ.get(env_flag) == "1"
-    src_local = os.path.join(_REPO_ROOT, _MODULE_FILE)
-    target = os.path.join(dest_root, _MODULE_FILE)
-
+    src_local = os.path.join(_REPO_ROOT, rel_path)
     if use_local and os.path.isfile(src_local):
-        print(f"[{_MODULE}] {env_flag}=1 → copying local {src_local}")
+        print(f"[{_MODULE}] local → {src_local}")
         with open(src_local, "rb") as fh:
-            data = fh.read()
-    else:
+            return fh.read()
+    if not sha:
         sha = _resolve_latest_sha()
-        url = f"{_GITHUB_RAW_BASE}/{sha}/{_MODULE_FILE}"
-        print(f"[{_MODULE}] downloading {url}")
-        req = Request(url, headers={
-            "Cache-Control": "no-cache",
-            "User-Agent": f"{_MODULE}-installer/{sha[:10]}",
-        })
-        try:
-            data = urlopen(req, timeout=30).read()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to download {url}: {exc}")
+    url = f"{_GITHUB_RAW_BASE}/{sha}/{rel_path}"
+    print(f"[{_MODULE}] downloading {url}")
+    req = Request(url, headers={
+        "Cache-Control": "no-cache",
+        "User-Agent": f"{_MODULE}-installer/{sha[:10]}",
+    })
+    try:
+        return urlopen(req, timeout=30).read()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to download {url}: {exc}")
 
+
+def _fetch_module(dest_root: str, sha: str, use_local: bool) -> None:
+    """Write the tool module. Developers who want to iterate on the local
+    checkout set ``OG_TOONLINE_MANAGER_USE_LOCAL=1``."""
+    target = os.path.join(dest_root, _MODULE_FILE)
+    data = _source_bytes(_MODULE_FILE, sha, use_local)
     _atomic_write_bytes(target, data)
     print(f"[{_MODULE}]   → {target} ({len(data)} bytes)")
+
+
+def _fetch_icon(icons_dir: str, sha: str, use_local: bool) -> str:
+    """Download the shelf-button icon into Maya's user icons folder and
+    return its absolute path. Non-fatal: returns "" on any failure so the
+    shelf button falls back to a stock image."""
+    if not _ICON_FILE:
+        return ""
+    try:
+        data = _source_bytes(_ICON_FILE, sha, use_local)
+        target = os.path.join(icons_dir, _ICON_FILE)
+        _atomic_write_bytes(target, data)
+        print(f"[{_MODULE}]   → {target} ({len(data)} bytes)")
+        return target
+    except Exception as exc:
+        print(f"[{_MODULE}] icon fetch skipped ({exc}); using stock icon")
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -222,7 +242,7 @@ _SHELF_UPDATE_CMD = (
 )
 
 
-def _add_shelf_button() -> None:
+def _add_shelf_button(icon_path: str = "") -> None:
     from maya import cmds, mel
 
     top_shelf = mel.eval("$tmp = $gShelfTopLevel")
@@ -239,12 +259,21 @@ def _add_shelf_button() -> None:
         except Exception:
             pass
 
+    # Custom icon if we managed to download it, else a stock image with an
+    # overlay label so the button is still identifiable.
+    if icon_path and os.path.isfile(icon_path):
+        image = icon_path
+        overlay = ""
+    else:
+        image = "pythonFamily.png"
+        overlay = _SHELF_BUTTON_LABEL[:5]
+
     button = cmds.shelfButton(
         parent=current,
         label=_SHELF_BUTTON_LABEL,
         annotation="Left-click: launch.  Right-click: update from GitHub.",
-        image="pythonFamily.png",
-        imageOverlayLabel=_SHELF_BUTTON_LABEL[:5],
+        image=image,
+        imageOverlayLabel=overlay,
         command=_SHELF_LAUNCH_CMD,
         sourceType="python",
     )
@@ -269,8 +298,13 @@ def install() -> str:
 
     prev_version = _read_installed_version(user_scripts)
 
+    # Resolve the target commit once, then pull the module (and icon) from it.
+    env_flag = f"{_MODULE.upper()}_USE_LOCAL"
+    use_local = os.environ.get(env_flag) == "1"
+    sha = "" if use_local else _resolve_latest_sha()
+
     _close_existing_window()
-    _fetch_module(user_scripts)
+    _fetch_module(user_scripts, sha, use_local)
     _clean_pycache(user_scripts)
     _verify_install(user_scripts)
     _flush_imports()
@@ -278,7 +312,14 @@ def install() -> str:
     if user_scripts not in sys.path:
         sys.path.insert(0, user_scripts)
 
-    _add_shelf_button()
+    # Shelf-button icon into Maya's user icons folder (non-fatal on failure).
+    try:
+        icons_dir = cmds.internalVar(userBitmapsDir=True).rstrip("/\\")
+    except Exception:
+        icons_dir = user_scripts
+    icon_path = _fetch_icon(icons_dir, sha, use_local)
+
+    _add_shelf_button(icon_path)
     new_version = _read_installed_version(user_scripts)
 
     print(f"[{_MODULE}] " + "=" * 55)

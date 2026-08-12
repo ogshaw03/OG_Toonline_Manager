@@ -23,6 +23,11 @@ GitHub 最新版へ更新（Maya 再起動不要）」運用。**単一ファイ
   SHA-pinned raw URL で取得（§1-7 CDN キャッシュ回避）・atomic write（§1-4）・
   `__pycache__` 掃除（§1-5）・`sys.modules` flush（§1-6）・シェルフボタン（左=起動/右=Update, §1-8）。
   ローカル反復は環境変数 `OG_TOONLINE_MANAGER_USE_LOCAL=1`。**Py3(Maya2022+)前提**（f-string使用）。
+  - **シェルフアイコン**: `_ICON_FILE`（`icon_OG_Toonline_Manager.png`）も同じ SHA で取得し
+    `internalVar(userBitmapsDir=True)` に置いて `shelfButton.image` に絶対パス指定
+    （`_source_bytes`/`_fetch_icon`/`_add_shelf_button(icon_path)`）。取得失敗時は `pythonFamily.png`
+    ＋オーバーレイラベルにフォールバック（非致命）。アイコンを差し替えるなら repo ルートの
+    同名 PNG を置き換えるだけ。モジュール本体とアイコンの**2ファイル**を取得する（§1-10 の対象が増えた点に注意）。
 - **本体側の更新フロー**（`OG_Toonline_Manager.py`）: `__version__`（install.py が正規表現で読む・
   上げてから push すると previous→current が変わる）、`update_from_github`/`_run_update`/
   `_reopen_after_update`（evalDeferred 3段, §1-9）、フッターの「GitHub から更新」ボタン。
