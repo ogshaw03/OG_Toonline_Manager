@@ -76,7 +76,9 @@ EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの�
 PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
-FRES_SCALE  = 0.1                    # UI 太さ → フレネルしきい値(facingRatio カット)への係数（細め＝寝た面を拾いにくい）
+FRES_SCALE  = 0.3                    # UI 太さ → フレネルしきい値(threshold=facing カット)への係数。
+                                     # 太さ0.5→threshold0.15(細い縁)、太さ2.0→0.6(θ>53°の広い帯=溝を拾う)。
+                                     # 「太さ」スライダーが実質フレネルの角度調整（大きいほど寝た面を広く拾う）
 FRES_ZOFFSET = 0.001                 # 極小の法線オフセット（手前に出して見えるように・二重線最小）
 FRES_THRESH = "threshold"            # dx11Shader 上のしきい値 uniform 名（太さ駆動先）
 FRES_COLOR  = "lineColor"            # dx11Shader 上の線色 uniform 名（フレネル/スクリーン共通）
