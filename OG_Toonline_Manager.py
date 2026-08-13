@@ -87,6 +87,8 @@ SCRN_TAG    = "isToonScreenLine"     # スクリーン空間押し出し輪郭�
 SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uniform 名（太さ駆動先）
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
 SCRN_CSET   = "toonScrnCurv"         # スクリーン輪郭の曲率倍率を格納する頂点カラーセット名
+SCRN_DEPTH_BIAS = "depthBias"        # スクリーン輪郭の重なり深度押し込み uniform 名（ビュー空間）
+_SCRN_ZBIAS = 0.02                   # その既定値（UIで調整・遠距離で重なり線が消える対策）
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -266,12 +268,46 @@ def _build_fresnel_network(line, shape, color):
     return shd, sg
 
 
+def _all_screen_lines():
+    """シーン内の全スクリーン輪郭ライン（SCRN_TAG）を返す。"""
+    out = []
+    if not cmds.objExists(ROOT):
+        return out
+    for t in cmds.listRelatives(ROOT, allDescendents=True, type="transform", f=True) or []:
+        if cmds.attributeQuery(SCRN_TAG, node=t, exists=True):
+            out.append(t)
+    return out
+
+
+def _scrn_set_depth_bias(v):
+    """全スクリーン輪郭ラインの重なり深度押し込み（ビュー空間）を設定。"""
+    global _SCRN_ZBIAS
+    try:
+        _SCRN_ZBIAS = float(v)
+    except Exception:
+        return
+    for line in _all_screen_lines():
+        shd = _fresnel_shader(line)
+        if shd and cmds.attributeQuery(SCRN_DEPTH_BIAS, node=shd, exists=True):
+            try:
+                cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, _SCRN_ZBIAS)
+            except Exception:
+                pass
+    try:
+        cmds.refresh()
+    except Exception:
+        pass
+
+
 _SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
 // 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
-// さらに深度を僅かに奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
+// さらに深度を「ビュー空間で一定量」奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
+// ※ 深度押し込みをビュー空間（カメラからの実距離）にすることで、遠ざかっても房どうしの隙間との
+//    相対関係が変わらず＝重なり線が消えない（旧: クリップ空間NDC一定だと遠距離で消えた）。
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
+float4x4 gProj : Projection;
 float2   gScreen : ViewportPixelSize;
 
 float thickness <
@@ -281,12 +317,17 @@ float thickness <
     float UIStep = 0.1;
 > = 3.0;
 
+float depthBias <
+    string UIName = "Overlap Depth Bias (view)";
+    float UIMin = -1.0;
+    float UIMax = 1.0;
+    float UIStep = 0.001;
+> = 0.02;   // 元メッシュに内側を隠させるビュー空間の押し込み量（重なり線の残り方を調整・符号反転可）
+
 float3 lineColor <
     string UIName = "Line Color";
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
-
-static const float gZBias = 0.0015f;   // 元メッシュに内側を隠させる深度押し込み量
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; float4 Color : COLOR0; };
 struct V2P { float4 HPos : SV_Position; };
@@ -294,8 +335,13 @@ struct V2P { float4 HPos : SV_Position; };
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
-    float3 vn = mul(IN.Normal, (float3x3)gWV);     // ビュー空間法線
+    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);   // ビュー空間位置
+    float3 vn   = mul(IN.Normal, (float3x3)gWV);          // ビュー空間法線
+    // ビュー空間で一定量だけ奥へ（カメラからの実距離基準＝遠距離でも重なり線が消えない）。
+    // Maya のビュー空間はカメラが -Z を向く（奥ほど z が小さい）ので z を減らして奥へ。
+    // 符号/量は UI「Overlap Depth Bias」で調整可（沈みすぎ→下げる／塗りつぶし→符号反転）。
+    vpos.z -= depthBias;
+    float4 clip = mul(vpos, gProj);
     float2 sn = vn.xy;
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
@@ -306,7 +352,6 @@ V2P VShader(APPDATA IN)
     // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
     clip.xy += sn * thickness * w * px * clip.w;
-    clip.z += gZBias * clip.w;          // 奥へ押し込む → 元メッシュが内側を覆う＝外周だけ残る
     OUT.HPos = clip;
     return OUT;
 }
@@ -368,6 +413,12 @@ def _build_screen_network(line, shape, color):
     if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
         try:
             cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
+        except Exception:
+            pass
+    # 重なり深度押し込み（ビュー空間）の既定値を現在の UI 値で反映
+    if cmds.attributeQuery(SCRN_DEPTH_BIAS, node=shd, exists=True):
+        try:
+            cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, _SCRN_ZBIAS)
         except Exception:
             pass
     cmds.sets(shape, e=True, forceElement=sg)
@@ -1864,6 +1915,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ フレネルも VP2/DirectX11・テクスチャ表示 ON（6）で表示。")
         lay.addWidget(self.chk_scrn_fresnel)
 
+        # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
+        srow = QtWidgets.QHBoxLayout()
+        srow.addWidget(QtWidgets.QLabel("重なり深度(スクリーン)"))
+        self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
+        self.spn_scrn_bias.setRange(-1.0, 1.0); self.spn_scrn_bias.setDecimals(3)
+        self.spn_scrn_bias.setSingleStep(0.005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
+        self.spn_scrn_bias.setToolTip(
+            "スクリーン輪郭の深度押し込み量（ビュー空間＝カメラ実距離基準）。\n"
+            "遠ざかると重なり線が消える場合に調整（下げる／効きが逆なら符号を反転）。\n"
+            "小さすぎると外周がチラつき、大きすぎると重なり線が沈む。全スクリーン輪郭に即反映。")
+        self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
+        srow.addWidget(self.spn_scrn_bias)
+        srow.addStretch(1)
+        lay.addLayout(srow)
+
         # 対象グループ（生成先）
         crow2 = QtWidgets.QHBoxLayout()
         crow2.addWidget(QtWidgets.QLabel("対象グループ"))
@@ -2376,6 +2442,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         """しきい値/太さ/色を反映（線色は共通カラーに追従）。"""
         _edge_set_params(threshold=self.spn_edge_thr.value(),
                          thickness=self.spn_edge_w.value(), color=self._color)
+
+    def _on_scrn_bias(self, *args):
+        """スクリーン輪郭の重なり深度押し込み（ビュー空間）を全ラインへ反映。"""
+        _scrn_set_depth_bias(self.spn_scrn_bias.value())
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
