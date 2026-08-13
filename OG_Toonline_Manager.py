@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -390,6 +390,79 @@ def _screen_fx_path():
     return path
 
 
+def _dump_dx11_varying(shd):
+    """dx11Shader の varyingParameters を Script Editor に列挙する（COLOR0/TEXCOORD の
+    バインド状況の切り分け用）。実機で `import OG_Toonline_Manager as m;
+    m._dump_dx11_varying('toonScreen_pSphereShape_DX11')` のように叩ける。"""
+    if not cmds.objExists(shd):
+        print("[dx11 dump] no node:", shd); return
+    try:
+        n = cmds.getAttr(shd + ".varyingParameters", size=True) or 0
+    except Exception as e:
+        print("[dx11 dump] varyingParameters query failed:", e); return
+    print("[dx11 dump] {0}: varyingParameters count={1}".format(shd, n))
+    # 属性名は Maya のバージョン差に備えて long/short を両方試す
+    field_candidates = {
+        "semantic": ("varyingParameterSemantic", "vps"),
+        "sem_idx":  ("varyingParameterSemanticIndex", "vpsi"),
+        "name":     ("varyingParameterName", "vpn"),
+        "source":   ("varyingParameterSource", "vpss"),
+    }
+    for i in range(n):
+        base = "{0}.varyingParameters[{1}]".format(shd, i)
+        row = {}
+        for key, names in field_candidates.items():
+            for a in names:
+                try:
+                    row[key] = cmds.getAttr(base + "." + a); break
+                except Exception:
+                    pass
+        print("  [{0}] {1}".format(i, row))
+
+
+def _bind_scrn_color_set_to_shader(shd, color_set_name):
+    """dx11Shader の COLOR0 varying param を Maya の色セット(color_set_name)へバインドする。
+    FX で `float4 Color : COLOR0` を宣言している場合、コンパイル後にできる
+    varyingParameters[i] のうち semantic="color"/index=0 のエントリの source を
+    色セット名に差し替える。属性名は long/short の候補を順に試すため Maya のマイナー
+    バージョン差にも耐える。成功したら True、失敗（属性名不明・エントリなど）でも例外を投げず False。"""
+    if not cmds.objExists(shd):
+        return False
+    try:
+        # FX コンパイルを確定させて varyingParameters を populate（実機のみ）
+        cmds.refresh()
+    except Exception:
+        pass
+    try:
+        n = cmds.getAttr(shd + ".varyingParameters", size=True) or 0
+    except Exception:
+        return False
+    sem_names = ("varyingParameterSemantic", "vps")
+    idx_names = ("varyingParameterSemanticIndex", "vpsi")
+    src_names = ("varyingParameterSource", "vpss")
+    for i in range(n):
+        base = "{0}.varyingParameters[{1}]".format(shd, i)
+        sem = ""; idx = -1
+        for a in sem_names:
+            try:
+                sem = cmds.getAttr(base + "." + a); break
+            except Exception:
+                pass
+        for a in idx_names:
+            try:
+                idx = cmds.getAttr(base + "." + a); break
+            except Exception:
+                pass
+        if str(sem).lower() in ("color", "colour") and (idx == 0 or idx is None):
+            for a in src_names:
+                try:
+                    cmds.setAttr(base + "." + a, color_set_name, type="string")
+                    return True
+                except Exception:
+                    pass
+    return False
+
+
 def _build_screen_network(line, shape, color):
     """スクリーン空間押し出し輪郭シェーダ（dx11Shader + 自前 HLSL）を shape に割り当てる。
     頂点シェーダでクリップ空間に一定ピクセル押し出し＋フロントカリングで均一太さの輪郭。
@@ -424,6 +497,25 @@ def _build_screen_network(line, shape, color):
         except Exception:
             pass
     cmds.sets(shape, e=True, forceElement=sg)
+    # ★COLOR0 → SCRN_CSET(頂点カラー) を明示バインド。dx11Shader は既定で頂点色を
+    #   自動バインドしないバージョンがあり、この場合 IN.Color.r が 0 のまま届き、
+    #   曲率倍率がゼロ扱い→シェーダ側の下限フォールバック(1.0)で常に一定太さになる。
+    #   ここで varyingParameters.source を色セット名に上書きすれば毎頂点の R が流れる。
+    if _bind_scrn_color_set_to_shader(shd, SCRN_CSET):
+        try:
+            om2.MGlobal.displayInfo(
+                "[SCRN] {0}: COLOR0 → '{1}' にバインドしました".format(_short(shd), SCRN_CSET))
+        except Exception:
+            pass
+    else:
+        try:
+            om2.MGlobal.displayWarning(
+                "[SCRN] {0}: COLOR0 のバインドに失敗（曲率が一定太さになります）。"
+                "実機で `import OG_Toonline_Manager as m; m._dump_dx11_varying('{0}')` を"
+                "実行し、Script Editor で varyingParameters の中身を確認してください。"
+                .format(_short(shd)))
+        except Exception:
+            pass
     if not cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         cmds.addAttr(line, ln=FRES_LINK, at="message")
     try:
