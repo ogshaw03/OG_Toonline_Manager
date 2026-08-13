@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -475,45 +475,88 @@ def _dump_dx11_varying(shd):
 
 def _bind_scrn_color_set_to_shader(shd, color_set_name):
     """dx11Shader の COLOR0 varying param を Maya の色セット(color_set_name)へバインドする。
-    FX で `float4 Color : COLOR0` を宣言している場合、コンパイル後にできる
-    varyingParameters[i] のうち semantic="color"/index=0 のエントリの source を
-    色セット名に差し替える。属性名は long/short の候補を順に試すため Maya のマイナー
-    バージョン差にも耐える。成功したら True、失敗（属性名不明・エントリなど）でも例外を投げず False。"""
+
+    Maya 2024 の dx11Shader スキーマ（実機で確定）:
+      - `<node>.varyingParameters` は文字列配列。例: ['Position','Normal','Color0']
+      - 各エントリ名につき top-level 属性 `<Name>_Source` (string) を持ち、値は
+        descriptor 文字列。例: 'position' / 'normal' / 'color:<colorSetName>'。
+      - シェーダ既定は 'color:colorSet' 固定なので、存在しない colorSet を指しっぱなしになり
+        IN.Color.r=0 → シェーダ内フォールバックで w=1.0 固定 → 曲率が一定太さに見える。
+    ここで <ColorParam>_Source を 'color:<color_set_name>' に上書きすると各頂点の R が流れる。"""
     if not cmds.objExists(shd):
         return False
+    # 1) varyingParameters の文字列配列を取る
     try:
-        # FX コンパイルを確定させて varyingParameters を populate（実機のみ）
-        cmds.refresh()
+        params = cmds.getAttr(shd + ".varyingParameters")
     except Exception:
-        pass
+        params = None
+    if not params:
+        return False
+    if isinstance(params, str):
+        params = [params]
+    # 2) Color 系のパラメータ名を特定
+    #   優先: Color0 完全一致 > _Source が 'color' で始まる > 名前が 'color' で始まる
+    color_param = None
+    for p in params:
+        if str(p) == "Color0":
+            color_param = p; break
+    if not color_param:
+        for p in params:
+            try:
+                v = cmds.getAttr("{0}.{1}_Source".format(shd, p))
+                if isinstance(v, str) and v.startswith("color"):
+                    color_param = p; break
+            except Exception:
+                pass
+    if not color_param:
+        for p in params:
+            if str(p).lower().startswith("color"):
+                color_param = p; break
+    if not color_param:
+        return False
+    # 3) 上書き（既にその値なら成功扱いで返す）
+    src_attr = "{0}.{1}_Source".format(shd, color_param)
+    desired = "color:" + color_set_name
     try:
-        n = cmds.getAttr(shd + ".varyingParameters", size=True) or 0
+        current = cmds.getAttr(src_attr)
+    except Exception:
+        current = None
+    if current == desired:
+        return True
+    try:
+        cmds.setAttr(src_attr, desired, type="string")
+        return True
     except Exception:
         return False
-    sem_names = ("varyingParameterSemantic", "vps")
-    idx_names = ("varyingParameterSemanticIndex", "vpsi")
-    src_names = ("varyingParameterSource", "vpss")
-    for i in range(n):
-        base = "{0}.varyingParameters[{1}]".format(shd, i)
-        sem = ""; idx = -1
-        for a in sem_names:
+
+
+def _rebind_all_scrn_shaders():
+    """既存の全 SCRN ラインの shader を SCRN_CSET(=toonScrnCurv) にリバインドし、
+    曲率倍率を再計算して頂点カラーへ反映する。ホットアップデートで v0.1.6 の
+    バインダを取り込んだあと、既存の SCRN ラインを削除せずに一発で修復するための入り口。
+    実機で: `import OG_Toonline_Manager as m; m._rebind_all_scrn_shaders()`"""
+    lines = _all_screen_lines()
+    fixed = 0
+    misses = []
+    for line in lines:
+        shd = _fresnel_shader(line)   # SCRN も FRES_LINK を message で共有している
+        if not shd:
+            misses.append(_short(line) + " (no shader link)"); continue
+        if _bind_scrn_color_set_to_shader(shd, SCRN_CSET):
+            fixed += 1
             try:
-                sem = cmds.getAttr(base + "." + a); break
+                _update_scrn_curv_weights(line)
             except Exception:
                 pass
-        for a in idx_names:
-            try:
-                idx = cmds.getAttr(base + "." + a); break
-            except Exception:
-                pass
-        if str(sem).lower() in ("color", "colour") and (idx == 0 or idx is None):
-            for a in src_names:
-                try:
-                    cmds.setAttr(base + "." + a, color_set_name, type="string")
-                    return True
-                except Exception:
-                    pass
-    return False
+        else:
+            misses.append(_short(line) + " -> " + _short(shd))
+    try:
+        om2.MGlobal.displayInfo("[SCRN] rebind: {0}/{1} succeeded".format(fixed, len(lines)))
+        for m in misses:
+            om2.MGlobal.displayWarning("[SCRN] rebind miss: " + m)
+    except Exception:
+        pass
+    return fixed
 
 
 def _build_screen_network(line, shape, color):
