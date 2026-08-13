@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2086,9 +2086,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         erow = QtWidgets.QHBoxLayout()
         erow.addWidget(QtWidgets.QLabel("しきい値"))
         self.spn_edge_thr = QtWidgets.QDoubleSpinBox()
-        self.spn_edge_thr.setRange(0.0001, 0.02); self.spn_edge_thr.setDecimals(4)
-        self.spn_edge_thr.setSingleStep(0.0002); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
-        self.spn_edge_thr.setToolTip("深度差の検出しきい値。小さいほど細かい段差も線に（増えすぎ注意）")
+        # 単位: ビュー空間深度の相対差 |Δz|/z（無次元）。距離に依存しない。
+        self.spn_edge_thr.setRange(0.001, 0.5); self.spn_edge_thr.setDecimals(3)
+        self.spn_edge_thr.setSingleStep(0.005); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
+        self.spn_edge_thr.setToolTip(
+            "深度差(相対 |Δz|/z)の検出しきい値。小さいほど細かい段差まで線に（増えすぎ注意）。\n"
+            "距離に依存しない相対値なので、カメラを寄せ引きしても同じ設定で使える。")
         self.spn_edge_thr.valueChanged.connect(self._on_edge_param)
         erow.addWidget(self.spn_edge_thr)
         erow.addWidget(QtWidgets.QLabel("太さ(px)"))
@@ -2098,6 +2101,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_edge_w.setToolTip("線の太さ（サンプル間隔）")
         self.spn_edge_w.valueChanged.connect(self._on_edge_param)
         erow.addWidget(self.spn_edge_w)
+        # 切り分け用: 線形化深度をそのまま表示（線描画をバイパス）
+        self.chk_edge_debug = QtWidgets.QCheckBox("深度可視化")
+        self.chk_edge_debug.setToolTip(
+            "ON: 対象メッシュだけの線形化深度をグレースケール表示（切り分け用）。\n"
+            "対象が真っ黒/真っ白なら near/far やターゲット解像度の問題。")
+        self.chk_edge_debug.toggled.connect(self._on_edge_param)
+        erow.addWidget(self.chk_edge_debug)
         lay.addLayout(erow)
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
@@ -2429,7 +2439,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 return
             _edge_set_targets(targets)
             _edge_set_params(threshold=self.spn_edge_thr.value(),
-                             thickness=self.spn_edge_w.value(), color=self._color)
+                             thickness=self.spn_edge_w.value(), color=self._color,
+                             debug=self.chk_edge_debug.isChecked())
             if not _edge_enable():
                 self.chk_edge.blockSignals(True)
                 self.chk_edge.setChecked(False)
@@ -2441,9 +2452,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             _edge_disable()
 
     def _on_edge_param(self, *args):
-        """しきい値/太さ/色を反映（線色は共通カラーに追従）。"""
+        """しきい値/太さ/色/デバッグ表示を反映（線色は共通カラーに追従）。"""
         _edge_set_params(threshold=self.spn_edge_thr.value(),
-                         thickness=self.spn_edge_w.value(), color=self._color)
+                         thickness=self.spn_edge_w.value(), color=self._color,
+                         debug=self.chk_edge_debug.isChecked())
 
     def _on_scrn_bias(self, *args):
         """スクリーン輪郭の重なり深度押し込み（ビュー空間）を全ラインへ反映。"""
@@ -4095,36 +4107,71 @@ def _reopen_after_update():
 # --------------------------------------------------------------------------- #
 
 EDGE_OVR_NAME = "OG_ToonEdgeOutline"
-_EDGE_PARAMS = {"threshold": 0.0012, "thickness": 1.0, "color": (0.0, 0.0, 0.0)}
+# しきい値はビュー空間深度で「相対差」を測るので単位はワールド長の比（既定 0.01 = 1%）。
+# 旧 0.0012 は非線形 D24S8 で近接以外は無反応だった数値なので新既定を大きめに。
+_EDGE_PARAMS = {"threshold": 0.01, "thickness": 1.0, "color": (0.0, 0.0, 0.0),
+                "near": 0.1, "far": 10000.0, "debug": 0}
 _EDGE_TARGETS = []          # エッジ検出対象の transform 名リスト（オブジェクト単位を保持）
 _edge_override = None
+_edge_size_logged = (0, 0)  # 直近ログしたターゲット (w, h) — 変化時に一度だけ報告
 
 _EDGE_FX = """// OG Toonline Manager - object-scoped screen-space depth-edge outline
 Texture2D gColorTex;   // 全シーンの色
-Texture2D gDepthTex;   // 対象メッシュだけを描いた深度（オブジェクト単位）
+Texture2D gDepthTex;   // 対象メッシュだけを描いた深度（対象なしなら 1.0=遠クリア）
 
 SamplerState gSamp { Filter = MIN_MAG_MIP_POINT; AddressU = Clamp; AddressV = Clamp; };
 
 float2 gTexel     = {0.001f, 0.001f};   // (1/width, 1/height) * thickness
-float  gThreshold = 0.0012f;            // 深度差のしきい値
+float  gThreshold = 0.01f;              // ビュー空間深度の相対差しきい値（|Δz|/z）
 float3 gLineColor = {0.0f, 0.0f, 0.0f};
+float  gNear      = 0.1f;
+float  gFar       = 10000.0f;
+int    gDebug     = 0;                  // 1: 線形化深度を可視化（切り分け用）
 
 struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
 struct VOUT { float4 Pos : SV_Position; float2 UV : TEXCOORD0; };
 
 VOUT VS(VIN i) { VOUT o; o.Pos = float4(i.Pos, 1.0f); o.UV = i.UV; return o; }
 
+// DirectX の非線形深度 [0,1] → ビュー空間の線形深度
+float linearizeDepth(float z)
+{
+    // near*far / (far - z*(far-near)). z=1(遠)→far, z=0(近)→near
+    float denom = gFar - z * (gFar - gNear);
+    return (gNear * gFar) / max(denom, 1e-6f);
+}
+
 float4 PS(VOUT i) : SV_Target
 {
     float2 t = gTexel;
-    float c = gDepthTex.Sample(gSamp, i.UV).r;
-    float u = gDepthTex.Sample(gSamp, i.UV + float2(0.0f, -t.y)).r;
-    float d = gDepthTex.Sample(gSamp, i.UV + float2(0.0f,  t.y)).r;
-    float l = gDepthTex.Sample(gSamp, i.UV + float2(-t.x, 0.0f)).r;
-    float r = gDepthTex.Sample(gSamp, i.UV + float2( t.x, 0.0f)).r;
-    float edge = abs(u + d + l + r - 4.0f * c);        // ラプラシアン
+    float zc = gDepthTex.Sample(gSamp, i.UV).r;
+    float zu = gDepthTex.Sample(gSamp, i.UV + float2(0.0f, -t.y)).r;
+    float zd = gDepthTex.Sample(gSamp, i.UV + float2(0.0f,  t.y)).r;
+    float zl = gDepthTex.Sample(gSamp, i.UV + float2(-t.x, 0.0f)).r;
+    float zr = gDepthTex.Sample(gSamp, i.UV + float2( t.x, 0.0f)).r;
+
+    float c = linearizeDepth(zc);
+    float u = linearizeDepth(zu);
+    float d = linearizeDepth(zd);
+    float l = linearizeDepth(zl);
+    float r = linearizeDepth(zr);
+
+    // 対象外領域（zc==1.0）は線を出さない。エッジは 4 方向の差の最大値で判定
+    // （ラプラシアンだと対象と背景の境界で両サイドに強く出て太る）。
+    float dmax = max(max(abs(u - c), abs(d - c)), max(abs(l - c), abs(r - c)));
+    float rel  = dmax / max(c, 1e-4f);
+
+    if (gDebug != 0)
+    {
+        // 線形化深度を near..near*50 の範囲で正規化して可視化。
+        float g = saturate((c - gNear) / max(gNear * 50.0f, 1e-4f));
+        return float4(g, g, g, 1.0f);
+    }
+
     float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
-    float e = step(gThreshold, edge);
+    // 対象未描画（背景）ピクセルは線化しない
+    float mask = (zc >= 0.9999f) ? 0.0f : 1.0f;
+    float e = mask * smoothstep(gThreshold, gThreshold * 2.0f, rel);
     return float4(lerp(scene, gLineColor, e), 1.0f);
 }
 
@@ -4157,17 +4204,48 @@ def _edge_set_targets(names):
     _EDGE_TARGETS = [n for n in (names or []) if cmds.objExists(n)]
 
 
-def _edge_set_params(threshold=None, thickness=None, color=None):
+def _edge_set_params(threshold=None, thickness=None, color=None, debug=None):
     if threshold is not None:
         _EDGE_PARAMS["threshold"] = float(threshold)
     if thickness is not None:
         _EDGE_PARAMS["thickness"] = float(thickness)
     if color is not None:
         _EDGE_PARAMS["color"] = (color[0], color[1], color[2])
+    if debug is not None:
+        _EDGE_PARAMS["debug"] = 1 if debug else 0
     try:
         cmds.refresh()
     except Exception:
         pass
+
+
+def _edge_active_camera_near_far():
+    """フォーカスされている（or 最初の）modelPanel の active camera の near/far を返す。
+    取得に失敗したら現在値を維持。"""
+    try:
+        panels = []
+        p = cmds.getPanel(withFocus=True)
+        if p and cmds.getPanel(typeOf=p) == "modelPanel":
+            panels.append(p)
+        for pp in (cmds.getPanel(type="modelPanel") or []):
+            if pp not in panels:
+                panels.append(pp)
+        for panel in panels:
+            cam = cmds.modelEditor(panel, q=True, camera=True)
+            if not cam or not cmds.objExists(cam):
+                continue
+            cam_shape = cam
+            if cmds.nodeType(cam) == "transform":
+                shs = cmds.listRelatives(cam, s=True, type="camera") or []
+                if shs:
+                    cam_shape = shs[0]
+            n = float(cmds.getAttr(cam_shape + ".nearClipPlane"))
+            f = float(cmds.getAttr(cam_shape + ".farClipPlane"))
+            if n > 0.0 and f > n:
+                return n, f
+    except Exception:
+        pass
+    return _EDGE_PARAMS["near"], _EDGE_PARAMS["far"]
 
 
 def _edge_active():
@@ -4267,6 +4345,12 @@ def _edge_enable():
                         s.setParameter("gThreshold", float(_EDGE_PARAMS["threshold"]))
                         col = _EDGE_PARAMS["color"]
                         s.setParameter("gLineColor", (col[0], col[1], col[2]))
+                        # 深度線形化用の near/far は現在のアクティブカメラから毎フレーム取得
+                        n, f = _edge_active_camera_near_far()
+                        _EDGE_PARAMS["near"] = n; _EDGE_PARAMS["far"] = f
+                        s.setParameter("gNear", float(n))
+                        s.setParameter("gFar", float(f))
+                        s.setParameter("gDebug", int(_EDGE_PARAMS["debug"]))
                     except Exception as exc:
                         om2.MGlobal.displayWarning("[OG edge] shader param: {0}".format(exc))
                     return s
@@ -4296,11 +4380,40 @@ def _edge_enable():
                 def supportedDrawAPIs(self):
                     return omr.MRenderer.kAllDevices
                 def setup(self, destination):
+                    # まずは HiDPI 安全経路: destination の Qt ウィジェット実ピクセル
+                    # サイズを直接測る（outputTargetSize() は Windows の HiDPI で論理
+                    # サイズを返し、ターゲットが実バックバッファの半分になる→拡大ボケ
+                    # によるかすれの主因になっていた）。取得不可なら旧 API へフォールバック。
+                    w = 0; h = 0
                     try:
-                        tgt = omr.MRenderer.outputTargetSize()
-                        self.w, self.h = int(tgt[0]), int(tgt[1])
+                        ptr = omui.MQtUtil.findControl(destination) if destination else None
+                        if ptr:
+                            widget = wrapInstance(int(ptr), QtWidgets.QWidget)
+                            try:
+                                dpr = float(widget.devicePixelRatioF())
+                            except AttributeError:
+                                dpr = float(widget.devicePixelRatio())
+                            w = int(max(1, round(widget.width() * dpr)))
+                            h = int(max(1, round(widget.height() * dpr)))
                     except Exception:
-                        self.w, self.h = 1280, 720
+                        w = 0; h = 0
+                    if w <= 0 or h <= 0:
+                        try:
+                            tgt = omr.MRenderer.outputTargetSize()
+                            w, h = int(tgt[0]), int(tgt[1])
+                        except Exception:
+                            w, h = 1280, 720
+                    self.w, self.h = w, h
+                    # 変化時に一度だけログ（HiDPI/解像度の切り分け用）
+                    global _edge_size_logged
+                    if (self.w, self.h) != _edge_size_logged:
+                        _edge_size_logged = (self.w, self.h)
+                        try:
+                            om2.MGlobal.displayInfo(
+                                "[OG edge] render target = {0}x{1} (panel='{2}')"
+                                .format(self.w, self.h, destination or ""))
+                        except Exception:
+                            pass
                     for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc):
                         desc.setWidth(self.w); desc.setHeight(self.h)
                     if self.tColor is None:
