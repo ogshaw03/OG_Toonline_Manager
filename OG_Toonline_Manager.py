@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -391,33 +391,86 @@ def _screen_fx_path():
 
 
 def _dump_dx11_varying(shd):
-    """dx11Shader の varyingParameters を Script Editor に列挙する（COLOR0/TEXCOORD の
-    バインド状況の切り分け用）。実機で `import OG_Toonline_Manager as m;
-    m._dump_dx11_varying('toonScreen_pSphereShape_DX11')` のように叩ける。"""
+    """dx11Shader の頂点入力バインド状態を Script Editor へ全部吐き出す診断ダンパ。
+    varyingParameters 系の属性名は Maya のバージョン差が大きいため、attribute schema
+    そのものを列挙する。実機で `import OG_Toonline_Manager as m;
+    m._dump_dx11_varying('<shader>')` を叩き、この出力を貼ってもらえれば
+    バインダを実機のスキーマに合わせて直せる。"""
     if not cmds.objExists(shd):
         print("[dx11 dump] no node:", shd); return
+    print("[dx11 dump] node =", shd, "type =", cmds.nodeType(shd))
+    # 1) 頂点/セマンティクス関連の可能性がある属性を全部拾って値を出す
+    keys = ("vary", "semantic", "source", "vertex", "color", "input",
+            "bind", "elem", "buffer", "map", "attr")
     try:
-        n = cmds.getAttr(shd + ".varyingParameters", size=True) or 0
-    except Exception as e:
-        print("[dx11 dump] varyingParameters query failed:", e); return
-    print("[dx11 dump] {0}: varyingParameters count={1}".format(shd, n))
-    # 属性名は Maya のバージョン差に備えて long/short を両方試す
-    field_candidates = {
-        "semantic": ("varyingParameterSemantic", "vps"),
-        "sem_idx":  ("varyingParameterSemanticIndex", "vpsi"),
-        "name":     ("varyingParameterName", "vpn"),
-        "source":   ("varyingParameterSource", "vpss"),
-    }
-    for i in range(n):
-        base = "{0}.varyingParameters[{1}]".format(shd, i)
-        row = {}
-        for key, names in field_candidates.items():
-            for a in names:
+        attrs = cmds.listAttr(shd) or []
+    except Exception:
+        attrs = []
+    hits = sorted({a for a in attrs if any(k in a.lower() for k in keys)})
+    print("[dx11 dump] candidate top-level attrs ({0}):".format(len(hits)))
+    for a in hits:
+        line = "  " + a
+        try:
+            v = cmds.getAttr(shd + "." + a); line += "  = " + repr(v)
+        except Exception:
+            try:
+                sz = cmds.getAttr(shd + "." + a, size=True)
+                line += "  [array size={0}]".format(sz)
+            except Exception:
+                pass
+        print(line)
+    # 2) varying/uniform 系 compound の中身を掘る
+    for cname in ("varyingParameters", "vary", "varyingParameterList",
+                  "uniformParameters", "vertexBufferMapping", "vertexElement"):
+        base_full = "{0}.{1}".format(shd, cname)
+        try:
+            n = cmds.getAttr(base_full, size=True)
+        except Exception:
+            continue
+        print("[dx11 dump] compound '{0}' size={1}".format(cname, n))
+        # 実際に populated な index を multi 列挙
+        try:
+            multi = cmds.listAttr(base_full, multi=True) or []
+        except Exception:
+            multi = []
+        if multi:
+            print("  multi listAttr:", multi[:20], ("..." if len(multi) > 20 else ""))
+        for i in range(max(n, 1)):
+            elem = "{0}[{1}]".format(base_full, i)
+            # element 直下の子属性名を listAttr で取れないか
+            for flag in ({"string": "*"}, {}):
                 try:
-                    row[key] = cmds.getAttr(base + "." + a); break
+                    subs = cmds.listAttr(elem, **flag) or []
+                    if subs:
+                        print("  [{0}] listAttr({1}) -> {2}".format(i, flag, subs[:30]))
+                        break
                 except Exception:
                     pass
-        print("  [{0}] {1}".format(i, row))
+            # 想定される sub 属性名を総当たり
+            sub_candidates = ("varyingParameterName", "vpn", "varyingParameterSemantic",
+                              "vps", "varyingParameterSemanticIndex", "vpsi",
+                              "varyingParameterType", "vpt", "varyingParameterSource", "vpss",
+                              "name", "semantic", "semanticIndex", "type", "source",
+                              "sourceCombined", "sourceSet", "setName",
+                              "channelIndex", "channelName", "channelSet")
+            row = {}
+            for s in sub_candidates:
+                try:
+                    v = cmds.getAttr(elem + "." + s); row[s] = v
+                except Exception:
+                    pass
+            if row:
+                print("  [{0}] sub attrs:".format(i))
+                for k, v in row.items():
+                    print("    .{0} = {1!r}".format(k, v))
+    # 3) dx11Shader コマンドが query フラグを持っていれば列挙
+    for flag in ("listVaryingParameters", "listAvailableSemantics", "listUniformParameters"):
+        try:
+            r = cmds.dx11Shader(shd, query=True, **{flag: True})
+            print("[dx11 dump] dx11Shader -q -{0} -> {1!r}".format(flag, r))
+        except Exception:
+            pass
+    print("[dx11 dump] done")
 
 
 def _bind_scrn_color_set_to_shader(shd, color_set_name):
