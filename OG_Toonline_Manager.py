@@ -3570,17 +3570,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception:
                     pass
 
+                # 曲率用カラーセット（頂点カラー R = 太さ倍率）を deformer より下流に用意。
+                # ★シェーダ割り当ての「前」に作る: dx11Shader は割り当て時に頂点入力レイアウトを
+                #   確定するため、後から色セットを足すと COLOR0 が取り込まれず曲率が効かない。
+                _init_scrn_color_set(dshape)
+
                 _build_screen_network(dup, dshape, self._color)
 
                 if not cmds.attributeQuery(TAG, node=dup, exists=True):
                     cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
                 if not cmds.attributeQuery(SCRN_TAG, node=dup, exists=True):
                     cmds.addAttr(dup, ln=SCRN_TAG, at="bool", dv=True)
-
-                # 曲率用カラーセット（頂点カラー R = 太さ倍率）を deformer より下流に用意。
-                dshape2 = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)
-                if dshape2:
-                    _init_scrn_color_set(dshape2[0])
 
                 dup = cmds.parent(dup, grp)[0]
                 ctrl = _ensure_line_anim(dup, thick)
