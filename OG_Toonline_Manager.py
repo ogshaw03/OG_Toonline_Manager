@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -4109,9 +4109,9 @@ def _reopen_after_update():
 # --------------------------------------------------------------------------- #
 
 EDGE_OVR_NAME = "OG_ToonEdgeOutline"
-# しきい値はビュー空間深度で「相対差」を測るので単位はワールド長の比（既定 0.01 = 1%）。
-# 旧 0.0012 は非線形 D24S8 で近接以外は無反応だった数値なので新既定を大きめに。
-_EDGE_PARAMS = {"threshold": 0.01, "thickness": 1.0, "color": (0.0, 0.0, 0.0),
+# しきい値はビュー空間深度で「相対差」|Δz|/z を測る無次元値（既定 0.05 = 5%）。
+# 実機検証で 0.01 は微差まで拾って線が滲む/太る（かすれ）、0.05〜0.1 が実用域だった。
+_EDGE_PARAMS = {"threshold": 0.05, "thickness": 1.0, "color": (0.0, 0.0, 0.0),
                 "near": 0.1, "far": 10000.0, "debug": 0}
 _EDGE_TARGETS = []          # エッジ検出対象の transform 名リスト（オブジェクト単位を保持）
 _edge_override = None
@@ -4174,7 +4174,10 @@ float4 PS(VOUT i) : SV_Target
     float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
     // 対象未描画（背景）ピクセルは線化しない
     float mask = (zc >= 0.9999f) ? 0.0f : 1.0f;
-    float e = mask * smoothstep(gThreshold, gThreshold * 2.0f, rel);
+    // 遷移幅は最小 1 ピクセルAA程度に絞って線をハッキリさせる（かすれ対策）。
+    // 幅を広くすると内部の緩い深度勾配がだらだら半透明で塗られて滲む。
+    float hi = gThreshold * 1.15f;
+    float e  = mask * smoothstep(gThreshold, hi, rel);
     return float4(lerp(scene, gLineColor, e), 1.0f);
 }
 
