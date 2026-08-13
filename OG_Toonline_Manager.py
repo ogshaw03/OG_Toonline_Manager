@@ -4155,16 +4155,19 @@ def _edge_enable():
                     return c
 
             class _SceneTargets(omr.MSceneRender):
-                """対象メッシュだけを深度ターゲットへ（オブジェクト単位のエッジ源）。
-                色ターゲットは共有だが深度のみクリアするので全シーン色は保たれる。"""
+                """対象メッシュだけを深度ターゲット tDepth へ（オブジェクト単位のエッジ源）。
+                専用のスクラッチ色ターゲットへ描き ALL クリアするので、tDepth は必ず遠クリア＋
+                対象のみの深度になり、全シーン色 tColor は汚さない（かすれ/ノイズ対策）。"""
                 def __init__(self, name, ovr):
                     omr.MSceneRender.__init__(self, name); self.ovr = ovr
                 def targetOverrideList(self):
-                    return [self.ovr.tColor, self.ovr.tDepth]
+                    return [self.ovr.tColorScratch, self.ovr.tDepth]
                 def clearOperation(self):
                     c = self.mClearOperation
                     c.setClearGradient(False)
-                    c.setMask(omr.MClearOperation.kClearDepth)   # 深度のみクリア（色は全シーンを維持）
+                    c.setClearColor([0.0, 0.0, 0.0, 0.0])
+                    c.setClearDepth(1.0)
+                    c.setMask(omr.MClearOperation.kClearAll)      # スクラッチ色+深度を確実にクリア
                     return c
                 def objectSetOverride(self):
                     return _targets_sel()
@@ -4200,10 +4203,13 @@ def _edge_enable():
                 def __init__(self, name):
                     omr.MRenderOverride.__init__(self, name)
                     self.w = 0; self.h = 0
-                    self.tColor = None; self.tDepthScene = None; self.tDepth = None
+                    self.tColor = None; self.tColorScratch = None
+                    self.tDepthScene = None; self.tDepth = None
                     self._tmgr = omr.MRenderer.getRenderTargetManager()
                     self._cDesc = omr.MRenderTargetDescription(
                         "OG_edgeColor", 256, 256, 1, omr.MRenderer.kR8G8B8A8_UNORM, 0, False)
+                    self._csDesc = omr.MRenderTargetDescription(
+                        "OG_edgeColorScratch", 256, 256, 1, omr.MRenderer.kR8G8B8A8_UNORM, 0, False)
                     self._dsDesc = omr.MRenderTargetDescription(
                         "OG_edgeDepthScene", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
                     self._dDesc = omr.MRenderTargetDescription(
@@ -4223,12 +4229,16 @@ def _edge_enable():
                         self.w, self.h = int(tgt[0]), int(tgt[1])
                     except Exception:
                         self.w, self.h = 1280, 720
-                    for desc in (self._cDesc, self._dsDesc, self._dDesc):
+                    for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc):
                         desc.setWidth(self.w); desc.setHeight(self.h)
                     if self.tColor is None:
                         self.tColor = self._tmgr.acquireRenderTarget(self._cDesc)
                     else:
                         self.tColor.updateDescription(self._cDesc)
+                    if self.tColorScratch is None:
+                        self.tColorScratch = self._tmgr.acquireRenderTarget(self._csDesc)
+                    else:
+                        self.tColorScratch.updateDescription(self._csDesc)
                     if self.tDepthScene is None:
                         self.tDepthScene = self._tmgr.acquireRenderTarget(self._dsDesc)
                     else:
@@ -4246,7 +4256,7 @@ def _edge_enable():
                 def nextRenderOperation(self):
                     self._it += 1; return self._it < len(self._ops)
                 def release(self):
-                    for a in ("tColor", "tDepthScene", "tDepth"):
+                    for a in ("tColor", "tColorScratch", "tDepthScene", "tDepth"):
                         t = getattr(self, a, None)
                         if t is not None:
                             try:
