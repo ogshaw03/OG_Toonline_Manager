@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2446,8 +2446,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self.chk_edge.setChecked(False)
                 self.chk_edge.blockSignals(False)
             else:
-                cmds.warning("画像空間エッジ検出 ON（対象 {0} メッシュ）。VP2/DirectX11・ビューポート専用。"
-                             .format(len(targets)))
+                # 成功通知は情報レベルで（cmds.warning は Script Editor で黄色になり誤読される）
+                om2.MGlobal.displayInfo(
+                    "画像空間エッジ検出 ON（対象 {0} メッシュ）。VP2/DirectX11・ビューポート専用。"
+                    .format(len(targets)))
         else:
             _edge_disable()
 
@@ -4163,8 +4165,9 @@ float4 PS(VOUT i) : SV_Target
 
     if (gDebug != 0)
     {
-        // 線形化深度を near..near*50 の範囲で正規化して可視化。
-        float g = saturate((c - gNear) / max(gNear * 50.0f, 1e-4f));
+        // 線形化深度を [near, far] で正規化して可視化（対象なし=白, 近い=黒）。
+        float span = max(gFar - gNear, 1e-4f);
+        float g = saturate((c - gNear) / span);
         return float4(g, g, g, 1.0f);
     }
 
@@ -4206,7 +4209,8 @@ def _edge_set_targets(names):
 
 def _edge_set_params(threshold=None, thickness=None, color=None, debug=None):
     if threshold is not None:
-        _EDGE_PARAMS["threshold"] = float(threshold)
+        # smoothstep(gThreshold, gThreshold*2, ..) が 0/0 になる事故を防ぐ最小値
+        _EDGE_PARAMS["threshold"] = max(1e-4, float(threshold))
     if thickness is not None:
         _EDGE_PARAMS["thickness"] = float(thickness)
     if color is not None:
@@ -4219,13 +4223,21 @@ def _edge_set_params(threshold=None, thickness=None, color=None, debug=None):
         pass
 
 
-def _edge_active_camera_near_far():
-    """フォーカスされている（or 最初の）modelPanel の active camera の near/far を返す。
+def _edge_active_camera_near_far(destination=None):
+    """指定パネル（無ければフォーカス→最初の modelPanel）の active camera の near/far を返す。
+    複数ビューポート運用でも、shader() 実行中はその描画対象パネルのカメラを見るのが正しい。
     取得に失敗したら現在値を維持。"""
     try:
         panels = []
+        if destination:
+            # destination は setup(destinationName) から渡るパネル名（優先）
+            try:
+                if cmds.getPanel(typeOf=destination) == "modelPanel":
+                    panels.append(destination)
+            except Exception:
+                pass
         p = cmds.getPanel(withFocus=True)
-        if p and cmds.getPanel(typeOf=p) == "modelPanel":
+        if p and p not in panels and cmds.getPanel(typeOf=p) == "modelPanel":
             panels.append(p)
         for pp in (cmds.getPanel(type="modelPanel") or []):
             if pp not in panels:
@@ -4345,8 +4357,9 @@ def _edge_enable():
                         s.setParameter("gThreshold", float(_EDGE_PARAMS["threshold"]))
                         col = _EDGE_PARAMS["color"]
                         s.setParameter("gLineColor", (col[0], col[1], col[2]))
-                        # 深度線形化用の near/far は現在のアクティブカメラから毎フレーム取得
-                        n, f = _edge_active_camera_near_far()
+                        # 深度線形化用の near/far は今描画中のパネルのカメラから毎フレーム取得
+                        # (destination を渡さないと focus パネル固定→複数ビューポートで不整合)
+                        n, f = _edge_active_camera_near_far(self.ovr.destination)
                         _EDGE_PARAMS["near"] = n; _EDGE_PARAMS["far"] = f
                         s.setParameter("gNear", float(n))
                         s.setParameter("gFar", float(f))
@@ -4359,6 +4372,7 @@ def _edge_enable():
                 def __init__(self, name):
                     omr.MRenderOverride.__init__(self, name)
                     self.w = 0; self.h = 0
+                    self.destination = None    # 現在描画中のパネル名（shader() が使う）
                     self.tColor = None; self.tColorScratch = None
                     self.tDepthScene = None; self.tDepth = None
                     self._tmgr = omr.MRenderer.getRenderTargetManager()
@@ -4380,6 +4394,8 @@ def _edge_enable():
                 def supportedDrawAPIs(self):
                     return omr.MRenderer.kAllDevices
                 def setup(self, destination):
+                    # shader() から見えるように保持（複数ビューポートで対象パネルの near/far を使う）
+                    self.destination = destination or ""
                     # まずは HiDPI 安全経路: destination の Qt ウィジェット実ピクセル
                     # サイズを直接測る（outputTargetSize() は Windows の HiDPI で論理
                     # サイズを返し、ターゲットが実バックバッファの半分になる→拡大ボケ
