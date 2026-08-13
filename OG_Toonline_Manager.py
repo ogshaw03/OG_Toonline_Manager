@@ -4131,8 +4131,26 @@ def _edge_enable():
                 def targetOverrideList(self):
                     return [self.ovr.tColor, self.ovr.tDepthScene]
                 def clearOperation(self):
+                    # 背景をビューポートの背景色でクリア（黒くならないように）。
                     c = self.mClearOperation
-                    c.setClearGradient(False)
+                    try:
+                        bg = cmds.displayRGBColor("background", q=True)
+                        top = cmds.displayRGBColor("backgroundTop", q=True)
+                        bot = cmds.displayRGBColor("backgroundBottom", q=True)
+                        grad = bool(cmds.displayPref(q=True, displayGradient=True))
+                    except Exception:
+                        bg = [0.36, 0.36, 0.36]; top = bg; bot = bg; grad = False
+                    try:
+                        if grad:
+                            c.setClearGradient(True)
+                            c.setClearColor([float(top[0]), float(top[1]), float(top[2]), 1.0])
+                            c.setClearColor2([float(bot[0]), float(bot[1]), float(bot[2]), 1.0])
+                        else:
+                            c.setClearGradient(False)
+                            c.setClearColor([float(bg[0]), float(bg[1]), float(bg[2]), 1.0])
+                    except Exception:
+                        c.setClearGradient(False)
+                        c.setClearColor([0.36, 0.36, 0.36, 1.0])
                     c.setMask(omr.MClearOperation.kClearAll)
                     return c
 
