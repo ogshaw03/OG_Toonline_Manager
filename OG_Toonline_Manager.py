@@ -1779,6 +1779,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._remove_cam_callbacks()
         except Exception:
             pass
+        try:
+            _edge_disable()          # 画像空間エッジ検出のオーバーライドを後始末
+        except Exception:
+            pass
         super(ToonOutlineUI, self).closeEvent(event)
 
     # ========== UI 構築 ==========
@@ -2001,6 +2005,32 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ scriptJob/頂点レイのため重く、ビューポート専用（バッチレンダー不可）。高密度メッシュ注意。")
         self.chk_occlude.toggled.connect(self._on_toggle_occlude)
         lay.addWidget(self.chk_occlude)
+
+        # ---- 画像空間エッジ検出（オブジェクト単位・重なり線を上に描く／実験・VP2）----
+        self.chk_edge = QtWidgets.QCheckBox("重なり線をメッシュの上に描く（画像空間エッジ・実験）")
+        self.chk_edge.setChecked(False)
+        self.chk_edge.setToolTip(
+            "対象メッシュを選択してから ON。深度の段差（シルエット/自己重なり）を後処理で検出し、\n"
+            "対象メッシュの上に均一線を描く（手前メッシュに隠れず・ムラなし・オブジェクト単位）。\n"
+            "※ VP2/DirectX11 前提・ビューポート専用。他オブジェクトの前後関係より上に出ることがある。")
+        self.chk_edge.toggled.connect(self._on_toggle_edge)
+        lay.addWidget(self.chk_edge)
+        erow = QtWidgets.QHBoxLayout()
+        erow.addWidget(QtWidgets.QLabel("しきい値"))
+        self.spn_edge_thr = QtWidgets.QDoubleSpinBox()
+        self.spn_edge_thr.setRange(0.0001, 0.02); self.spn_edge_thr.setDecimals(4)
+        self.spn_edge_thr.setSingleStep(0.0002); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
+        self.spn_edge_thr.setToolTip("深度差の検出しきい値。小さいほど細かい段差も線に（増えすぎ注意）")
+        self.spn_edge_thr.valueChanged.connect(self._on_edge_param)
+        erow.addWidget(self.spn_edge_thr)
+        erow.addWidget(QtWidgets.QLabel("太さ(px)"))
+        self.spn_edge_w = QtWidgets.QDoubleSpinBox()
+        self.spn_edge_w.setRange(0.5, 8.0); self.spn_edge_w.setDecimals(1)
+        self.spn_edge_w.setSingleStep(0.5); self.spn_edge_w.setValue(_EDGE_PARAMS["thickness"])
+        self.spn_edge_w.setToolTip("線の太さ（サンプル間隔）")
+        self.spn_edge_w.valueChanged.connect(self._on_edge_param)
+        erow.addWidget(self.spn_edge_w)
+        lay.addLayout(erow)
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
@@ -2316,6 +2346,36 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if self._occ_timer is not None:
                 self._occ_timer.stop()
             self._remove_cam_callbacks()
+
+    def _on_toggle_edge(self, state):
+        """画像空間エッジ検出（オブジェクト単位）の ON/OFF。ON 時は選択メッシュを対象にする。"""
+        if state:
+            sel = cmds.ls(sl=True, long=True, type="transform") or []
+            targets = [o for o in sel
+                       if cmds.listRelatives(o, shapes=True, type="mesh", ni=True)]
+            if not targets:
+                cmds.warning("エッジ検出の対象メッシュを選択してから ON にしてください")
+                self.chk_edge.blockSignals(True)
+                self.chk_edge.setChecked(False)
+                self.chk_edge.blockSignals(False)
+                return
+            _edge_set_targets(targets)
+            _edge_set_params(threshold=self.spn_edge_thr.value(),
+                             thickness=self.spn_edge_w.value(), color=self._color)
+            if not _edge_enable():
+                self.chk_edge.blockSignals(True)
+                self.chk_edge.setChecked(False)
+                self.chk_edge.blockSignals(False)
+            else:
+                cmds.warning("画像空間エッジ検出 ON（対象 {0} メッシュ）。VP2/DirectX11・ビューポート専用。"
+                             .format(len(targets)))
+        else:
+            _edge_disable()
+
+    def _on_edge_param(self, *args):
+        """しきい値/太さ/色を反映（線色は共通カラーに追従）。"""
+        _edge_set_params(threshold=self.spn_edge_thr.value(),
+                         thickness=self.spn_edge_w.value(), color=self._color)
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
@@ -3950,6 +4010,285 @@ def _reopen_after_update():
                 button=["OK"])
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# 画像空間エッジ検出（オブジェクト単位・重なり線をメッシュの上に描く／VP2・実験）
+#   深度ラプラシアンで段差(=シルエット/自己重なり)を検出し、シーンの色に線を合成。
+#   ★オブジェクト単位維持: エッジ検出用の深度は「対象メッシュだけ」を描いた深度を使う
+#     （objectSetOverride）。色は全シーンを描くので他オブジェクトは通常表示のまま、
+#     線は対象メッシュにだけ乗る。手前の別オブジェクトに隠れず“上のレイヤー”に出る。
+#   レンダー API は遅延 import（この機能を使わなければ import されない＝本体は Py2 でも安全）。
+#   ※ MRenderOverride は実機(VP2/DirectX11)でのみ動作。ここでは構造のみ・実機検証は別途。
+# --------------------------------------------------------------------------- #
+
+EDGE_OVR_NAME = "OG_ToonEdgeOutline"
+_EDGE_PARAMS = {"threshold": 0.0012, "thickness": 1.0, "color": (0.0, 0.0, 0.0)}
+_EDGE_TARGETS = []          # エッジ検出対象の transform 名リスト（オブジェクト単位を保持）
+_edge_override = None
+
+_EDGE_FX = """// OG Toonline Manager - object-scoped screen-space depth-edge outline
+Texture2D gColorTex;   // 全シーンの色
+Texture2D gDepthTex;   // 対象メッシュだけを描いた深度（オブジェクト単位）
+
+SamplerState gSamp { Filter = MIN_MAG_MIP_POINT; AddressU = Clamp; AddressV = Clamp; };
+
+float2 gTexel     = {0.001f, 0.001f};   // (1/width, 1/height) * thickness
+float  gThreshold = 0.0012f;            // 深度差のしきい値
+float3 gLineColor = {0.0f, 0.0f, 0.0f};
+
+struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
+struct VOUT { float4 Pos : SV_Position; float2 UV : TEXCOORD0; };
+
+VOUT VS(VIN i) { VOUT o; o.Pos = float4(i.Pos, 1.0f); o.UV = i.UV; return o; }
+
+float4 PS(VOUT i) : SV_Target
+{
+    float2 t = gTexel;
+    float c = gDepthTex.Sample(gSamp, i.UV).r;
+    float u = gDepthTex.Sample(gSamp, i.UV + float2(0.0f, -t.y)).r;
+    float d = gDepthTex.Sample(gSamp, i.UV + float2(0.0f,  t.y)).r;
+    float l = gDepthTex.Sample(gSamp, i.UV + float2(-t.x, 0.0f)).r;
+    float r = gDepthTex.Sample(gSamp, i.UV + float2( t.x, 0.0f)).r;
+    float edge = abs(u + d + l + r - 4.0f * c);        // ラプラシアン
+    float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
+    float e = step(gThreshold, edge);
+    return float4(lerp(scene, gLineColor, e), 1.0f);
+}
+
+technique11 Main { pass p0 {
+    SetVertexShader(CompileShader(vs_5_0, VS()));
+    SetPixelShader(CompileShader(ps_5_0, PS()));
+} }
+"""
+
+
+def _edge_fx_path():
+    d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
+    try:
+        if not os.path.isdir(d):
+            os.makedirs(d)
+    except Exception:
+        d = cmds.internalVar(userTmpDir=True)
+    p = os.path.join(d, "OG_EdgeOutline.fx").replace("\\", "/")
+    try:
+        with open(p, "w") as f:
+            f.write(_EDGE_FX)
+    except Exception:
+        pass
+    return p
+
+
+def _edge_set_targets(names):
+    """エッジ検出の対象メッシュ（transform 名）を設定。存在するものだけ保持。"""
+    global _EDGE_TARGETS
+    _EDGE_TARGETS = [n for n in (names or []) if cmds.objExists(n)]
+
+
+def _edge_set_params(threshold=None, thickness=None, color=None):
+    if threshold is not None:
+        _EDGE_PARAMS["threshold"] = float(threshold)
+    if thickness is not None:
+        _EDGE_PARAMS["thickness"] = float(thickness)
+    if color is not None:
+        _EDGE_PARAMS["color"] = (color[0], color[1], color[2])
+    try:
+        cmds.refresh()
+    except Exception:
+        pass
+
+
+def _edge_active():
+    return _edge_override is not None
+
+
+def _edge_enable():
+    """画像空間エッジ検出のレンダーオーバーライドを現在のモデルパネルへ適用。
+    成功で True。レンダー API が無い/失敗しても例外を投げず False を返す（本体は無事）。"""
+    global _edge_override
+    try:
+        import maya.api.OpenMayaRender as omr
+    except Exception as exc:
+        cmds.warning("画像空間エッジ検出はこの環境で使えません（VP2/DirectX11 が必要）: {0}".format(exc))
+        return False
+    if _edge_override is None:
+        try:
+            fx_path = _edge_fx_path()
+
+            def _targets_sel():
+                sel = om2.MSelectionList()
+                for n in _EDGE_TARGETS:
+                    try:
+                        sel.add(n)
+                    except Exception:
+                        pass
+                return sel
+
+            class _SceneFull(omr.MSceneRender):
+                """全シーンを色ターゲットへ（背景・他オブジェクトは通常表示のため）。"""
+                def __init__(self, name, ovr):
+                    omr.MSceneRender.__init__(self, name); self.ovr = ovr
+                def targetOverrideList(self):
+                    return [self.ovr.tColor, self.ovr.tDepthScene]
+                def clearOperation(self):
+                    c = self.mClearOperation
+                    c.setClearGradient(False)
+                    c.setMask(omr.MClearOperation.kClearAll)
+                    return c
+
+            class _SceneTargets(omr.MSceneRender):
+                """対象メッシュだけを深度ターゲットへ（オブジェクト単位のエッジ源）。
+                色ターゲットは共有だが深度のみクリアするので全シーン色は保たれる。"""
+                def __init__(self, name, ovr):
+                    omr.MSceneRender.__init__(self, name); self.ovr = ovr
+                def targetOverrideList(self):
+                    return [self.ovr.tColor, self.ovr.tDepth]
+                def clearOperation(self):
+                    c = self.mClearOperation
+                    c.setClearGradient(False)
+                    c.setMask(omr.MClearOperation.kClearDepth)   # 深度のみクリア（色は全シーンを維持）
+                    return c
+                def objectSetOverride(self):
+                    return _targets_sel()
+
+            class _QuadEdge(omr.MQuadRender):
+                def __init__(self, name, ovr):
+                    omr.MQuadRender.__init__(self, name); self.ovr = ovr; self.shaderInst = None
+                def targetOverrideList(self):
+                    return None   # 画面へ出力
+                def shader(self):
+                    if self.shaderInst is None:
+                        sm = omr.MRenderer.getShaderManager()
+                        if sm is None:
+                            return None
+                        self.shaderInst = sm.getEffectsFileShader(fx_path, "Main")
+                    s = self.shaderInst
+                    if s is None:
+                        return None
+                    try:
+                        s.setParameter("gColorTex", self.ovr.tColor)
+                        s.setParameter("gDepthTex", self.ovr.tDepth)
+                        w = max(1, self.ovr.w); h = max(1, self.ovr.h)
+                        th = max(0.0, _EDGE_PARAMS["thickness"])
+                        s.setParameter("gTexel", (th / float(w), th / float(h)))
+                        s.setParameter("gThreshold", float(_EDGE_PARAMS["threshold"]))
+                        col = _EDGE_PARAMS["color"]
+                        s.setParameter("gLineColor", (col[0], col[1], col[2]))
+                    except Exception as exc:
+                        om2.MGlobal.displayWarning("[OG edge] shader param: {0}".format(exc))
+                    return s
+
+            class _EdgeOverride(omr.MRenderOverride):
+                def __init__(self, name):
+                    omr.MRenderOverride.__init__(self, name)
+                    self.w = 0; self.h = 0
+                    self.tColor = None; self.tDepthScene = None; self.tDepth = None
+                    self._tmgr = omr.MRenderer.getRenderTargetManager()
+                    self._cDesc = omr.MRenderTargetDescription(
+                        "OG_edgeColor", 256, 256, 1, omr.MRenderer.kR8G8B8A8_UNORM, 0, False)
+                    self._dsDesc = omr.MRenderTargetDescription(
+                        "OG_edgeDepthScene", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    self._dDesc = omr.MRenderTargetDescription(
+                        "OG_edgeDepth", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    self._sceneFull = _SceneFull("og_edge_full", self)
+                    self._sceneTgt = _SceneTargets("og_edge_tgt", self)
+                    self._quad = _QuadEdge("og_edge_quad", self)
+                    self._hud = omr.MHUDRender()
+                    self._present = omr.MPresentTarget("og_edge_present")
+                    self._ops = [self._sceneFull, self._sceneTgt, self._quad, self._hud, self._present]
+                    self._it = 0
+                def supportedDrawAPIs(self):
+                    return omr.MRenderer.kAllDevices
+                def setup(self, destination):
+                    try:
+                        tgt = omr.MRenderer.outputTargetSize()
+                        self.w, self.h = int(tgt[0]), int(tgt[1])
+                    except Exception:
+                        self.w, self.h = 1280, 720
+                    for desc in (self._cDesc, self._dsDesc, self._dDesc):
+                        desc.setWidth(self.w); desc.setHeight(self.h)
+                    if self.tColor is None:
+                        self.tColor = self._tmgr.acquireRenderTarget(self._cDesc)
+                    else:
+                        self.tColor.updateDescription(self._cDesc)
+                    if self.tDepthScene is None:
+                        self.tDepthScene = self._tmgr.acquireRenderTarget(self._dsDesc)
+                    else:
+                        self.tDepthScene.updateDescription(self._dsDesc)
+                    if self.tDepth is None:
+                        self.tDepth = self._tmgr.acquireRenderTarget(self._dDesc)
+                    else:
+                        self.tDepth.updateDescription(self._dDesc)
+                def cleanup(self):
+                    pass
+                def startOperationIterator(self):
+                    self._it = 0; return True
+                def renderOperation(self):
+                    return self._ops[self._it]
+                def nextRenderOperation(self):
+                    self._it += 1; return self._it < len(self._ops)
+                def release(self):
+                    for a in ("tColor", "tDepthScene", "tDepth"):
+                        t = getattr(self, a, None)
+                        if t is not None:
+                            try:
+                                self._tmgr.releaseRenderTarget(t)
+                            except Exception:
+                                pass
+                            setattr(self, a, None)
+
+            _edge_override = _EdgeOverride(EDGE_OVR_NAME)
+            omr.MRenderer.registerOverride(_edge_override)
+        except Exception as exc:
+            _edge_override = None
+            cmds.warning("画像空間エッジ検出の初期化に失敗: {0}".format(exc))
+            return False
+    # 現在のモデルパネルへ適用
+    panel = None
+    p = cmds.getPanel(withFocus=True)
+    if p and cmds.getPanel(typeOf=p) == "modelPanel":
+        panel = p
+    else:
+        for pp in (cmds.getPanel(type="modelPanel") or []):
+            panel = pp; break
+    if not panel:
+        cmds.warning("モデルパネルが見つかりません"); return False
+    try:
+        cmds.modelEditor(panel, e=True, rendererOverrideName=EDGE_OVR_NAME)
+        cmds.refresh()
+    except Exception as exc:
+        cmds.warning("画像空間エッジ検出の適用に失敗: {0}".format(exc)); return False
+    return True
+
+
+def _edge_disable():
+    """画像空間エッジ検出を全モデルパネルから解除し、オーバーライドを破棄。"""
+    global _edge_override
+    try:
+        import maya.api.OpenMayaRender as omr
+    except Exception:
+        omr = None
+    for panel in (cmds.getPanel(type="modelPanel") or []):
+        try:
+            if cmds.modelEditor(panel, q=True, rendererOverrideName=True) == EDGE_OVR_NAME:
+                cmds.modelEditor(panel, e=True, rendererOverrideName="")
+        except Exception:
+            pass
+    if _edge_override is not None:
+        if omr is not None:
+            try:
+                omr.MRenderer.deregisterOverride(_edge_override)
+            except Exception:
+                pass
+        try:
+            _edge_override.release()
+        except Exception:
+            pass
+    _edge_override = None
+    try:
+        cmds.refresh()
+    except Exception:
+        pass
 
 
 def show():
