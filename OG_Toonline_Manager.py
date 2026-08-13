@@ -335,21 +335,23 @@ struct V2P { float4 HPos : SV_Position; };
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
-    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);   // ビュー空間位置
+    // xy と w（＝太さの一定px補正）は元の WVP から取り、距離で崩れないようにする
+    //（w を触ると近接で線が消えたり太さが距離で変わる。ここは不変が鉄則）。
+    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
     float3 vn   = mul(IN.Normal, (float3x3)gWV);          // ビュー空間法線
-    // ビュー空間で一定量だけ奥へ（カメラからの実距離基準＝遠距離でも重なり線が消えない）。
-    // Maya のビュー空間はカメラが -Z を向く（奥ほど z が小さい）ので z を減らして奥へ。
-    // 符号/量は UI「Overlap Depth Bias」で調整可（沈みすぎ→下げる／塗りつぶし→符号反転）。
+    // 深度だけ「ビュー空間で一定量」奥へ押した NDC 深度に差し替える（clip.xy/clip.w は不変）。
+    // 房の実隙間は距離不変なので、遠距離でも重なり線が消えない。符号/量は UI で調整可。
+    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
     vpos.z -= depthBias;
-    float4 clip = mul(vpos, gProj);
+    float4 clipB = mul(vpos, gProj);
+    float  bw = (abs(clipB.w) > 1e-6f) ? clipB.w : 1e-6f;
+    clip.z = (clipB.z / bw) * clip.w;                     // 深度のみ差し替え（太さに影響しない）
+    // 太さ押し出し（一定px）。頂点カラー R = 曲率倍率（未設定/0 は 1.0 扱いで消えない）。
     float2 sn = vn.xy;
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
-    // 頂点カラー R = 曲率による太さ倍率（1.0=一定・曲がった所ほど大）。
-    // カラー未設定/黒(0)は 1.0 扱いにして「曲率カラーが無くても線が消えない」ようにする。
     float w = IN.Color.r;
     if (w < 0.001f) w = 1.0f;
-    // ピクセル幅を NDC へ変換（clip.w を掛けて透視除算後に一定ピクセルへ）
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
     clip.xy += sn * thickness * w * px * clip.w;
     OUT.HPos = clip;

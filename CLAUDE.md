@@ -348,12 +348,15 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
 - dx11Shader の**頂点シェーダでクリップ空間（画面上）へ一定ピクセル押し出す**（`_SCRN_FX_HLSL`）。
   `clip = pos×WVP`、ビュー空間法線 xy 方向へ `clip.xy += normalize(sn) * thickness * (2/viewport) * clip.w`。
   押し出しが**元シルエットと同じ深度のまま画面上で広がる**ので隙間が出ず、`clip.w` 補正で**均一ピクセル太さ**。
-- カリングは使わず、頂点シェーダで **深度を「ビュー空間で一定量」奥へ押し込む**（`depthBias`＝`SCRN_DEPTH_BIAS`、
-  VS で `vpos=pos×gWV; vpos.z-=depthBias; clip=vpos×gProj`）。膨らんだシェルが少し奥に沈むので、**別オブジェクトの
-  元メッシュがシェルの内側を覆い、外周リングだけが残る**＝輪郭。旧 `gZBias`(clip 空間NDC一定)は**遠距離で房どうしの
-  深度差がNDC上で圧縮され、重なり線が消える**問題があったため、**ビュー空間一定（カメラ実距離基準）に変更**して
-  距離によらず重なり線が残るようにした。量/符号は UI スピン「重なり深度(スクリーン)」で調整（`_scrn_set_depth_bias`
-  が全 SCRN ラインの shd へ setAttr、既定 `_SCRN_ZBIAS`=0.02）。符号が逆だと塗りつぶし＝UIで反転可。
+- カリングは使わず、頂点シェーダで **深度を「ビュー空間で一定量」奥へ押し込む**（`depthBias`＝`SCRN_DEPTH_BIAS`）。
+  膨らんだシェルが少し奥に沈むので、**別オブジェクトの元メッシュがシェルの内側を覆い、外周リングだけが残る**＝輪郭。
+  旧 `gZBias`(clip 空間NDC一定)は**遠距離で房どうしの深度差がNDC上で圧縮され重なり線が消える**問題があった。
+  - **VS の実装で超重要**: `clip.xy`/`clip.w`（＝太さの一定px補正）は**元の `gWVP` から取って不変**にし、
+    **深度 `clip.z` だけ**を差し替える。手順: `clip=pos×gWVP` → `vpos=pos×gWV; vpos.z-=depthBias;
+    clipB=vpos×gProj` → `clip.z=(clipB.z/clipB.w)×clip.w`。**`clip.w` を触ると近接で線が消える/太さが距離で
+    変わる**（バイアスが w を変えシェル位置が距離依存でスケールするため）＝一度踏んだ罠。だから w は必ず WVP 由来。
+  - 量/符号は UI スピン「重なり深度(スクリーン)」で調整（`_scrn_set_depth_bias` が全 SCRN ラインの shd へ setAttr、
+    既定 `_SCRN_ZBIAS`=0.02）。符号が逆だと塗りつぶし＝UIで反転可。`gProj`(Projection semantic)は深度算出のみに使用。
 - 太さ＝dx11Shader の `thickness`(px) uniform。`_thick_target` が SCRN のとき返し、`_ensure_thickness_chain`
   が `mB.output × SCRN_SCALE`(6.0) を流す。色は `lineColor`（フレネルと共通の dx11 線色処理）。
 - 元へ `outMesh`(offset=0 lock)+`parent/scaleConstraint` で追従。
