@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -3488,6 +3488,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.delete(b); return False
         bshape = bsh[0]
         cmds.delete(b, constructionHistory=True)
+        # ★ハル A と同じく B も全エッジを soft 化。B の push 方向を連続化して
+        # スパイク/ジャギを避ける（facing 駆動の weight が隣接頂点でも滑らかに続く）。
+        try:
+            cmds.polySoftEdge(bshape + ".e[*]", a=180, ch=False)
+        except Exception:
+            pass
         # 変形追従の textureDeformer（offset は後で A の太さに接続。weightList=facing）
         td = cmds.textureDeformer(bshape, strength=0, offset=0.0, direction="Normal")
         bdefm = td[0]
@@ -3597,6 +3603,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
                 # 複製のヒストリ／デフォーマを除去して inMesh を空ける
                 cmds.delete(dup, constructionHistory=True)
+
+                # ★ハル複製の全エッジを soft 化してシェル頂点法線を近傍面法線の平均にする。
+                # これで textureDeformer(direction="Normal") 時の push 方向が頂点間で連続化し、
+                # 円柱キャップ↔サイド境界・立方体の稜線・ポリキューブの角などの「頂点法線の不連続」
+                # 由来で出ていた**ハル外周の跳ね/飛び火**が原理的に消える。
+                # 元メッシュは複製後に捨てられる履歴しか見ないので影響しない。ch=False で履歴ノードを
+                # 残さず inMesh の normal データを書き換える。全エッジ対象を .e[*] で明示（引数省略だと
+                # 版により選択依存になり no-op になるケースがある）。失敗は無視。
+                try:
+                    cmds.polySoftEdge(dshape + ".e[*]", a=180, ch=False)
+                except Exception:
+                    pass
 
                 # --- inverted hull を構築 ---
                 # 1) textureDeformer(direction="Normal") で各頂点を「現在のサーフェス法線」方向へ
