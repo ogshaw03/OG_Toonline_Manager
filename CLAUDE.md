@@ -368,6 +368,10 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   scriptJob は `_update_line_weights`(ディスパッチャ)経由で SCRN は頂点カラー、それ以外は deformer
   weightList へ振り分け。曲率の再計算タイミングは hull と同じ（スライダー変更時。再生の毎フレームでは
   再計算しない）。プロファイル/末端細りは長手カーブが無いため実質無効（curvature のみ効く）。
+  ※ **実機対応（版0.1.6）**: dx11Shader が色セットを自動で COLOR0 に流さない版（Maya 2024 等）があり、
+    その場合 `IN.Color.r=0`→シェーダ下限1.0で**常に一定太さ**になる。`_bind_scrn_color_set_to_shader` が
+    dx11Shader の **varyingParameters.source を色セット名(`SCRN_CSET`)へ明示バインド**して解消
+    （割り当て時に呼ぶ）。失敗時は警告＋診断 `_dump_dx11_varying('<shd>')` を案内。バージョン差は要確認。
 - **VP2(DirectX11)・テクスチャ表示 ON(6) 前提**、カメラ依存、Hardware 2.0 バッチ対応。
 - 別案として **スクリーンスペース深度エッジ検出**（`OG_Edge_Outline.py` / `MRenderOverride`）も試験的に用意。
 - ※ 一度 UI を廃止したが、ビューポート用途では隙間問題の唯一の幾何解のため**復活**（`create_screen_outline`
@@ -389,7 +393,10 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   `_edge_set_params`（線色は共通カラー追従）。UI に「しきい値/太さ」スピン。ウィンドウ closeEvent で `_edge_disable`。
 - **VP2/DirectX11・ビューポート専用**。弱点: 画面合成なので**手前の別オブジェクトより線が上に出る**ことがある
   （前後関係は未考慮）。厳密な遮蔽が要るなら対象深度 vs シーン深度の比較を追加する余地あり。
-- ※ `MRenderOverride` は**実機(VP2)でのみ動作**。ここではコード構造のみで**実機検証は別セッション**。om2 render API の
+- ※ `MRenderOverride` は**実機(VP2)でのみ動作**。**実機 Maya 2024 で検証済み**（版0.1.6）: 深度線形化
+  (`linearizeDepth`/`gNear`/`gFar`、near/farは `_edge_active_camera_near_far` でアクティブカメラから取得)＋
+  相対しきい値＋HiDPI(実ピクセルでターゲット作成)で**かすれを低減**。`debug` uniform で深度可視化可。
+  残課題: 残りのかすれ/しきい値感度/厳密な前後遮蔽（対象深度 vs シーン深度比較）。om2 render API の
   シグネチャ（`objectSetOverride` 等）は Maya バージョン差の可能性があり、動かない場合の第一容疑者。
 - 元になった単体版 `OG_Edge_Outline.py`（全ビューポート対象）も残置。本体統合版はこれをオブジェクト単位に拡張したもの。
 
