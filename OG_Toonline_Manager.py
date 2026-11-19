@@ -1567,6 +1567,42 @@ def _gapfill_of(line):
     return None
 
 
+def _resoften_all_hull_shapes():
+    """既存の全ハルライン(SCRN/FRES/EDGE 以外)の shape に polySoftEdge(a=180) を再適用。
+    紐づく GAPFILL B も同時に soft 化。v0.1.8 で create_outlines に組み込んだ
+    polySoftEdge は**生成時**にしか走らないため、v0.1.7 以前に作ったラインには適用
+    されていない。これを削除せず一発で修復する入り口。
+    実機で: `import OG_Toonline_Manager as m; m._resoften_all_hull_shapes()`"""
+    n = 0
+    for t in cmds.ls(type="transform") or []:
+        if not cmds.attributeQuery(TAG, node=t, exists=True):
+            continue
+        # SCRN / FRES / EDGE は normals に手を入れないのでスキップ
+        skip = False
+        for tag in (EDGE_TAG, FRES_TAG, SCRN_TAG):
+            if cmds.attributeQuery(tag, node=t, exists=True):
+                skip = True; break
+        if skip:
+            continue
+        for shape in (cmds.listRelatives(t, shapes=True, type="mesh", ni=True, f=True) or []):
+            try:
+                cmds.polySoftEdge(shape + ".e[*]", a=180, ch=False); n += 1
+            except Exception:
+                pass
+        gf = _gapfill_of(t)
+        if gf:
+            for bshp in (cmds.listRelatives(gf, shapes=True, type="mesh", ni=True, f=True) or []):
+                try:
+                    cmds.polySoftEdge(bshp + ".e[*]", a=180, ch=False); n += 1
+                except Exception:
+                    pass
+    try:
+        om2.MGlobal.displayInfo("[hull] re-softened {0} shape(s)".format(n))
+    except Exception:
+        pass
+    return n
+
+
 def _all_gapfills():
     """シーン内の全隙間埋めオブジェクト（GAPFILL_TAG 付き transform）。"""
     return [t for t in (cmds.ls(type="transform") or [])
