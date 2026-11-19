@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2095,6 +2095,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_ref.clicked.connect(self.refresh_tree)
         crow.addWidget(b_ref)
         lay.addLayout(crow)
+
+        # 選択ハルライン用アクション: 隙間埋め(facing 駆動・2オブジェクト・カメラ依存)の
+        # 追加/削除をトグル。ツリーで選択したハルラインだけが対象。
+        arow_hull = QtWidgets.QHBoxLayout()
+        self.btn_gapfill = QtWidgets.QPushButton("隙間埋め（選択ハルライン）")
+        self.btn_gapfill.setToolTip(
+            "ツリーで選択したハルラインに「隙間埋めオブジェクト」を追加/削除（トグル）。\n"
+            "背面法ハルがグラジング角で面から浮いて輪郭が沈む/隙間が見える問題を、\n"
+            "元メッシュ複製(背面のみ・線色)の facing 駆動スカートで塞ぐ。\n"
+            "※ カメラ依存。VP2/Hardware 2.0 バッチ対応。高密度メッシュは追従が落ちる。")
+        self.btn_gapfill.clicked.connect(self.toggle_gapfill)
+        arow_hull.addWidget(self.btn_gapfill)
+        arow_hull.addStretch(1)
+        lay.addLayout(arow_hull)
 
         # スクリーン輪郭のオプション: 内側の折れ目/溝（重なり部）用にフレネル輪郭も一緒に生成
         self.chk_scrn_fresnel = QtWidgets.QCheckBox("スクリーン輪郭に溝ライン（フレネル）も生成")
