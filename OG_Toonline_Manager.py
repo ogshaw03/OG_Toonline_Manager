@@ -218,7 +218,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.28"
+__version__ = "0.1.29"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2572,7 +2572,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
-        self.setMinimumHeight(700)   # v0.1.28: ランプ撤去で小さく収まる
+        self.setMinimumHeight(820)   # v0.1.29: 下部プロファイルが見える高さを確保
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -2941,7 +2941,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         pvl.addWidget(self.w_line)
         pvl.addWidget(self.w_group)
         pvl.addStretch(1)
-        self.w_panels.setFixedHeight(230)   # 太さ/曲率/曲率上限/曲率下限+プロファイルが収まる高さ
+        self.w_panels.setFixedHeight(340)   # v0.1.29: プロファイルランプ(90)含めて収まる高さ
         lay.addWidget(self.w_panels)
 
         self.lbl_hint = QtWidgets.QLabel("※ 値はツリーで選択したライン/グループに適用されます")
