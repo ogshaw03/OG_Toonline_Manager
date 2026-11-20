@@ -88,7 +88,13 @@ SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uni
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
 SCRN_CSET   = "toonScrnCurv"         # スクリーン輪郭の曲率倍率を格納する頂点カラーセット名
 SCRN_DEPTH_BIAS = "depthBias"        # スクリーン輪郭の重なり深度押し込み uniform 名（ビュー空間）
-_SCRN_ZBIAS = 0.02                   # その既定値（UIで調整・遠距離で重なり線が消える対策）
+_SCRN_ZBIAS = 0.0015                 # v0.1.14: NDC 単位に変更（distance-invariant clip-space Z offset）
+SCRN_BRUSH_ROUGH = "brushRoughness"  # v0.1.14 ペンシル質感: 縁のカサつき(ランダム discard)量 (0-1)
+SCRN_BRUSH_WAVE  = "brushWaviness"   # v0.1.14 ペンシル質感: 太さの長手ゆらぎ量 (0-1)
+SCRN_BRUSH_SCALE = "brushNoiseScale" # v0.1.14 ペンシル質感: ノイズ周期（画面px換算・大=細かい）
+_SCRN_BRUSH_ROUGH_DEF = 0.0          # 既定値（0=クリーン、OFF）
+_SCRN_BRUSH_WAVE_DEF  = 0.0
+_SCRN_BRUSH_SCALE_DEF = 20.0
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -112,7 +118,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -320,6 +326,33 @@ def _scrn_set_depth_bias(v):
         pass
 
 
+def _scrn_set_brush(rough=None, wave=None, scale=None):
+    """v0.1.14: 全スクリーン輪郭ラインのブラシ質感（縁カサつき/太さゆらぎ/ノイズ周期）を設定。
+    None の項目は変更しない。"""
+    global _SCRN_BRUSH_ROUGH_DEF, _SCRN_BRUSH_WAVE_DEF, _SCRN_BRUSH_SCALE_DEF
+    if rough is not None:
+        try: _SCRN_BRUSH_ROUGH_DEF = float(rough)
+        except Exception: pass
+    if wave is not None:
+        try: _SCRN_BRUSH_WAVE_DEF = float(wave)
+        except Exception: pass
+    if scale is not None:
+        try: _SCRN_BRUSH_SCALE_DEF = float(scale)
+        except Exception: pass
+    pairs = ((SCRN_BRUSH_ROUGH, _SCRN_BRUSH_ROUGH_DEF),
+             (SCRN_BRUSH_WAVE,  _SCRN_BRUSH_WAVE_DEF),
+             (SCRN_BRUSH_SCALE, _SCRN_BRUSH_SCALE_DEF))
+    for line in _all_screen_lines():
+        shd = _fresnel_shader(line)
+        if not shd: continue
+        for an, v in pairs:
+            if cmds.attributeQuery(an, node=shd, exists=True):
+                try: cmds.setAttr(shd + "." + an, v)
+                except Exception: pass
+    try: cmds.refresh()
+    except Exception: pass
+
+
 _SCRN_FX_HLSL = """// OG Toonline Manager - Geometry-shader silhouette outline (dx11Shader / HLSL5)
 // v0.1.11+ 本格派: VS でビュー空間座標・法線を計算 → GS で三角形ごとに
 // シルエット検出(頂点の facing 符号が混在する三角形だけ処理) → エッジ横断点
@@ -353,6 +386,26 @@ float3 lineColor <
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
+// v0.1.14: ペンシル風ブラシテクスチャ
+float brushRoughness <
+    string UIName = "Brush Roughness (edge noise)";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+    float UIStep = 0.01;
+> = 0.0;
+float brushWaviness <
+    string UIName = "Brush Waviness (thickness noise)";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+    float UIStep = 0.01;
+> = 0.0;
+float brushNoiseScale <
+    string UIName = "Brush Noise Scale (px freq)";
+    float UIMin = 1.0;
+    float UIMax = 100.0;
+    float UIStep = 0.5;
+> = 20.0;
+
 struct APPDATA {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
@@ -364,7 +417,18 @@ struct V2G {
     float3 VSNrm : TEXCOORD1;    // ビュー空間法線
     float  ColR  : TEXCOORD2;    // 曲率倍率(COLOR0.r)
 };
-struct G2P { float4 HPos : SV_Position; };
+struct G2P {
+    float4 HPos : SV_Position;
+    float2 UV   : TEXCOORD0;     // v0.1.14: U=長手(0-1), V=太さ方向(-1..+1)
+};
+
+// 1D ハッシュ (iq/Hugo Elias 系)
+float hash12(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return frac((p3.x + p3.y) * p3.z);
+}
 
 V2G VShader(APPDATA i)
 {
@@ -393,16 +457,25 @@ float facing_dot(float3 vspos, float3 vsnrm)
 
 // エッジ(a,b) 上で facing が符号反転する点(シルエット上)を求め、
 // その点のクリップ座標と ColR を返す。
-// v0.1.11: 小さな負のバイアス(camera 側)で quad を元メッシュよりわずか前に出し z-fight 回避。
+// v0.1.14: distance-invariant 深度バイアス。クリップ空間で cpos.z を depthBias*cpos.w だけ
+// camera 寄りに引く。NDC Z で一定量のオフセットになるので、カメラがどれだけ遠くても
+// 他オブジェクトとの重なり線が消えない。
 void edge_crossing(V2G a, V2G b, float fa, float fb,
                    out float4 cpos, out float colR)
 {
-    float t = fa / (fa - fb);                 // facing=0 となる補間係数
+    float t = fa / (fa - fb);
     float3 vp = lerp(a.VSPos, b.VSPos, t);
-    // vp.z は負(camera -Z 方向)。0.999 倍で |z| が減る = camera 寄りに
-    float4 vp4 = float4(vp.x, vp.y, vp.z * 0.999f, 1.0f);
+    float4 vp4 = float4(vp, 1.0f);
     cpos = mul(vp4, gProj);
+    cpos.z -= depthBias * cpos.w;   // 距離不変: NDC-Z を一定量 camera 側へ
     colR = lerp(a.ColR, b.ColR, t);
+}
+
+// 頂点 VSPos を投影した NDC 座標（centroid 計算用）。
+float2 vs_to_ndc(float3 vspos)
+{
+    float4 cp = mul(float4(vspos, 1.0f), gProj);
+    return cp.xy / max(abs(cp.w), 1e-6f);
 }
 
 [maxvertexcount(4)]
@@ -445,26 +518,56 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     edir /= elen;
     float2 perp = float2(-edir.y, edir.x);
 
+    // v0.1.14: perp 方向を「三角形の外側」に向ける。三角形 centroid の NDC を求め、
+    // perp が centroid から離れる向きになるよう符号を揃える。そうすると quad が
+    // メッシュ内側へ張り出さず、steep angle で「面に黒が乗る」のを防ぐ。
+    float2 c0_ndc = vs_to_ndc(tri[0].VSPos);
+    float2 c1_ndc = vs_to_ndc(tri[1].VSPos);
+    float2 c2_ndc = vs_to_ndc(tri[2].VSPos);
+    float2 tri_center = (c0_ndc + c1_ndc + c2_ndc) * (1.0f / 3.0f);
+    float2 mid = (ndc1 + ndc2) * 0.5f;
+    if (dot(perp, tri_center - mid) > 0.0f) perp = -perp;  // 外向きに反転
+
     // 距離 attenuation(clip.w ベース): 遠距離で線が緩やかに細くなる
     float scale = 500.0f;
     float atten1 = max(scale / max(scale + w1, 1.0f), 0.3f);
     float atten2 = max(scale / max(scale + w2, 1.0f), 0.3f);
 
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
-    float half_th = thickness * 0.5f;
-    float2 off1 = perp * half_th * cr1 * atten1 * px;
-    float2 off2 = perp * half_th * cr2 * atten2 * px;
 
-    // triangle strip で quad を出力: p1-off, p1+off, p2-off, p2+off
+    // v0.1.14: 太さ長手ゆらぎ (waviness)。両端点でハッシュ→線が「震える」ように太さが変わる。
+    float phase1 = hash12(ndc1 * brushNoiseScale * 100.0f);
+    float phase2 = hash12(ndc2 * brushNoiseScale * 100.0f);
+    float wav1 = 1.0f + brushWaviness * (phase1 - 0.5f) * 2.0f;
+    float wav2 = 1.0f + brushWaviness * (phase2 - 0.5f) * 2.0f;
+
+    // v0.1.14: asymmetric quad。内側 15% / 外側 85% に振り分けて、内側オーバーハング最小化
+    // （連結性のため完全に 0 にはしない。わずかに内側にもあることでシルエット交点間がつながる）。
+    float out_ratio = 0.85f;
+    float in_ratio  = 0.15f;
+    float2 off_out1 = perp * (thickness * cr1 * atten1 * wav1 * out_ratio) * px;
+    float2 off_out2 = perp * (thickness * cr2 * atten2 * wav2 * out_ratio) * px;
+    float2 off_in1  = perp * (thickness * cr1 * atten1 * wav1 * in_ratio ) * px;
+    float2 off_in2  = perp * (thickness * cr2 * atten2 * wav2 * in_ratio ) * px;
+
+    // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(-1 内側..+1 外側)
     G2P v;
-    v.HPos = float4((ndc1 - off1) * w1, p1.z, w1); stream.Append(v);
-    v.HPos = float4((ndc1 + off1) * w1, p1.z, w1); stream.Append(v);
-    v.HPos = float4((ndc2 - off2) * w2, p2.z, w2); stream.Append(v);
-    v.HPos = float4((ndc2 + off2) * w2, p2.z, w2); stream.Append(v);
+    v.HPos = float4((ndc1 - off_in1 ) * w1, p1.z, w1); v.UV = float2(0.0f, -1.0f); stream.Append(v);
+    v.HPos = float4((ndc1 + off_out1) * w1, p1.z, w1); v.UV = float2(0.0f,  1.0f); stream.Append(v);
+    v.HPos = float4((ndc2 - off_in2 ) * w2, p2.z, w2); v.UV = float2(1.0f, -1.0f); stream.Append(v);
+    v.HPos = float4((ndc2 + off_out2) * w2, p2.z, w2); v.UV = float2(1.0f,  1.0f); stream.Append(v);
 }
 
 float4 PShader(G2P i) : SV_Target
 {
+    // v0.1.14: ペンシル風縁のカサつき。
+    // |V| が 1 に近いほど線の縁 → そこでランダム discard すると毛羽立ち/鉛筆質感に。
+    if (brushRoughness > 0.001f) {
+        float edge = abs(i.UV.y);           // 0=中心, 1=縁
+        float rough = brushRoughness * edge * edge;  // 中心は残し縁ほど強く
+        float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
+        if (h < rough) discard;
+    }
     return float4(lineColor, 1.0f);
 }
 
@@ -728,6 +831,13 @@ def _build_screen_network(line, shape, color):
             cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, _SCRN_ZBIAS)
         except Exception:
             pass
+    # v0.1.14: ブラシ質感の初期値を shd へ反映。
+    for an, v in ((SCRN_BRUSH_ROUGH, _SCRN_BRUSH_ROUGH_DEF),
+                  (SCRN_BRUSH_WAVE,  _SCRN_BRUSH_WAVE_DEF),
+                  (SCRN_BRUSH_SCALE, _SCRN_BRUSH_SCALE_DEF)):
+        if cmds.attributeQuery(an, node=shd, exists=True):
+            try: cmds.setAttr(shd + "." + an, v)
+            except Exception: pass
     cmds.sets(shape, e=True, forceElement=sg)
     # ★COLOR0 → SCRN_CSET(頂点カラー) を明示バインド。dx11Shader は既定で頂点色を
     #   自動バインドしないバージョンがあり、この場合 IN.Color.r が 0 のまま届き、
@@ -2351,17 +2461,49 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
         # v0.1.9 以降は相対値(ビュー深度の N%)。0.02 で view z を 2% 奥へ押す。
         # どの距離/メッシュサイズでも同じ値で破綻しない(hlsl 側 vpos.z *= (1+depthBias))。
-        self.spn_scrn_bias.setRange(-0.5, 0.5); self.spn_scrn_bias.setDecimals(3)
-        self.spn_scrn_bias.setSingleStep(0.005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
+        self.spn_scrn_bias.setRange(-0.5, 0.5); self.spn_scrn_bias.setDecimals(4)
+        self.spn_scrn_bias.setSingleStep(0.0005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
         self.spn_scrn_bias.setToolTip(
-            "スクリーン輪郭の深度押し込み量(ビュー距離の比率・v0.1.9 以降は相対値)。\n"
-            "0.02 = カメラから見た深度の 2% 分だけ奥へ押す(=元メッシュが前に出て外周だけ残る)。\n"
-            "どの距離・どのサイズのメッシュでも同じ値で動く(距離で線が消えたりせず、\n"
-            "遠距離 z-fighting ノイズも出ない)。符号を反転すると押し出し方向が逆に。")
+            "スクリーン輪郭の NDC-Z バイアス（v0.1.14 以降は clip-space Z オフセット）。\n"
+            "0.0015 = NDC 深度を 0.15% だけ camera 側に引く。距離不変で動く：\n"
+            "遠距離でも重なり線が消えない。符号を反転すると逆に。\n"
+            "値を大きくし過ぎると他オブジェクトを貫通して黒く見える、\n"
+            "小さすぎると近距離で z-fighting する。")
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
         lay.addLayout(srow)
+
+        # v0.1.14: ブラシ質感（ペンシル風の縁カサつき・太さゆらぎ）
+        brow = QtWidgets.QHBoxLayout()
+        brow.addWidget(QtWidgets.QLabel("ブラシ:カサつき"))
+        self.spn_brush_rough = QtWidgets.QDoubleSpinBox()
+        self.spn_brush_rough.setRange(0.0, 1.0); self.spn_brush_rough.setDecimals(2)
+        self.spn_brush_rough.setSingleStep(0.05); self.spn_brush_rough.setValue(_SCRN_BRUSH_ROUGH_DEF)
+        self.spn_brush_rough.setToolTip(
+            "SCRN ラインの縁をランダムに欠けさせてペンシル風の毛羽立ちを出す。\n"
+            "0=クリーン、1=強いカサつき。線の中心は残るので視認性は保たれる。")
+        self.spn_brush_rough.valueChanged.connect(self._on_brush_changed)
+        brow.addWidget(self.spn_brush_rough)
+        brow.addWidget(QtWidgets.QLabel("ゆらぎ"))
+        self.spn_brush_wave = QtWidgets.QDoubleSpinBox()
+        self.spn_brush_wave.setRange(0.0, 1.0); self.spn_brush_wave.setDecimals(2)
+        self.spn_brush_wave.setSingleStep(0.05); self.spn_brush_wave.setValue(_SCRN_BRUSH_WAVE_DEF)
+        self.spn_brush_wave.setToolTip(
+            "SCRN ラインの太さをノイズで長手方向に揺らす（鉛筆の筆圧ゆらぎ風）。\n"
+            "0=均一、1=大きなゆらぎ。")
+        self.spn_brush_wave.valueChanged.connect(self._on_brush_changed)
+        brow.addWidget(self.spn_brush_wave)
+        brow.addWidget(QtWidgets.QLabel("周期"))
+        self.spn_brush_scale = QtWidgets.QDoubleSpinBox()
+        self.spn_brush_scale.setRange(1.0, 100.0); self.spn_brush_scale.setDecimals(1)
+        self.spn_brush_scale.setSingleStep(1.0); self.spn_brush_scale.setValue(_SCRN_BRUSH_SCALE_DEF)
+        self.spn_brush_scale.setToolTip(
+            "ノイズの周期（画面 px 換算）。大きいほど細かくザラッ、小さいほど大きなうねり。")
+        self.spn_brush_scale.valueChanged.connect(self._on_brush_changed)
+        brow.addWidget(self.spn_brush_scale)
+        brow.addStretch(1)
+        lay.addLayout(brow)
 
         # 対象グループ（生成先）
         crow2 = QtWidgets.QHBoxLayout()
@@ -2857,6 +2999,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_scrn_bias(self, *args):
         """スクリーン輪郭の重なり深度押し込み（ビュー空間）を全ラインへ反映。"""
         _scrn_set_depth_bias(self.spn_scrn_bias.value())
+
+    def _on_brush_changed(self, *args):
+        """v0.1.14: ブラシ質感（カサつき/ゆらぎ/周期）を全 SCRN ラインへ反映。"""
+        _scrn_set_brush(rough=self.spn_brush_rough.value(),
+                        wave=self.spn_brush_wave.value(),
+                        scale=self.spn_brush_scale.value())
 
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
@@ -3976,6 +4124,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.delete(k)
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
                 cmds.delete(dup, constructionHistory=True)
+
+                # v0.1.14: ハードエッジ対策。立方体のような face-split normal メッシュは
+                # 1 三角形の 3 頂点が同じ面法線を共有し、GS 内 facing が全頂点で同符号になり
+                # シルエットが取れない。a=180 で全エッジを soften → 頂点法線が平均化され、
+                # 頂点ごとに facing が変わるようになり GS が外周を検出できる。
+                try:
+                    cmds.polySoftEdge(dshape + ".e[*]", a=180, ch=False)
+                except Exception:
+                    pass
 
                 # 変形追従用に textureDeformer(offset=0)。押し出しはシェーダで行うので 0 固定。
                 td = cmds.textureDeformer(dshape, strength=0, offset=0.0, direction="Normal")
