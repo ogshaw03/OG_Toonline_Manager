@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.9"
+__version__ = "0.1.10"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -352,14 +352,24 @@ V2P VShader(APPDATA IN)
     float4 clipB = mul(vpos, gProj);
     float  bw = (abs(clipB.w) > 1e-6f) ? clipB.w : 1e-6f;
     clip.z = (clipB.z / bw) * clip.w;                     // 深度のみ差し替え（太さに影響しない）
-    // 太さ押し出し（一定px）。頂点カラー R = 曲率倍率（未設定/0 は 1.0 扱いで消えない）。
+    // 太さ押し出し（Pencil+4 風の距離 attenuation 付き）。
+    //   base: ピクセル幅の太さ(clip.w に比例した画面px幅補正)
+    //   atten: 遠距離ではメッシュ自体が小さく映るため、線が相対的に太く見えないよう
+    //          clip.w で軽くタパリング。atten = thickness_scale / (thickness_scale + clip.w)
+    //          で 1 (near) → 0.5 (clip.w = scale) → 0 の緩やかなカーブ。
+    //          thickness_scale は 100 単位(メッシュスケールと同程度) を基準。
+    //   頂点カラー R = 曲率倍率（未設定/0 は 1.0 扱いで消えない）。
     float2 sn = vn.xy;
     float  l  = length(sn);
     sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
     float w = IN.Color.r;
     if (w < 0.001f) w = 1.0f;
+    float scale = 500.0f;
+    float atten = scale / max(scale + clip.w, 1.0f);   // 1 near → ~0.5 far → ~0.1 very far
+    // 全太さが 0 まで落ちないよう最低 30% は残す
+    atten = max(atten, 0.3f);
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
-    clip.xy += sn * thickness * w * px * clip.w;
+    clip.xy += sn * thickness * w * atten * px * clip.w;
     OUT.HPos = clip;
     return OUT;
 }
@@ -2116,22 +2126,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
         lay.addWidget(self.w_global)
 
         # 生成 / 新規グループ / 再取得（上部）
+        # ★v0.1.10: UI 整理。SCRN(スクリーン輪郭)をメインに据え、hull/エッジ/GAPFILL は
+        # UI から外した(内部コード・関数は残置、再公開時は buttons を戻すだけで動く)。
         crow = QtWidgets.QHBoxLayout()
         self.btn_create = QtWidgets.QPushButton("選択メッシュに輪郭を生成")
-        self.btn_create.clicked.connect(self.create_outlines)
+        self.btn_create.setToolTip(
+            "選択メッシュにスクリーン空間輪郭(SCRN)を生成する。\n"
+            "dx11 頂点シェーダでクリップ空間に一定 px 押し出し+距離 attenuation で、\n"
+            "どの距離・どのサイズのメッシュでも安定した輪郭を描く(Pencil+4 風)。\n"
+            "※ VP2/DirectX11 前提・カメラ依存。ビューポート『テクスチャ表示 ON(ホットキー 6)』で表示。")
+        self.btn_create.clicked.connect(self.create_screen_outline)
         crow.addWidget(self.btn_create, 1)
-        self.btn_screen = QtWidgets.QPushButton("スクリーン輪郭")
-        self.btn_screen.setToolTip(
-            "選択メッシュにスクリーン空間押し出しの輪郭を生成（隙間なし・均一太さ・凸部でも細らない）。\n"
-            "dx11 頂点シェーダでクリップ空間に一定ピクセル押し出す方式。ワールド押し出しハルの"
-            "『浮き隙間』も、チューブの『継ぎ目隙間』も出ない。\n"
-            "※ VP2/DirectX11 前提・カメラ依存。ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示。")
-        self.btn_screen.clicked.connect(self.create_screen_outline)
-        crow.addWidget(self.btn_screen)
-        self.btn_edge = QtWidgets.QPushButton("選択エッジにライン")
-        self.btn_edge.setToolTip("選択したポリゴンエッジに沿ってチューブ状のラインを追加")
-        self.btn_edge.clicked.connect(self.create_edge_line)
-        crow.addWidget(self.btn_edge)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -2140,27 +2145,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow.addWidget(b_ref)
         lay.addLayout(crow)
 
-        # 選択ハルライン用アクション: 隙間埋め(facing 駆動・2オブジェクト・カメラ依存)の
-        # 追加/削除をトグル。ツリーで選択したハルラインだけが対象。
-        arow_hull = QtWidgets.QHBoxLayout()
-        self.btn_gapfill = QtWidgets.QPushButton("隙間埋め（選択ハルライン）")
-        self.btn_gapfill.setToolTip(
-            "ツリーで選択したハルラインに「隙間埋めオブジェクト」を追加/削除（トグル）。\n"
-            "背面法ハルがグラジング角で面から浮いて輪郭が沈む/隙間が見える問題を、\n"
-            "元メッシュ複製(背面のみ・線色)の facing 駆動スカートで塞ぐ。\n"
-            "※ カメラ依存。VP2/Hardware 2.0 バッチ対応。高密度メッシュは追従が落ちる。")
-        self.btn_gapfill.clicked.connect(self.toggle_gapfill)
-        arow_hull.addWidget(self.btn_gapfill)
-        arow_hull.addStretch(1)
-        lay.addLayout(arow_hull)
-
-        # スクリーン輪郭のオプション: 内側の折れ目/溝（重なり部）用にフレネル輪郭も一緒に生成
-        self.chk_scrn_fresnel = QtWidgets.QCheckBox("スクリーン輪郭に溝ライン（フレネル）も生成")
-        self.chk_scrn_fresnel.setChecked(False)
+        # 内側の折れ目/溝(フレネル)も一緒に生成(既定 ON)。
+        self.chk_scrn_fresnel = QtWidgets.QCheckBox("内側の折れ目/溝(フレネル)も生成")
+        self.chk_scrn_fresnel.setChecked(True)
         self.chk_scrn_fresnel.setToolTip(
-            "ON にすると「スクリーン輪郭」生成時に、同じメッシュへフレネル輪郭も一緒に作ります。\n"
-            "スクリーン輪郭＝外周、フレネル＝カメラから見て寝た内側の折れ目/溝（重なり部）に線。\n"
-            "※ フレネルも VP2/DirectX11・テクスチャ表示 ON（6）で表示。")
+            "ON: 輪郭生成時に同じメッシュへフレネル輪郭も一緒に作る。\n"
+            "外周(SCRN)+ 内側の折れ目/溝(フレネル)で完全な toon ライン一式になる。\n"
+            "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
         lay.addWidget(self.chk_scrn_fresnel)
 
         # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
@@ -2301,79 +2292,43 @@ class ToonOutlineUI(QtWidgets.QDialog):
         clrow.addWidget(b_scol)
         lay.addLayout(clrow)
 
-        self.chk_hide_handles = QtWidgets.QCheckBox("デフォーマハンドルをアウトライナーから隠す")
-        self.chk_hide_handles.setChecked(True)
-        self.chk_hide_handles.setToolTip("OFF にするとハンドルがアウトライナーに表示されます（削除は不可）")
-        self.chk_hide_handles.toggled.connect(self._on_toggle_hide_handles)
-        lay.addWidget(self.chk_hide_handles)
-
-        self.chk_lock_select = QtWidgets.QCheckBox("ラインをビューポートで選択不可にする")
-        self.chk_lock_select.setChecked(True)
-        self.chk_lock_select.setToolTip("ON: ラインはビューポートで選択できません（表示・レンダーは有効）。"
-                                        "OFF にすると通常通り選択できます")
-        self.chk_lock_select.toggled.connect(self._on_toggle_lock_select)
-        lay.addWidget(self.chk_lock_select)
-
-        self.chk_occlude = QtWidgets.QCheckBox("ハルの隠れた面を元メッシュに寄せる（カメラ依存・検証中）")
-        self.chk_occlude.setChecked(False)
-        self.chk_occlude.setToolTip(
-            "ON: カメラから見て元メッシュに隠れたハルの裏面頂点を元メッシュ内側へ寄せ、"
-            "オフセットの隙間が横から見えるのを抑えます。シルエット部の太さは保たれます。\n"
-            "※ scriptJob/頂点レイのため重く、ビューポート専用（バッチレンダー不可）。高密度メッシュ注意。")
-        self.chk_occlude.toggled.connect(self._on_toggle_occlude)
-        lay.addWidget(self.chk_occlude)
-
-        # ---- 画像空間エッジ検出（オブジェクト単位・重なり線を上に描く／実験・VP2）----
-        self.chk_edge = QtWidgets.QCheckBox("重なり線をメッシュの上に描く（画像空間エッジ・実験）")
-        self.chk_edge.setChecked(False)
-        self.chk_edge.setToolTip(
-            "対象メッシュを選択してから ON。深度の段差（シルエット/自己重なり）を後処理で検出し、\n"
-            "対象メッシュの上に均一線を描く（手前メッシュに隠れず・ムラなし・オブジェクト単位）。\n"
-            "※ VP2/DirectX11 前提・ビューポート専用。他オブジェクトの前後関係より上に出ることがある。")
-        self.chk_edge.toggled.connect(self._on_toggle_edge)
-        lay.addWidget(self.chk_edge)
-        erow = QtWidgets.QHBoxLayout()
-        erow.addWidget(QtWidgets.QLabel("しきい値"))
+        # ★v0.1.10 以降 UI 整理: hull/GAPFILL/画像空間エッジ関連のオプション群は
+        #  ToonOutlineUI から非表示(コード・関数自体は残置、_edge_*/_on_toggle_edge/
+        #  _on_toggle_occlude/_on_toggle_hide_handles/_on_toggle_lock_select/
+        #  chk_edge/chk_edge_debug/spn_edge_thr/spn_edge_w は後方互換で属性だけ生成)。
+        # 既定値を適用する最低限のステートを属性として保持する:
+        self.chk_hide_handles = QtWidgets.QCheckBox(); self.chk_hide_handles.setChecked(True)
+        self.chk_hide_handles.hide()
+        self.chk_lock_select = QtWidgets.QCheckBox(); self.chk_lock_select.setChecked(True)
+        self.chk_lock_select.hide()
+        self.chk_occlude = QtWidgets.QCheckBox(); self.chk_occlude.setChecked(False)
+        self.chk_occlude.hide()
+        self.chk_edge = QtWidgets.QCheckBox(); self.chk_edge.setChecked(False)
+        self.chk_edge.hide()
+        self.chk_edge_debug = QtWidgets.QCheckBox(); self.chk_edge_debug.setChecked(False)
+        self.chk_edge_debug.hide()
         self.spn_edge_thr = QtWidgets.QDoubleSpinBox()
-        # 単位: ビュー空間深度の相対差 |Δz|/z（無次元）。距離に依存しない。
-        self.spn_edge_thr.setRange(0.001, 0.5); self.spn_edge_thr.setDecimals(3)
-        self.spn_edge_thr.setSingleStep(0.005); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
-        self.spn_edge_thr.setToolTip(
-            "深度差(相対 |Δz|/z)の検出しきい値。小さいほど細かい段差まで線に（増えすぎ注意）。\n"
-            "距離に依存しない相対値なので、カメラを寄せ引きしても同じ設定で使える。")
-        self.spn_edge_thr.valueChanged.connect(self._on_edge_param)
-        erow.addWidget(self.spn_edge_thr)
-        erow.addWidget(QtWidgets.QLabel("太さ(px)"))
+        self.spn_edge_thr.setRange(0.001, 0.5); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
+        self.spn_edge_thr.hide()
         self.spn_edge_w = QtWidgets.QDoubleSpinBox()
-        self.spn_edge_w.setRange(0.5, 8.0); self.spn_edge_w.setDecimals(1)
-        self.spn_edge_w.setSingleStep(0.5); self.spn_edge_w.setValue(_EDGE_PARAMS["thickness"])
-        self.spn_edge_w.setToolTip("線の太さ（サンプル間隔）")
-        self.spn_edge_w.valueChanged.connect(self._on_edge_param)
-        erow.addWidget(self.spn_edge_w)
-        # 切り分け用: 線形化深度をそのまま表示（線描画をバイパス）
-        self.chk_edge_debug = QtWidgets.QCheckBox("深度可視化")
-        self.chk_edge_debug.setToolTip(
-            "ON: 対象メッシュだけの線形化深度をグレースケール表示（切り分け用）。\n"
-            "対象が真っ黒/真っ白なら near/far やターゲット解像度の問題。")
-        self.chk_edge_debug.toggled.connect(self._on_edge_param)
-        erow.addWidget(self.chk_edge_debug)
-        lay.addLayout(erow)
+        self.spn_edge_w.setRange(0.5, 8.0); self.spn_edge_w.setValue(_EDGE_PARAMS["thickness"])
+        self.spn_edge_w.hide()
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
 
-        # ---- フッター: バージョン表示 + GitHub から更新（ホットアップデート）----
+        # ---- フッター: バージョン表示 + バージョン管理(リリース一覧から切替) ----
         frow = QtWidgets.QHBoxLayout()
         self.lbl_version = QtWidgets.QLabel("OG_Toonline_Manager  v{0}".format(__version__))
         self.lbl_version.setStyleSheet("color:#888;")
         frow.addWidget(self.lbl_version, 1)
-        self.btn_update = QtWidgets.QPushButton("GitHub から更新")
+        self.btn_update = QtWidgets.QPushButton("バージョン選択")
         self.btn_update.setToolTip(
-            "GitHub の最新版を取得してこのツールを更新します（Maya 再起動不要）。\n"
-            "取得元ブランチ: {0}\n"
-            "※ ネットワーク接続と Maya 2022+（Python3）が必要。".format(_GITHUB_BRANCH))
-        self.btn_update.clicked.connect(update_from_github)
+            "GitHub の Releases から任意のバージョンをインストール。\n"
+            "開発ブランチ(dev)の先端も選択可。Maya 再起動不要。\n"
+            "※ ネットワーク接続と Maya 2022+(Python3) が必要。")
+        self.btn_update.clicked.connect(open_version_dialog)
         frow.addWidget(self.btn_update)
         lay.addLayout(frow)
 
@@ -4268,9 +4223,164 @@ def _resolve_latest_sha():
         return _GITHUB_BRANCH
 
 
+def _fetch_releases():
+    """GitHub Releases API を叩いてリリース一覧を取得。
+    返り値: [{"tag","name","sha","body","prerelease","published_at","is_dev"}, ...]。
+    先頭に「開発ブランチ(dev)最新」仮想項目を1つ付ける(_GITHUB_BRANCH の HEAD)。
+    失敗したら最低限 dev 項目だけ入れて返す。"""
+    import json, random, time, urllib.request
+    out = []
+    # 1) dev ブランチ HEAD を仮想リリースとして追加
+    dev_sha = _resolve_latest_sha()
+    out.append({
+        "tag": "dev",
+        "name": "開発ブランチ最新 ({0})".format(_GITHUB_BRANCH),
+        "sha": dev_sha,
+        "body": "ブランチ {0} の先端commit。チームメンバー向けの安定版ではない。".format(_GITHUB_BRANCH),
+        "prerelease": True, "published_at": "", "is_dev": True,
+    })
+    # 2) リリース一覧(published のみ)
+    try:
+        salt = "{0:.6f}_{1}".format(time.time(), random.randint(0, 2 ** 32))
+        req = urllib.request.Request(
+            "{0}/releases?per_page=50&_={1}".format(_GITHUB_API, salt),
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Cache-Control": "no-cache",
+                "User-Agent": "{0}-updater/{1}".format(_PACKAGE, salt),
+            })
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read().decode("utf-8"))
+        for r in data:
+            if r.get("draft"):
+                continue
+            tag = r.get("tag_name") or ""
+            if not tag:
+                continue
+            # tag の SHA を得るには別クエリ必要だが、raw URL には tag 名を直接使える
+            # ので sha フィールドには tag をそのまま入れる(raw.githubusercontent は
+            # ref として tag を解決してくれる)。
+            out.append({
+                "tag": tag,
+                "name": r.get("name") or tag,
+                "sha": tag,
+                "body": r.get("body") or "",
+                "prerelease": bool(r.get("prerelease")),
+                "published_at": r.get("published_at") or "",
+                "is_dev": False,
+            })
+    except Exception as exc:
+        print("[{0}] fetch releases failed: {1}".format(_PACKAGE, exc))
+    return out
+
+
+class _VersionDialog(QtWidgets.QDialog):
+    """GitHub Releases を一覧表示し、任意のバージョンをインストールするダイアログ。"""
+    def __init__(self, parent=None):
+        super(_VersionDialog, self).__init__(parent)
+        self.setWindowTitle("バージョン選択 — OG_Toonline_Manager")
+        self.setMinimumSize(640, 460)
+        self.selected_sha = None
+        self.selected_tag = None
+
+        lay = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "現在のバージョン: v{0}\n"
+            "GitHub Releases からインストールするバージョンを選んでください。\n"
+            "'開発ブランチ最新' は dev の HEAD (不安定の可能性あり)。"
+            .format(__version__))
+        info.setStyleSheet("color:#888;")
+        lay.addWidget(info)
+
+        self.list = QtWidgets.QListWidget()
+        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list.itemSelectionChanged.connect(self._on_sel)
+        lay.addWidget(self.list, 1)
+
+        self.body = QtWidgets.QTextEdit()
+        self.body.setReadOnly(True)
+        self.body.setMaximumHeight(140)
+        lay.addWidget(self.body)
+
+        brow = QtWidgets.QHBoxLayout()
+        self.btn_refresh = QtWidgets.QPushButton("再取得")
+        self.btn_refresh.clicked.connect(self._reload)
+        brow.addWidget(self.btn_refresh)
+        brow.addStretch(1)
+        self.btn_cancel = QtWidgets.QPushButton("キャンセル")
+        self.btn_cancel.clicked.connect(self.reject)
+        brow.addWidget(self.btn_cancel)
+        self.btn_install = QtWidgets.QPushButton("この版をインストール")
+        self.btn_install.setEnabled(False)
+        self.btn_install.clicked.connect(self._accept)
+        brow.addWidget(self.btn_install)
+        lay.addLayout(brow)
+
+        self._releases = []
+        self._reload()
+
+    def _reload(self):
+        self.list.clear()
+        self.body.setPlainText("取得中...")
+        QtWidgets.QApplication.processEvents()
+        try:
+            self._releases = _fetch_releases()
+        except Exception as e:
+            self._releases = []
+            self.body.setPlainText("取得失敗: {0}".format(e))
+            return
+        for r in self._releases:
+            label = r["name"]
+            if r["is_dev"]:
+                label = "[dev] " + label
+            elif r["prerelease"]:
+                label = "[pre] " + label
+            if r.get("published_at"):
+                label += "    " + r["published_at"][:10]
+            label += "    (ref: {0})".format(r["sha"][:8] if r["is_dev"] else r["tag"])
+            self.list.addItem(label)
+        if self._releases:
+            self.list.setCurrentRow(0)
+        self.body.setPlainText("" if self._releases else "リリースが取得できませんでした。")
+
+    def _on_sel(self):
+        row = self.list.currentRow()
+        if row < 0 or row >= len(self._releases):
+            self.btn_install.setEnabled(False)
+            self.body.setPlainText("")
+            return
+        r = self._releases[row]
+        self.selected_sha = r["sha"]
+        self.selected_tag = r["tag"]
+        self.btn_install.setEnabled(True)
+        self.body.setPlainText(r.get("body") or "(リリースノートなし)")
+
+    def _accept(self):
+        self.accept()
+
+
+def open_version_dialog(*_args):
+    """UI ボタンのコールバック: バージョン選択ダイアログを表示 → 選択バージョンをインストール。"""
+    try:
+        parent = None
+        for w in QtWidgets.QApplication.topLevelWidgets():
+            if w.objectName() == WINDOW_OBJ:
+                parent = w; break
+        dlg = _VersionDialog(parent=parent)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        sha = dlg.selected_sha or _GITHUB_BRANCH
+        tag = dlg.selected_tag or ""
+    except Exception as e:
+        try: cmds.confirmDialog(title="バージョン選択失敗", message=str(e), button=["OK"])
+        except Exception: pass
+        return
+    # 実行は次の Maya idle に defer (ウィンドウ破棄→install→再オープン)
+    cmds.evalDeferred(lambda: _run_update(sha_override=sha, tag_label=tag), lowestPriority=True)
+
+
 def update_from_github(*_args):
-    """UI ボタンのコールバック。即 return し、実処理は次の Maya idle で走らせる
-    （このコールバックをホストするウィンドウを、コールバック実行中に壊さないため）。"""
+    """後方互換の入り口: 開発ブランチ最新をそのまま適用(旧 UI/シェルフボタン用)。"""
     cmds.evalDeferred(_run_update, lowestPriority=True)
 
 
@@ -4292,14 +4402,24 @@ def _close_tool_windows():
         pass
 
 
-def _run_update():
-    """SHA-pinned でインストーラを取得 → 自ウィンドウを閉じて exec → 再オープンを defer。"""
+def _run_update(sha_override=None, tag_label=""):
+    """SHA/tag-pinned でインストーラを取得 → 自ウィンドウを閉じて exec → 再オープンを defer。
+    sha_override が指定されれば tag(リリース)またはブランチ名/SHA を直接使う。
+    OG_TOONLINE_MANAGER_REF 環境変数経由で install.py にも伝播する。"""
+    import os
     import sys
     import traceback
     import urllib.request
-    sha = _resolve_latest_sha()
+    sha = sha_override if sha_override else _resolve_latest_sha()
+    # install.py 側に ref を env var で渡す(リリース tag の場合もモジュール本体の
+    # 取得先が揃うようにする)
+    try:
+        os.environ["OG_TOONLINE_MANAGER_REF"] = str(sha)
+    except Exception:
+        pass
     url = "{0}/{1}/{2}".format(_GITHUB_RAW_BASE, sha, _INSTALLER_FILE)
-    print("[{0}] update: fetching {1}".format(_PACKAGE, url))
+    label = tag_label or sha
+    print("[{0}] update: fetching {1} ({2})".format(_PACKAGE, url, label))
     try:
         req = urllib.request.Request(url, headers={
             "Cache-Control": "no-cache",

@@ -88,11 +88,22 @@ def _atomic_write_bytes(target: str, data: bytes) -> None:
 
 def _resolve_latest_sha() -> str:
     """SHA-pinned raw URLs are the only reliable cache-buster for
-    raw.githubusercontent.com — its CDN caches by path only."""
+    raw.githubusercontent.com — its CDN caches by path only.
+
+    環境変数 OG_TOONLINE_MANAGER_REF が設定されていれば、その値(tag/SHA/branch)を
+    そのまま使う。本体 UI の「バージョン選択」から呼ばれた時はこの経路で任意の
+    リリース tag を受け取る。設定されていなければ dev ブランチ最新を取る(従来挙動)。
+    """
     import json
+    import os
     import random
     import time
     from urllib.request import Request, urlopen
+
+    ref_override = os.environ.get("OG_TOONLINE_MANAGER_REF", "").strip()
+    if ref_override:
+        print(f"[{_MODULE}] using ref override from env: {ref_override}")
+        return ref_override
 
     salt = f"{time.time():.6f}_{random.randint(0, 2 ** 32)}"
     req = Request(f"{_GITHUB_API}/branches/{_GITHUB_BRANCH}?_={salt}",
