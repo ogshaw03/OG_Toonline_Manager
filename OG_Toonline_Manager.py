@@ -224,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.33"
+__version__ = "0.1.34"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2713,6 +2713,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sld.setRange(smin, smax); sld.setValue(sval)
         spn = QtWidgets.QDoubleSpinBox()
         spn.setDecimals(dec); spn.setRange(rmin, rmax); spn.setSingleStep(step); spn.setValue(rval)
+        # v0.1.34: 330px ドック時にスライダーが伸びて数値欄が潰れ、
+        # 「開いた直後に数字が見えない」問題が出ていた。固定幅で確実に桁が出るようにする。
+        spn.setFixedWidth(64)
         if tip:
             spn.setToolTip(tip)
         sld.valueChanged.connect(on_slider)
