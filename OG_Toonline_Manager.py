@@ -137,9 +137,31 @@ _PRIMARY_BTN_CSS = (
 )
 
 # ダークグレー背景を Dialog に当てるための QSS（objectName=WINDOW_OBJ に一致）
+# v0.1.22: QSlider の視認性を確保（ダーク背景で groove/handle が消えていたため）。
 _DIALOG_BG_CSS = (
     "QDialog#OG_Toonline_ManagerWin { background-color: " + _WINDOW_BG + "; }"
     "QDialog#OG_Toonline_ManagerWin QLabel { color: " + _WINDOW_FG + "; background: transparent; }"
+    # QSlider 水平: groove はしっかりした帯、handle は暖色イエローの丸ノブ
+    "QDialog#OG_Toonline_ManagerWin QSlider::groove:horizontal {"
+    " border: 1px solid #1a1a1a; height: 4px;"
+    " background: #4a4a4a; border-radius: 2px; margin: 0;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QSlider::sub-page:horizontal {"
+    " background: #c9a848; border-radius: 2px;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QSlider::add-page:horizontal {"
+    " background: #3a3a3a; border-radius: 2px;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QSlider::handle:horizontal {"
+    " background: #e0bf65; border: 1px solid #333; width: 12px; height: 12px;"
+    " margin: -5px 0; border-radius: 6px;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QSlider::handle:horizontal:hover {"
+    " background: #ffd978;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QSlider::handle:horizontal:pressed {"
+    " background: #a88a35;"
+    "}"
 )
 
 # 左上タイトルラベル QSS + ヘッダーバージョン + ⋮メニューボタン
@@ -172,7 +194,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.21"
+__version__ = "0.1.22"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
