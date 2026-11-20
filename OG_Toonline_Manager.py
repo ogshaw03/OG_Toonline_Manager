@@ -97,7 +97,7 @@ SCRN_THICK  = "thickness"            # dx11Shader 上の太さ(ピクセル) uni
 SCRN_SCALE  = 6.0                    # UI 太さ → スクリーン押し出しピクセル数への係数
 SCRN_CSET   = "toonScrnCurv"         # スクリーン輪郭の曲率倍率を格納する頂点カラーセット名
 SCRN_DEPTH_BIAS = "depthBias"        # スクリーン輪郭の重なり深度押し込み uniform 名（ビュー空間）
-_SCRN_ZBIAS = 0.0015                 # v0.1.14: NDC 単位に変更（distance-invariant clip-space Z offset）
+_SCRN_ZBIAS = 0.0                    # v0.1.30: 既定 0（ユーザー要望・重なり線が必要なときだけ上げる）
 SCRN_BRUSH_ROUGH = "brushRoughness"  # v0.1.14 ペンシル質感: 縁のカサつき(ランダム discard)量 (0-1)
 SCRN_BRUSH_WAVE  = "brushWaviness"   # v0.1.14 ペンシル質感: 太さの長手ゆらぎ量 (0-1)
 SCRN_BRUSH_SCALE = "brushNoiseScale" # v0.1.14 ペンシル質感: ノイズ周期（画面px換算・大=細かい）
@@ -218,7 +218,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.29"
+__version__ = "0.1.30"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2414,6 +2414,16 @@ def _type_dot_icon(rgb):
     return icon
 
 
+# v0.1.30: スピン/スライダーでマウスホイールによる値変更を抑止。
+# パネルスクロール中の誤操作を防ぐ (UI_GUIDELINES §3)。
+class _NoWheelFilter(QtCore.QObject):
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Wheel:
+            ev.ignore()
+            return True
+        return False
+
+
 class _RampWidget(QtWidgets.QWidget):
     """長手方向の太さプロファイルを編集するカーブ（ランプ）ウィジェット。
     左クリック=点の追加/ドラッグ、右クリック=点の削除。y は太さ倍率(0〜2、基準1)。"""
@@ -2569,7 +2579,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self.setStyleSheet(_DIALOG_BG_CSS + _TITLE_CSS)
         except Exception:
             pass
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(340)   # v0.1.30: UI_GUIDELINES §1 - ドッキング幅 ~330px
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
         self.setMinimumHeight(820)   # v0.1.29: 下部プロファイルが見える高さを確保
@@ -2584,6 +2594,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._occ_scheduled = False    # 次イベントループでの再計算予約済みフラグ
         self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
         self._build()
+        # v0.1.30: 全スピン/スライダーでホイール値変更を抑止（UI_GUIDELINES §3）
+        self._no_wheel = _NoWheelFilter(self)
+        for w in self.findChildren(QtWidgets.QAbstractSpinBox):
+            w.installEventFilter(self._no_wheel)
+            w.setFocusPolicy(QtCore.Qt.StrongFocus)
+        for w in self.findChildren(QtWidgets.QSlider):
+            w.installEventFilter(self._no_wheel)
         self.refresh_tree()
         self._update_panels()      # 初期は選択無し → ライン/グループパネル非表示
         self._set_mult_widgets()
@@ -2705,22 +2722,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_create.clicked.connect(self.create_screen_outline)
         self.btn_create.setStyleSheet(_PRIMARY_BTN_CSS)
         crow.addWidget(self.btn_create, 1)
-        # v0.1.18: 選択エッジにチューブ状ラインを出すボタンを復活（内部実装 create_edge_line は残っていた）。
-        b_edge = QtWidgets.QPushButton("選択エッジにライン")
-        b_edge.setToolTip(
-            "選択したポリゴンエッジに沿ってチューブ状のラインを 1 本追加する。\n"
-            "polyToCurve + 円プロファイル extrude + nurbsToPoly。\n"
-            "太さ/曲率起伏/末端細り/プロファイルで調整可能。\n"
-            "※ 非分岐な連続エッジ列を想定（分岐ありはクリース線のように自動 chain 分割されません）。")
-        b_edge.clicked.connect(self.create_edge_line)
-        crow.addWidget(b_edge)
-        b_grp = QtWidgets.QPushButton("新規グループ")
-        b_grp.clicked.connect(self.new_group)
-        crow.addWidget(b_grp)
-        b_ref = QtWidgets.QPushButton("再取得")
-        b_ref.clicked.connect(self.refresh_tree)
-        crow.addWidget(b_ref)
         lay.addLayout(crow)
+        # v0.1.30: 補助ボタンは 2 段目に（UI_GUIDELINES §1 - 1 行は 2〜3 項目まで）。
+        crow2 = QtWidgets.QHBoxLayout()
+        b_edge = QtWidgets.QPushButton("選んだエッジに線")
+        b_edge.setToolTip(
+            "選択したポリゴンエッジに沿って 1 本の線を追加。\n"
+            "太さ/曲率/プロファイルは、作成後にツリーで選んで下のパネルで調整。")
+        b_edge.clicked.connect(self.create_edge_line)
+        crow2.addWidget(b_edge)
+        b_grp = QtWidgets.QPushButton("新しいグループ")
+        b_grp.setToolTip("線をまとめるためのグループを作る。")
+        b_grp.clicked.connect(self.new_group)
+        crow2.addWidget(b_grp)
+        b_ref = QtWidgets.QPushButton("一覧更新")
+        b_ref.setToolTip("ツリーの内容をシーンから再読み込みする。")
+        b_ref.clicked.connect(self.refresh_tree)
+        crow2.addWidget(b_ref)
+        lay.addLayout(crow2)
 
         # v0.1.25: タイトルは短く、構造だけで「新規」「ライブ」を分離。
         # ---- 新規作成時のオプション ----
@@ -2731,14 +2750,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         glay.setContentsMargins(8, 10, 8, 6); glay.setSpacing(4)
 
         # フレネル生成チェック
-        self.chk_scrn_fresnel = QtWidgets.QCheckBox("フレネル線も生成（滑らかな凹み用）")
-        self.chk_scrn_fresnel.setChecked(True)
+        self.chk_scrn_fresnel = QtWidgets.QCheckBox("谷の線も出す（フレネル・滑らかな凹み用）")
+        self.chk_scrn_fresnel.setChecked(False)   # v0.1.30: 既定 OFF（必要なときだけ）
         glay.addWidget(self.chk_scrn_fresnel)
 
         # ---- クリース関連（QFrame ネスト撤去して layout を直に）----
         crease_row = QtWidgets.QHBoxLayout()
-        self.chk_scrn_crease = QtWidgets.QCheckBox("クリース線も生成（硬い折り目）")
-        self.chk_scrn_crease.setChecked(True)
+        self.chk_scrn_crease = QtWidgets.QCheckBox("折り目の線も出す（クリース・硬いエッジ）")
+        self.chk_scrn_crease.setChecked(False)   # v0.1.30: 既定 OFF（必要なときだけ）
         crease_row.addWidget(self.chk_scrn_crease)
         crease_row.addWidget(QtWidgets.QLabel("角度"))
         self.spn_crease_angle = QtWidgets.QDoubleSpinBox()
@@ -2770,7 +2789,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
         # フレネル感度（既存全フレネル線に live で乗算）
         fs_row = QtWidgets.QHBoxLayout()
-        fs_row.addWidget(QtWidgets.QLabel("フレネル感度"))
+        fs_row.addWidget(QtWidgets.QLabel("谷の線の広さ"))
         self.spn_fres_sens = QtWidgets.QDoubleSpinBox()
         self.spn_fres_sens.setRange(0.0, 10.0)
         self.spn_fres_sens.setDecimals(2)
@@ -2778,26 +2797,26 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_fres_sens.setValue(1.0)
         self.spn_fres_sens.setFixedWidth(80)
         self.spn_fres_sens.setToolTip(
-            "フレネル感度（globalCtrl.fresSens）。見た目の太さは変えずに「どこまで内側\n"
-            "（寝た面）まで検出するか」だけ調整する倍率。全フレネル線に効く。\n"
-            "1.0 = 既定 / 0.5 = シルエット直近だけ / 2.0 = 深い谷まで")
+            "谷っぽい凹みに出る線（フレネル線）の広さ。\n"
+            "線の太さは変えずに「どこまで奥まで線を出すか」を調整。\n"
+            "0.0 = 線なし / 0.5 = フチ際だけ / 1.0 = 既定 / 2.0 = 深い谷まで\n"
+            "全フレネル線に同時に効く。")
         self.spn_fres_sens.valueChanged.connect(self._on_fres_sens)
         fs_row.addWidget(self.spn_fres_sens)
         fs_row.addStretch(1)
         llay.addLayout(fs_row)
 
-        # 重なり深度（SCRN）
+        # 重なり線の強さ（元 SCRN の depthBias）
         srow = QtWidgets.QHBoxLayout()
-        srow.addWidget(QtWidgets.QLabel("重なり深度(スクリーン)"))
+        srow.addWidget(QtWidgets.QLabel("重なり線の強さ"))
         self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
         self.spn_scrn_bias.setRange(-0.5, 0.5); self.spn_scrn_bias.setDecimals(4)
         self.spn_scrn_bias.setSingleStep(0.0005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
         self.spn_scrn_bias.setToolTip(
-            "スクリーン輪郭の NDC-Z バイアス（v0.1.14 以降は clip-space Z オフセット）。\n"
-            "0.0015 = NDC 深度を 0.15% だけ camera 側に引く。距離不変で動く：\n"
-            "遠距離でも重なり線が消えない。符号を反転すると逆に。\n"
-            "値を大きくし過ぎると他オブジェクトを貫通して黒く見える、\n"
-            "小さすぎると近距離で z-fighting する。")
+            "物が重なった所に輪郭線を出すかどうか。既定 0 = 出さない。\n"
+            "0.0 = 自然な遮蔽（手前が奥を隠す）\n"
+            "0.001〜0.005 = 遠くても重なり線が見える\n"
+            "大きすぎると他のメッシュに線が貫通して見える。")
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
@@ -2848,13 +2867,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
         lay.addWidget(gb_live)
 
-        # 対象グループ（生成先）
-        crow2 = QtWidgets.QHBoxLayout()
-        crow2.addWidget(QtWidgets.QLabel("対象グループ"))
+        # v0.1.30: 新しく作る線の入れ先グループ（複数グループがある時のみ意味がある）
+        gcrow = QtWidgets.QHBoxLayout()
+        gcrow.addWidget(QtWidgets.QLabel("新しい線の入れ先"))
         self.group_combo = QtWidgets.QComboBox()
         self.group_combo.setMinimumWidth(110)
-        crow2.addWidget(self.group_combo, 1)
-        lay.addLayout(crow2)
+        self.group_combo.setToolTip(
+            "次に作る線をどのグループに入れるかを選ぶ。\n"
+            "グループが 1 つだけならいじらなくてよい（既定で OK）。\n"
+            "※ クリース線は常に専用の『クリース』グループに入ります。")
+        self.group_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.group_combo.setMinimumContentsLength(6)
+        gcrow.addWidget(self.group_combo, 1)
+        lay.addLayout(gcrow)
 
         # ライン／グループ ツリー（チェック=表示、色列=個別カラー、D&Dでグループ移動）
         self.tree = _OutlineTree(self)
