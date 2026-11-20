@@ -73,6 +73,9 @@ CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
 FRES_SENS_ATTR = "fresSens"          # 全体コントローラーのフレネル感度アトリビュート（全フレネル線の maxWidthPx 倍率）
+DIST_ATTEN_STRENGTH = "distAtten"    # v0.1.32: 全体コントローラーの遠景減衰強度アトリビュート（0=無効, 1=最大）
+CTRL_DISTATTEN = "camDistAtten"      # v0.1.32: 各ラインの距離減衰倍率（0..1, 1=full）
+DIST_ATTEN_REF = 100.0               # 減衰の基準距離（world units）
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
 CREASE_TAG  = "isToonCreaseLine"      # v0.1.24: クリース自動生成ラインの識別タグ（EDGE_TAG との並行指標）
 CREASES_GROUP_NAME = "__Creases__"    # v0.1.24: クリース線をまとめる専用サブグループ名
@@ -221,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.31"
+__version__ = "0.1.32"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -1304,6 +1307,13 @@ def _ensure_global_ctrl():
             cmds.addAttr(gc, ln=FRES_SENS_ATTR, at="double", dv=1.0, min=0.0, keyable=True)
         except Exception:
             pass
+    # v0.1.32: 遠景で細くする（0=無効, 1=強）
+    if not cmds.attributeQuery(DIST_ATTEN_STRENGTH, node=gc, exists=True):
+        try:
+            cmds.addAttr(gc, ln=DIST_ATTEN_STRENGTH, at="double", dv=0.0,
+                         min=0.0, max=1.0, keyable=True)
+        except Exception:
+            pass
     _set_outliner_color(gc, COL_GLOBAL)
     _lock_trs(gc)
     return gc
@@ -1678,7 +1688,18 @@ def _ensure_thickness_chain(line):
             cmds.setAttr(mS + ".input2", SCRN_SCALE)
         except Exception:
             pass
-        _connect(mS + ".output", target)
+        # v0.1.32: 距離減衰 (ctrl.camDistAtten を乗算) を末尾に挿入。
+        if not cmds.attributeQuery(CTRL_DISTATTEN, node=ctrl, exists=True):
+            try:
+                cmds.addAttr(ctrl, ln=CTRL_DISTATTEN, at="double", dv=1.0, min=0.0, keyable=True)
+            except Exception:
+                pass
+        mD = base + "_scrnDist"
+        if not cmds.objExists(mD):
+            mD = cmds.createNode("multDoubleLinear", name=mD)
+        _connect(mS + ".output", mD + ".input1")
+        _connect(ctrl + "." + CTRL_DISTATTEN, mD + ".input2")
+        _connect(mD + ".output", target)
     else:
         # hull: 重なりマスクがある場合は、マスクが覆う inflate 分だけ offset を上乗せして
         # 見える線幅（= mB.output = 設定太さ）を保つ。offset = mB.output * (1 + MASK_INFLATE_FRAC)。
@@ -2856,6 +2877,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         brow.addStretch(1)
         llay.addLayout(brow)
 
+        # v0.1.32: 遠景で細くする（距離減衰・SCRN のみ）
+        dist_row = QtWidgets.QHBoxLayout()
+        dist_row.addWidget(QtWidgets.QLabel("遠景で細くする"))
+        self.spn_dist_atten = QtWidgets.QDoubleSpinBox()
+        self.spn_dist_atten.setRange(0.0, 1.0)
+        self.spn_dist_atten.setDecimals(2)
+        self.spn_dist_atten.setSingleStep(0.1)
+        self.spn_dist_atten.setValue(0.0)
+        self.spn_dist_atten.setFixedWidth(80)
+        self.spn_dist_atten.setToolTip(
+            "カメラから遠い輪郭線を細くする度合い（SCRN 輪郭線のみ）。\n"
+            "0 = 全て同じ太さ / 0.5 = 中程度 / 1.0 = 遠景で大きく細る\n"
+            "カメラを動かすとリアルタイムで反映。")
+        self.spn_dist_atten.valueChanged.connect(self._on_dist_atten_changed)
+        dist_row.addWidget(self.spn_dist_atten)
+        dist_row.addStretch(1)
+        llay.addLayout(dist_row)
+
         # v0.1.26: ライン単体表示モード（メッシュを useBackground で透明に・奥側線を隠蔽）
         self.chk_line_only = QtWidgets.QCheckBox(
             "ライン単体表示（メッシュを透明化・奥側の線は隠す）")
@@ -3239,17 +3278,87 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return [l for l in self._all_lines() if _is_hull_line(l)]
 
     def _cam_tracking_needed(self):
-        """カメラ追従の再計算が必要か（隠蔽検知ON、または隙間埋めオブジェクトが存在）。"""
-        return _OCC_ENABLED or bool(_all_gapfills())
+        """カメラ追従の再計算が必要か（隠蔽検知ON、隙間埋め、または距離減衰 ON）。"""
+        return _OCC_ENABLED or bool(_all_gapfills()) or self._dist_atten_active()
+
+    def _dist_atten_active(self):
+        """v0.1.32: 距離減衰が有効か（globalCtrl.distAtten > 0）。"""
+        gc = _find_global_ctrl()
+        if not gc or not cmds.attributeQuery(DIST_ATTEN_STRENGTH, node=gc, exists=True):
+            return False
+        try:
+            return float(cmds.getAttr(gc + "." + DIST_ATTEN_STRENGTH)) > 1e-4
+        except Exception:
+            return False
+
+    def _active_cam_transform(self):
+        """アクティブビューポートのカメラ transform を返す。無ければ 'persp'。"""
+        try:
+            p = cmds.playblast(ae=True)
+            if p:
+                cam_sh = cmds.modelPanel(p, q=True, cam=True)
+                if cam_sh:
+                    par = cmds.listRelatives(cam_sh, parent=True, f=True)
+                    return par[0] if par else cam_sh
+        except Exception:
+            pass
+        return "persp"
+
+    def _refresh_distatten(self):
+        """v0.1.32: SCRN 全ラインの camDistAtten を現アクティブカメラ距離から計算。
+        強度=0 のとき全ラインを 1.0 にリセット（無効化）。"""
+        if not cmds.ls(long=True, type="transform"): return
+        strength = 0.0
+        gc = _find_global_ctrl()
+        if gc and cmds.attributeQuery(DIST_ATTEN_STRENGTH, node=gc, exists=True):
+            try: strength = float(cmds.getAttr(gc + "." + DIST_ATTEN_STRENGTH))
+            except Exception: strength = 0.0
+        cam = self._active_cam_transform()
+        cam_pos = None
+        try:
+            cam_pos = cmds.xform(cam, q=True, ws=True, t=True)
+        except Exception:
+            return
+        if not cam_pos or len(cam_pos) < 3:
+            return
+        cx, cy, cz = cam_pos[0], cam_pos[1], cam_pos[2]
+        for ln in (cmds.ls(long=True, type="transform") or []):
+            if not cmds.attributeQuery(SCRN_TAG, node=ln, exists=True):
+                continue
+            ctrl = _ctrl_of(ln)
+            if not ctrl or not cmds.attributeQuery(CTRL_DISTATTEN, node=ctrl, exists=True):
+                continue
+            atten = 1.0
+            if strength > 1e-4:
+                # ラインの中心 = bounding box 中心
+                try:
+                    bb = cmds.xform(ln, q=True, ws=True, bb=True)
+                    mx = (bb[0] + bb[3]) * 0.5
+                    my = (bb[1] + bb[4]) * 0.5
+                    mz = (bb[2] + bb[5]) * 0.5
+                    dx, dy, dz = mx - cx, my - cy, mz - cz
+                    dist = (dx*dx + dy*dy + dz*dz) ** 0.5
+                    raw = DIST_ATTEN_REF / (DIST_ATTEN_REF + dist)
+                    # strength でブレンド: 0=常に 1.0, 1=raw そのまま
+                    atten = (1.0 - strength) * 1.0 + strength * raw
+                    if atten < 0.1: atten = 0.1
+                except Exception:
+                    atten = 1.0
+            try:
+                if abs(cmds.getAttr(ctrl + "." + CTRL_DISTATTEN) - atten) > 1e-4:
+                    cmds.setAttr(ctrl + "." + CTRL_DISTATTEN, atten)
+            except Exception:
+                pass
 
     def _refresh_occlusion(self):
-        """カメラ依存の頂点ウェイトを再計算（隠蔽検知ハル＋隙間埋め）。undo は汚さない。
+        """カメラ依存の頂点ウェイトを再計算（隠蔽検知ハル＋隙間埋め＋距離減衰）。undo は汚さない。
         再計算中（_occ_busy）は重畳を避けてスキップ＝重いメッシュでもビューポートが固まらない。"""
         if self._occ_busy:
             return
         gaps = _all_gapfills()
         lines = self._hull_lines() if _OCC_ENABLED else []
-        if not lines and not gaps:
+        dist_on = self._dist_atten_active()
+        if not lines and not gaps and not dist_on:
             return
         self._occ_busy = True
         try:
@@ -3261,6 +3370,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 _update_curv_weights(l)        # 隠蔽検知ハル（occlusion ON のとき）
             for b in gaps:
                 _update_gapfill_weights(b)      # 隙間埋め（facing 駆動）
+            if dist_on:
+                self._refresh_distatten()       # v0.1.32: 距離減衰
         finally:
             try:
                 cmds.undoInfo(swf=True)
@@ -3401,6 +3512,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         finally:
             try: cmds.undoInfo(closeChunk=True)
             except Exception: pass
+
+    def _on_dist_atten_changed(self, *args):
+        """v0.1.32: 遠景減衰強度をシーンへ書き込み + 即時計算 + カメラ追従起動。"""
+        gc = _ensure_global_ctrl()
+        if not cmds.attributeQuery(DIST_ATTEN_STRENGTH, node=gc, exists=True):
+            return
+        try:
+            cmds.setAttr(gc + "." + DIST_ATTEN_STRENGTH, float(self.spn_dist_atten.value()))
+        except Exception:
+            pass
+        try:
+            self._refresh_distatten()
+        except Exception:
+            pass
+        try:
+            self._ensure_cam_tracking()
+        except Exception:
+            pass
 
     def _on_fres_sens(self, *args):
         """v0.1.18: フレネル感度（globalCtrl.fresSens）を書き込む。
