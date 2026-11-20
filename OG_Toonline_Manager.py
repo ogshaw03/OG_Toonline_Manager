@@ -114,12 +114,28 @@ GLOBAL_CTRL = "toonOutline_globalCtrl"  # 全体コントローラー（コン�
 COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
 COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
+
+# v0.1.19: プライマリ（主要アクション）ボタンの QSS。Maya のバージョン/テーマ差でも
+# 「選択メッシュに輪郭を生成 / 選択をすべてリセット / バージョン選択」が同じ dusty pink で
+# 統一表示されるよう明示指定。
+_PRIMARY_BTN_CSS = (
+    "QPushButton {"
+    " background-color: #c38ba3;"
+    " color: #fff;"
+    " border: 1px solid #333;"
+    " padding: 4px 6px;"
+    " border-radius: 3px;"
+    "}"
+    "QPushButton:hover    { background-color: #d39bb3; }"
+    "QPushButton:pressed  { background-color: #a36b83; }"
+    "QPushButton:disabled { background-color: #6a5560; color:#aaa; }"
+)
 WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起動の防止に使用）
 
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.18"
+__version__ = "0.1.19"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2448,6 +2464,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "どの距離・どのサイズのメッシュでも安定した輪郭を描く(Pencil+4 風)。\n"
             "※ VP2/DirectX11 前提・カメラ依存。ビューポート『テクスチャ表示 ON(ホットキー 6)』で表示。")
         self.btn_create.clicked.connect(self.create_screen_outline)
+        self.btn_create.setStyleSheet(_PRIMARY_BTN_CSS)
         crow.addWidget(self.btn_create, 1)
         # v0.1.18: 選択エッジにチューブ状ラインを出すボタンを復活（内部実装 create_edge_line は残っていた）。
         b_edge = QtWidgets.QPushButton("選択エッジにライン")
@@ -2693,6 +2710,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_reset_all = QtWidgets.QPushButton("選択をすべてリセット")
         self.btn_reset_all.setToolTip("選択したライン/グループの全パラメータを初期値に戻します（確認あり）")
         self.btn_reset_all.clicked.connect(self.reset_selected)
+        self.btn_reset_all.setStyleSheet(_PRIMARY_BTN_CSS)
         lay.addWidget(self.btn_reset_all)
 
         # カラー
@@ -2749,6 +2767,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "開発ブランチ(dev)の先端も選択可。Maya 再起動不要。\n"
             "※ ネットワーク接続と Maya 2022+(Python3) が必要。")
         self.btn_update.clicked.connect(open_version_dialog)
+        self.btn_update.setStyleSheet(_PRIMARY_BTN_CSS)
         frow.addWidget(self.btn_update)
         lay.addLayout(frow)
 
