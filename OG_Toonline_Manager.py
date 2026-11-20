@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.10"
+__version__ = "0.1.11"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -320,12 +320,15 @@ def _scrn_set_depth_bias(v):
         pass
 
 
-_SCRN_FX_HLSL = """// OG Toonline Manager - Screen-space outline (Maya dx11Shader / HLSL)
-// 頂点をクリップ空間でシルエット外側へ一定ピクセル押し出す（隙間なし・均一太さ）。
-// さらに深度を「ビュー空間で一定量」奥へ押し込み、元メッシュに内側を隠させて外周リングだけ残す。
-// ※ 深度押し込みをビュー空間（カメラからの実距離）にすることで、遠ざかっても房どうしの隙間との
-//    相対関係が変わらず＝重なり線が消えない（旧: クリップ空間NDC一定だと遠距離で消えた）。
-// ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
+_SCRN_FX_HLSL = """// OG Toonline Manager - Geometry-shader silhouette outline (dx11Shader / HLSL5)
+// v0.1.11+ 本格派: VS でビュー空間座標・法線を計算 → GS で三角形ごとに
+// シルエット検出(頂点の facing 符号が混在する三角形だけ処理) → エッジ横断点
+// 2 つを結ぶ細い quad をスクリーン空間で押し出す。これにより:
+//   - 外周シルエット: 綺麗な薄線(従来通り)
+//   - 凹部内側シルエット(トーラスの穴など): blob 化せず綺麗な薄線に
+//   - distance attenuation 付き(遠距離で線が緩やかに細くなる)
+//   - 曲率(COLOR0.r)もエッジ横断点で補間
+// ※ ビューポートは「テクスチャ表示 ON(ホットキー 6)」で表示。VP2/DirectX11 前提。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
 float4x4 gProj : Projection;
@@ -343,59 +346,124 @@ float depthBias <
     float UIMin = -0.5;
     float UIMax = 0.5;
     float UIStep = 0.001;
-> = 0.02;   // v0.1.9 以降は相対値: vpos.z *= (1+depthBias)。0.02 = 2% 奥へ押す。
-            // どの距離/どのサイズのメッシュでも同じ値で破綻せず、遠距離 z-fighting も出ない。
+> = 0.02;   // 相対量: vpos.z *= (1+depthBias)。0.02 = 2% 奥へ押す。
 
 float3 lineColor <
     string UIName = "Line Color";
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
-struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; float4 Color : COLOR0; };
-struct V2P { float4 HPos : SV_Position; };
+struct APPDATA {
+    float3 Position : POSITION;
+    float3 Normal   : NORMAL;
+    float4 Color    : COLOR0;
+};
+struct V2G {
+    float4 CPos  : SV_Position;  // 使わないが rasterizer 要件
+    float3 VSPos : TEXCOORD0;    // ビュー空間位置
+    float3 VSNrm : TEXCOORD1;    // ビュー空間法線
+    float  ColR  : TEXCOORD2;    // 曲率倍率(COLOR0.r)
+};
+struct G2P { float4 HPos : SV_Position; };
 
-V2P VShader(APPDATA IN)
+V2G VShader(APPDATA i)
 {
-    V2P OUT;
-    // xy と w（＝太さの一定px補正）は元の WVP から取り、距離で崩れないようにする
-    //（w を触ると近接で線が消えたり太さが距離で変わる。ここは不変が鉄則）。
-    float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
-    float3 vn   = mul(IN.Normal, (float3x3)gWV);          // ビュー空間法線
-    // 深度押し込み (★v0.1.9 以降は相対量): vpos.z にビュー距離の N% を上乗せ。
-    //   旧: 固定ワールド単位 (vpos.z -= depthBias) だと小さいメッシュでは相対的に
-    //       強すぎ、大きいメッシュや遠距離では相対的に小さすぎて z-fighting でノイズが出た。
-    //   新: vpos.z *= (1 + depthBias) で、距離に比例した一定比率の押し込みになる。
-    //   これでどの距離/どのサイズのメッシュでも同じ depthBias 値で破綻しない。
-    //   Maya view 空間はカメラが -Z を見るので vpos.z<0。(1+bias)倍すると負値がさらに大きな
-    //   負値になり=カメラから遠ざかる方向。元メッシュがSCRN の前に来て外周だけ残る。
-    float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
-    vpos.z *= (1.0f + depthBias);
-    float4 clipB = mul(vpos, gProj);
-    float  bw = (abs(clipB.w) > 1e-6f) ? clipB.w : 1e-6f;
-    clip.z = (clipB.z / bw) * clip.w;                     // 深度のみ差し替え（太さに影響しない）
-    // 太さ押し出し（Pencil+4 風の距離 attenuation 付き）。
-    //   base: ピクセル幅の太さ(clip.w に比例した画面px幅補正)
-    //   atten: 遠距離ではメッシュ自体が小さく映るため、線が相対的に太く見えないよう
-    //          clip.w で軽くタパリング。atten = thickness_scale / (thickness_scale + clip.w)
-    //          で 1 (near) → 0.5 (clip.w = scale) → 0 の緩やかなカーブ。
-    //          thickness_scale は 100 単位(メッシュスケールと同程度) を基準。
-    //   頂点カラー R = 曲率倍率（未設定/0 は 1.0 扱いで消えない）。
-    float2 sn = vn.xy;
-    float  l  = length(sn);
-    sn = (l > 1e-5f) ? (sn / l) : float2(0.0f, 0.0f);
-    float w = IN.Color.r;
-    if (w < 0.001f) w = 1.0f;
-    float scale = 500.0f;
-    float atten = scale / max(scale + clip.w, 1.0f);   // 1 near → ~0.5 far → ~0.1 very far
-    // 全太さが 0 まで落ちないよう最低 30% は残す
-    atten = max(atten, 0.3f);
-    float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
-    clip.xy += sn * thickness * w * atten * px * clip.w;
-    OUT.HPos = clip;
-    return OUT;
+    V2G o;
+    float4 vp = mul(float4(i.Position, 1.0f), gWV);
+    o.VSPos = vp.xyz;
+    o.VSNrm = mul(i.Normal, (float3x3)gWV);
+    // v0.1.11: GS アプローチでは深度バイアス不要(quad はシルエット位置に描く)。
+    // 旧 VS 版のため uniform は残置するが VS では使わない。
+    o.CPos = mul(vp, gProj);
+    float w = i.Color.r;
+    o.ColR = (w < 0.001f) ? 1.0f : w;
+    return o;
 }
 
-float4 PShader(V2P IN) : SV_Target
+// 符号付き facing: カメラ(view 空間原点)から見て面が向いていれば正、裏向きで負。
+float facing_dot(float3 vspos, float3 vsnrm)
+{
+    float3 n = normalize(vsnrm);
+    float3 v = vspos;
+    float len = length(v);
+    if (len < 1e-6f) return 1.0f;
+    v = v / len;
+    return -dot(n, v);  // -view_dir(=-normalize(vspos)) と normal の内積
+}
+
+// エッジ(a,b) 上で facing が符号反転する点(シルエット上)を求め、
+// その点のクリップ座標と ColR を返す。
+// v0.1.11: 小さな負のバイアス(camera 側)で quad を元メッシュよりわずか前に出し z-fight 回避。
+void edge_crossing(V2G a, V2G b, float fa, float fb,
+                   out float4 cpos, out float colR)
+{
+    float t = fa / (fa - fb);                 // facing=0 となる補間係数
+    float3 vp = lerp(a.VSPos, b.VSPos, t);
+    // vp.z は負(camera -Z 方向)。0.999 倍で |z| が減る = camera 寄りに
+    float4 vp4 = float4(vp.x, vp.y, vp.z * 0.999f, 1.0f);
+    cpos = mul(vp4, gProj);
+    colR = lerp(a.ColR, b.ColR, t);
+}
+
+[maxvertexcount(4)]
+void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
+{
+    float f0 = facing_dot(tri[0].VSPos, tri[0].VSNrm);
+    float f1 = facing_dot(tri[1].VSPos, tri[1].VSNrm);
+    float f2 = facing_dot(tri[2].VSPos, tri[2].VSNrm);
+
+    // どのエッジがシルエットを横切るか(符号混在)
+    bool c01 = (f0 * f1) < 0.0f;
+    bool c12 = (f1 * f2) < 0.0f;
+    bool c20 = (f2 * f0) < 0.0f;
+    int ncross = (c01 ? 1 : 0) + (c12 ? 1 : 0) + (c20 ? 1 : 0);
+    if (ncross != 2) return;  // 全頂点同符号 → シルエット外
+
+    // 横断する 2 エッジ上で facing=0 となる点を 2 つ求める
+    float4 p1, p2;
+    float cr1, cr2;
+    if (c01 && c12) {
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1);
+        edge_crossing(tri[1], tri[2], f1, f2, p2, cr2);
+    } else if (c12 && c20) {
+        edge_crossing(tri[1], tri[2], f1, f2, p1, cr1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2);
+    } else {
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2);
+    }
+
+    float w1 = max(abs(p1.w), 1e-6f);
+    float w2 = max(abs(p2.w), 1e-6f);
+    float2 ndc1 = p1.xy / w1;
+    float2 ndc2 = p2.xy / w2;
+
+    // エッジ方向(NDC) と その 90° 回転(perp) → 太さ方向
+    float2 edir = ndc2 - ndc1;
+    float elen = length(edir);
+    if (elen < 1e-6f) return;
+    edir /= elen;
+    float2 perp = float2(-edir.y, edir.x);
+
+    // 距離 attenuation(clip.w ベース): 遠距離で線が緩やかに細くなる
+    float scale = 500.0f;
+    float atten1 = max(scale / max(scale + w1, 1.0f), 0.3f);
+    float atten2 = max(scale / max(scale + w2, 1.0f), 0.3f);
+
+    float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
+    float half_th = thickness * 0.5f;
+    float2 off1 = perp * half_th * cr1 * atten1 * px;
+    float2 off2 = perp * half_th * cr2 * atten2 * px;
+
+    // triangle strip で quad を出力: p1-off, p1+off, p2-off, p2+off
+    G2P v;
+    v.HPos = float4((ndc1 - off1) * w1, p1.z, w1); stream.Append(v);
+    v.HPos = float4((ndc1 + off1) * w1, p1.z, w1); stream.Append(v);
+    v.HPos = float4((ndc2 - off2) * w2, p2.z, w2); stream.Append(v);
+    v.HPos = float4((ndc2 + off2) * w2, p2.z, w2); stream.Append(v);
+}
+
+float4 PShader(G2P i) : SV_Target
 {
     return float4(lineColor, 1.0f);
 }
@@ -405,6 +473,7 @@ technique11 Main
     pass p0
     {
         SetVertexShader(CompileShader(vs_5_0, VShader()));
+        SetGeometryShader(CompileShader(gs_5_0, GShader()));
         SetPixelShader(CompileShader(ps_5_0, PShader()));
     }
 }
