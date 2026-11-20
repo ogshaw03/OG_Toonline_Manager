@@ -118,7 +118,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2479,11 +2479,28 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "45°: 中くらい\n"
             "60°: 立方体の角のような直角級だけ（線が少ない）")
         crease_row.addWidget(self.spn_crease_angle)
+        crease_row.addWidget(QtWidgets.QLabel("端細り"))
+        self.spn_crease_taper = QtWidgets.QDoubleSpinBox()
+        self.spn_crease_taper.setRange(0.0, 1.0)
+        self.spn_crease_taper.setDecimals(2)
+        self.spn_crease_taper.setSingleStep(0.1)
+        self.spn_crease_taper.setValue(0.0)
+        self.spn_crease_taper.setFixedWidth(70)
+        self.spn_crease_taper.setToolTip(
+            "生成するクリース線の末端細り（0〜1）。線端が徐々に細くなって消える演出に。\n"
+            "0 = 端まで同じ太さ（既定）\n"
+            "0.5 = 端の半分が少しずつ細く\n"
+            "1.0 = 端がほぼ 0 まで細り、鉛筆の書き始め/書き終わりっぽく\n"
+            "生成後も個別ラインを選んで「太さプロファイル」で微調整可能。")
+        crease_row.addWidget(self.spn_crease_taper)
         crease_row.addStretch(1)
         lay.addLayout(crease_row)
         # チェック OFF のときはスピンもグレーに
-        self.chk_scrn_crease.toggled.connect(self.spn_crease_angle.setEnabled)
-        self.spn_crease_angle.setEnabled(self.chk_scrn_crease.isChecked())
+        def _crease_enabled(on):
+            self.spn_crease_angle.setEnabled(on)
+            self.spn_crease_taper.setEnabled(on)
+        self.chk_scrn_crease.toggled.connect(_crease_enabled)
+        _crease_enabled(self.chk_scrn_crease.isChecked())
 
         # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
         srow = QtWidgets.QHBoxLayout()
@@ -4246,6 +4263,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
             crease_angle = float(self.spn_crease_angle.value())
         except Exception:
             crease_angle = CREASE_ANGLE
+        # 端細り（0〜1）。生成後に各クリース線の endTaper に流す。
+        try:
+            crease_taper = float(self.spn_crease_taper.value())
+        except Exception:
+            crease_taper = 0.0
+        # 生成前の EDGE_TAG ライン集合を snapshot（生成後に差分で新規ラインを特定）
+        def _all_edges():
+            out = set()
+            for t in cmds.ls(type="transform", long=True) or []:
+                if cmds.attributeQuery(EDGE_TAG, node=t, exists=True):
+                    out.add(t)
+            return out
+        before = _all_edges()
         made = 0
         skipped = 0
         cmds.undoInfo(openChunk=True)
@@ -4280,6 +4310,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 if any_made:
                     made += 1
+            # v0.1.17: 新規生成されたクリース線だけに端細りを書き込む
+            if crease_taper > 1e-4:
+                new_lines = _all_edges() - before
+                for ln in new_lines:
+                    ctrl = _ctrl_of(ln)
+                    if ctrl and cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
+                        try:
+                            cmds.setAttr(ctrl + "." + CTRL_TAPER, crease_taper)
+                        except Exception:
+                            pass
+                    try:
+                        _update_curv_weights(ln)
+                    except Exception:
+                        pass
         finally:
             cmds.undoInfo(closeChunk=True)
         cmds.select(clear=True)
