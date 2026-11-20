@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.11"
+__version__ = "0.1.13"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -1693,6 +1693,68 @@ def _crease_border_edges(shape, tform, angle_deg=CREASE_ANGLE):
     return out
 
 
+def _split_edges_into_chains(shape, edge_indices):
+    """選択エッジインデックスを「非分岐な連続パス」(chain) に分割して返す。
+    polyToCurve は一本道のエッジ列しか受け付けず、立方体のように 12 本の
+    バラバラな折り目があると 1 本しかカーブ化できない。連結成分＋分岐検出で
+    chain のリストに分け、各 chain を個別のエッジラインにする。"""
+    try:
+        sl = om2.MSelectionList(); sl.add(shape)
+        dag = sl.getDagPath(0)
+        mesh = om2.MFnMesh(dag)
+    except Exception:
+        return [[e] for e in edge_indices]
+    edge_verts = {}
+    vert_edges = {}
+    for e in edge_indices:
+        try:
+            v = mesh.getEdgeVertices(e)
+        except Exception:
+            continue
+        edge_verts[e] = (v[0], v[1])
+        vert_edges.setdefault(v[0], []).append(e)
+        vert_edges.setdefault(v[1], []).append(e)
+
+    def other_vert(e, v):
+        a, b = edge_verts[e]
+        return b if v == a else a
+
+    chains = []
+    used = set()
+    endpoints = [v for v, es in vert_edges.items() if len(es) != 2]
+    for start_v in endpoints:
+        for e0 in list(vert_edges[start_v]):
+            if e0 in used: continue
+            chain = []; v = start_v; e = e0
+            while e is not None and e not in used:
+                used.add(e)
+                chain.append(e)
+                nv = other_vert(e, v)
+                nbrs = vert_edges.get(nv, [])
+                cand = [x for x in nbrs if x not in used]
+                if len(nbrs) == 2 and len(cand) == 1:
+                    v = nv; e = cand[0]
+                else:
+                    e = None
+            if chain:
+                chains.append(chain)
+    for e0 in edge_indices:
+        if e0 in used or e0 not in edge_verts: continue
+        chain = []; v = edge_verts[e0][0]; e = e0
+        while e is not None and e not in used:
+            used.add(e)
+            chain.append(e)
+            nv = other_vert(e, v)
+            cand = [x for x in vert_edges.get(nv, []) if x not in used]
+            if len(cand) == 1:
+                v = nv; e = cand[0]
+            else:
+                e = None
+        if chain:
+            chains.append(chain)
+    return chains
+
+
 def _gapfill_of(line):
     """ライン A に紐づく隙間埋めオブジェクト B を返す。無ければ None。"""
     if cmds.objExists(line) and cmds.attributeQuery(GAPFILL_LINK, node=line, exists=True):
@@ -2271,6 +2333,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "外周(SCRN)+ 内側の折れ目/溝(フレネル)で完全な toon ライン一式になる。\n"
             "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
         lay.addWidget(self.chk_scrn_fresnel)
+
+        # 硬いエッジ(二面角>30°)に沿ったクリース線も生成(既定 ON)。
+        self.chk_scrn_crease = QtWidgets.QCheckBox(
+            "硬いエッジ(折り目)にもペン線を出す(クリース線)")
+        self.chk_scrn_crease.setChecked(True)
+        self.chk_scrn_crease.setToolTip(
+            "ON: 輪郭生成時に、メッシュの硬いエッジ(二面角 > 30°)に沿って\n"
+            "チューブ状のラインを自動生成する。立方体の角や服の折り目など、\n"
+            "SCRN/フレネルでは拾いにくいシャープな折り目に Pencil+4 風のペン線が入る。\n"
+            "滑らかな閉曲面(球など)では折り目が無いため生成されない。")
+        lay.addWidget(self.chk_scrn_crease)
 
         # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
         srow = QtWidgets.QHBoxLayout()
@@ -3965,6 +4038,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
             except Exception:
                 pass
             self.create_fresnel_outline()
+        # オプション: 硬いエッジ(折り目)にチューブ状クリース線も一緒に生成
+        if made and getattr(self, "chk_scrn_crease", None) is not None \
+                and self.chk_scrn_crease.isChecked() and sel:
+            try:
+                cmds.select(sel, r=True)
+            except Exception:
+                pass
+            self.create_crease_lines()
 
     def create_crease_lines(self, *args):
         """選択メッシュのクリース（折れ目）＋ボーダー（開境界）エッジを自動検出し、
@@ -3985,9 +4066,28 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if not edges:
                     skipped += 1
                     continue
-                cmds.select(edges, r=True)
-                self.create_edge_line()   # 選択エッジからチューブラインを生成
-                made += 1
+                # polyToCurve は非分岐連続パスしか受け付けないので、
+                # 連結成分＋分岐で chain に分けて chain ごとにライン化する。
+                short = _short(obj)
+                indices = []
+                for ec in edges:
+                    try:
+                        indices.append(int(ec.split("[")[-1].rstrip("]")))
+                    except Exception:
+                        pass
+                chains = _split_edges_into_chains(shps[0], indices)
+                any_made = False
+                for chain in chains:
+                    if not chain: continue
+                    comps = ["{}.e[{}]".format(short, i) for i in chain]
+                    cmds.select(comps, r=True)
+                    try:
+                        self.create_edge_line()
+                        any_made = True
+                    except Exception:
+                        pass
+                if any_made:
+                    made += 1
         finally:
             cmds.undoInfo(closeChunk=True)
         cmds.select(clear=True)
