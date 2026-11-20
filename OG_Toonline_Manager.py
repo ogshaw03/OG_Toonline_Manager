@@ -218,7 +218,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.27"
+__version__ = "0.1.28"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2572,7 +2572,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
-        self.setMinimumHeight(880)   # v0.1.25: ランプ(90) + GroupBox 2つ + ツリー + パネル
+        self.setMinimumHeight(700)   # v0.1.28: ランプ撤去で小さく収まる
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -2712,7 +2712,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "polyToCurve + 円プロファイル extrude + nurbsToPoly。\n"
             "太さ/曲率起伏/末端細り/プロファイルで調整可能。\n"
             "※ 非分岐な連続エッジ列を想定（分岐ありはクリース線のように自動 chain 分割されません）。")
-        b_edge.clicked.connect(self._on_create_edge_line_button)
+        b_edge.clicked.connect(self.create_edge_line)
         crow.addWidget(b_edge)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
@@ -2726,7 +2726,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # ---- 新規作成時のオプション ----
         gb_gen = QtWidgets.QGroupBox("新規作成")
         gb_gen.setObjectName("OG_Toonline_GenBox")
-        gb_gen.setMinimumHeight(300)   # v0.1.25: ランプが潰れないよう余裕を持たせる
+        gb_gen.setMinimumHeight(80)   # v0.1.28: ランプ撤去で checkbox 2 行のみ
         glay = QtWidgets.QVBoxLayout(gb_gen)
         glay.setContentsMargins(8, 10, 8, 6); glay.setSpacing(4)
 
@@ -2752,66 +2752,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crease_row.addStretch(1)
         glay.addLayout(crease_row)
 
-        # v0.1.26: 太さプロファイル 3 種（輪郭線 / クリース線 / エッジライン）を QTabWidget で切替。
-        # ボタン行はランプ上に 1 行（ラベル + フラット + 既存ラインに適用）。
-        prof_tab_row = QtWidgets.QHBoxLayout()
-        prof_tab_row.addWidget(QtWidgets.QLabel("太さプロファイル"))
-        prof_tab_row.addStretch(1)
-        b_flat = QtWidgets.QPushButton(u"↺ フラット"); b_flat.setFixedHeight(22)
-        b_flat.setToolTip("現在のタブのランプを (0,1)(1,1) フラットにリセット")
-        b_flat.clicked.connect(self._reset_current_prof_ramp)
-        prof_tab_row.addWidget(b_flat)
-        self.btn_apply_ramp = QtWidgets.QPushButton("既存ラインに適用")
-        self.btn_apply_ramp.setFixedHeight(22)
-        self.btn_apply_ramp.setToolTip(
-            "現在のタブのランプを既存ラインに適用。\n"
-            "ツリーで選択あり → 選択ラインのみ\n"
-            "選択なし → タブに対応する全ラインに適用")
-        self.btn_apply_ramp.setStyleSheet(_PRIMARY_BTN_CSS)
-        self.btn_apply_ramp.clicked.connect(self._apply_ramp_to_lines)
-        prof_tab_row.addWidget(self.btn_apply_ramp)
-        glay.addLayout(prof_tab_row)
-
-        self.prof_tabs = QtWidgets.QTabWidget()
-        self.prof_tabs.setObjectName("OG_Toonline_ProfTabs")
-
-        # 輪郭線タブ: SCRN は長手方向を持たないため無効化（UI 表示のみ）
-        tab_scrn = QtWidgets.QWidget(); tsl = QtWidgets.QVBoxLayout(tab_scrn)
-        tsl.setContentsMargins(4, 4, 4, 4)
-        self.ramp_scrn = _RampWidget()
-        self.ramp_scrn.setMinimumHeight(90)
-        self.ramp_scrn.setEnabled(False)
-        tsl.addWidget(self.ramp_scrn)
-        tsl.addWidget(QtWidgets.QLabel(
-            "※ 輪郭線(SCRN)は GS シルエット検出のため長手方向が無く、\n"
-            "   太さプロファイルは適用できません（曲率ランプで代替）。"))
-        self.prof_tabs.addTab(tab_scrn, "輪郭線")
-
-        # クリース線タブ
-        tab_crease = QtWidgets.QWidget(); tcl = QtWidgets.QVBoxLayout(tab_crease)
-        tcl.setContentsMargins(4, 4, 4, 4)
-        self.ramp_crease = _RampWidget()
-        self.ramp_crease.setMinimumHeight(90)
-        self.ramp_crease.setToolTip("クリース線の太さ形状。左=点追加/移動、右=削除")
-        tcl.addWidget(self.ramp_crease)
-        self.prof_tabs.addTab(tab_crease, "クリース線")
-
-        # エッジラインタブ
-        tab_edge = QtWidgets.QWidget(); tel = QtWidgets.QVBoxLayout(tab_edge)
-        tel.setContentsMargins(4, 4, 4, 4)
-        self.ramp_edge = _RampWidget()
-        self.ramp_edge.setMinimumHeight(90)
-        self.ramp_edge.setToolTip("エッジラインの太さ形状。左=点追加/移動、右=削除")
-        tel.addWidget(self.ramp_edge)
-        self.prof_tabs.addTab(tab_edge, "エッジライン")
-
-        # 既定で「クリース」タブ（よく使う）
-        self.prof_tabs.setCurrentIndex(1)
-        glay.addWidget(self.prof_tabs)
-
-        # 旧 crease_ramp 名で参照する他箇所の互換のため alias を張る
-        self.crease_ramp = self.ramp_crease
-
+        # v0.1.28: 生成時設定は最小限に。作成後に下のパネルで調整が自然な workflow。
+        # クリース生成テンプレのランプは撤去（下の「太さプロファイル」パネルで複数選択→
+        # 一括適用で対応する）。
         def _crease_enabled(on):
             self.spn_crease_angle.setEnabled(on)
         self.chk_scrn_crease.toggled.connect(_crease_enabled)
@@ -3398,42 +3341,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         wave=self.spn_brush_wave.value(),
                         scale=self.spn_brush_scale.value())
 
-    def _on_create_edge_line_button(self, *args):
-        """v0.1.26: 「選択エッジにライン」ボタン。エッジタブのランプを新規ラインへ適用。
-        内部実装 create_edge_line() は常にフラット初期化するので、生成差分で特定して
-        エッジタブのランプが非フラットなら上書きする。"""
-        before = set()
-        for t in cmds.ls(type="transform", long=True) or []:
-            if cmds.attributeQuery(EDGE_TAG, node=t, exists=True):
-                before.add(t)
-        self.create_edge_line()
-        # エッジタブが非フラットなら新規ラインへ適用
-        try:
-            pts = self.ramp_edge.points()
-        except Exception:
-            pts = None
-        is_flat = (pts and len(pts) == 2 and
-                   abs(pts[0][0]) < 1e-4 and abs(pts[0][1] - 1.0) < 1e-4 and
-                   abs(pts[-1][0] - 1.0) < 1e-4 and abs(pts[-1][1] - 1.0) < 1e-4)
-        if pts and not is_flat:
-            s = _serialize_profile(pts)
-            after = set()
-            for t in cmds.ls(type="transform", long=True) or []:
-                if cmds.attributeQuery(EDGE_TAG, node=t, exists=True):
-                    after.add(t)
-            new_lines = after - before
-            for ln in new_lines:
-                ctrl = _ctrl_of(ln)
-                if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
-                    try:
-                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
-                    except Exception:
-                        pass
-                try:
-                    _update_curv_weights(ln)
-                except Exception:
-                    pass
-
     def _on_toggle_line_only(self, state):
         """v0.1.26: ライン単体表示モードのトグル。"""
         try:
@@ -3459,93 +3366,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cmds.setAttr(gc + "." + FRES_SENS_ATTR, float(self.spn_fres_sens.value()))
         except Exception:
             pass
-
-    def _current_prof_ramp(self):
-        """現在のプロファイルタブに対応する (ramp, kind) を返す。kind: 'scrn'|'crease'|'edge'."""
-        idx = self.prof_tabs.currentIndex()
-        if idx == 0: return self.ramp_scrn, "scrn"
-        if idx == 1: return self.ramp_crease, "crease"
-        return self.ramp_edge, "edge"
-
-    def _reset_current_prof_ramp(self, *args):
-        ramp, _ = self._current_prof_ramp()
-        ramp.set_points([[0.0, 1.0], [1.0, 1.0]])
-
-    def _apply_ramp_to_lines(self, *args):
-        """v0.1.26: 現在のタブに対応したランプを既存ラインに適用。
-        ツリー選択ありなら選択ライン、無ければタブに対応する全ライン。"""
-        ramp, kind = self._current_prof_ramp()
-        if kind == "scrn":
-            cmds.warning("SCRN 輪郭線には長手プロファイルを適用できません"); return
-        try:
-            pts = ramp.points()
-        except Exception:
-            cmds.warning("ランプの値が取れませんでした"); return
-        s = _serialize_profile(pts) if pts else "0:1,1:1"
-        sel = self._selected_lines() if hasattr(self, "_selected_lines") else []
-        if sel:
-            targets = [ln for ln in sel if cmds.objExists(ln)]
-            label = "選択 {} 本".format(len(targets))
-        elif kind == "crease":
-            targets = [t for t in (cmds.ls(type="transform", long=True) or [])
-                       if cmds.attributeQuery(CREASE_TAG, node=t, exists=True)]
-            label = "クリース {} 本".format(len(targets))
-        else:  # edge
-            targets = [t for t in (cmds.ls(type="transform", long=True) or [])
-                       if cmds.attributeQuery(EDGE_TAG, node=t, exists=True)
-                       and not cmds.attributeQuery(CREASE_TAG, node=t, exists=True)]
-            label = "エッジ {} 本".format(len(targets))
-        if not targets:
-            cmds.warning("適用対象のラインがありません"); return
-        n = 0
-        cmds.undoInfo(openChunk=True)
-        try:
-            for ln in targets:
-                ctrl = _ctrl_of(ln)
-                if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
-                    try:
-                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
-                        n += 1
-                    except Exception:
-                        pass
-                try:
-                    _update_curv_weights(ln)
-                except Exception:
-                    pass
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        cmds.warning("ランプを {} に適用しました（{} 本）".format(label, n))
-
-    def _apply_ramp_to_all_creases(self, *args):
-        """v0.1.24: UI のクリースランプを、既存の全クリース線（CREASE_TAG 付き）に適用。
-        生成時だけでなく「あとから一括変更」したいときに使う。"""
-        try:
-            pts = self.crease_ramp.points()
-        except Exception:
-            cmds.warning("ランプの値が取れませんでした"); return
-        s = _serialize_profile(pts) if pts else "0:1,1:1"
-        creases = [t for t in (cmds.ls(type="transform", long=True) or [])
-                   if cmds.attributeQuery(CREASE_TAG, node=t, exists=True)]
-        if not creases:
-            cmds.warning("クリース線（CREASE_TAG 付き）が見つかりません"); return
-        n = 0
-        cmds.undoInfo(openChunk=True)
-        try:
-            for ln in creases:
-                ctrl = _ctrl_of(ln)
-                if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
-                    try:
-                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
-                        n += 1
-                    except Exception:
-                        pass
-                try:
-                    _update_curv_weights(ln)
-                except Exception:
-                    pass
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        cmds.warning("現在のランプを {} 本のクリース線に適用しました。".format(n))
 
     def _show_about(self, *args):
         """バージョン情報 ダイアログ（⋮ メニューから）。"""
@@ -4809,19 +4629,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             crease_angle = float(self.spn_crease_angle.value())
         except Exception:
             crease_angle = CREASE_ANGLE
-        # v0.1.23: ランプから太さプロファイル文字列を作る。フラット (0,1)(1,1) なら何もしない。
+        # v0.1.28: 生成時はプロファイル適用しない（作成後にパネルで調整する運用）。
         crease_profile_str = None
-        try:
-            pts = self.crease_ramp.points()
-        except Exception:
-            pts = None
-        if pts and not (len(pts) == 2 and
-                        abs(pts[0][0]) < 1e-4 and abs(pts[0][1] - 1.0) < 1e-4 and
-                        abs(pts[-1][0] - 1.0) < 1e-4 and abs(pts[-1][1] - 1.0) < 1e-4):
-            try:
-                crease_profile_str = _serialize_profile(pts)
-            except Exception:
-                crease_profile_str = None
         # 生成前の EDGE_TAG ライン集合を snapshot（生成後に差分で新規ラインを特定）
         def _all_edges():
             out = set()
@@ -5081,10 +4890,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
             menu.addSeparator()
             a3 = menu.addAction("色を揃える…")
             a3.triggered.connect(lambda: self._unify_group_color(node))
-            if is_crease_group:
-                menu.addSeparator()
-                a4 = menu.addAction("現在のランプを適用")
-                a4.triggered.connect(self._apply_ramp_to_all_creases)
             menu.addSeparator()
             a5 = menu.addAction("リネーム…")
             a5.triggered.connect(lambda: self.rename_node(node))
