@@ -72,6 +72,7 @@ CTRL_PROFILE = "thicknessProfile"    # 長手方向の太さプロファイル�
 CTRL_SUFFIX = "_ctrl"                # コントローラー名 = <line>_ctrl
 CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controller）
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
+FRES_SENS_ATTR = "fresSens"          # 全体コントローラーのフレネル感度アトリビュート（全フレネル線の maxWidthPx 倍率）
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
 PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
@@ -118,7 +119,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -1195,6 +1196,12 @@ def _ensure_global_ctrl():
         gc = cmds.createNode("transform", name=GLOBAL_CTRL)
         gc = cmds.parent(gc, ROOT)[0]
     _ensure_mult_attr(gc)
+    # v0.1.18: フレネル感度アトリビュート（全フレネル線の maxWidthPx 倍率）。
+    if not cmds.attributeQuery(FRES_SENS_ATTR, node=gc, exists=True):
+        try:
+            cmds.addAttr(gc, ln=FRES_SENS_ATTR, at="double", dv=1.0, min=0.0, keyable=True)
+        except Exception:
+            pass
     _set_outliner_color(gc, COL_GLOBAL)
     _lock_trs(gc)
     return gc
@@ -1449,8 +1456,8 @@ def _ensure_thickness_chain(line):
         except Exception:
             pass
         _connect(mS + ".output", target)
-        # 帯の画面px幅の上限 = UI太さ×SCRN_SCALE（スクリーン輪郭と同じ px 換算）。
-        # → 同じ太さのスクリーン輪郭より太くならず、ムラで広がっても頭打ちになる。
+        # 帯の画面px幅の上限 = UI太さ × SCRN_SCALE × globalCtrl.fresSens（感度）。
+        # 感度=見た目の太さを変えずに「どこまで内側（寝た面）まで検出するか」を調整。
         shd_fres = target.rsplit(".", 1)[0]
         if cmds.attributeQuery(FRES_MAXW, node=shd_fres, exists=True):
             mW = base + "_fresMaxW"
@@ -1461,7 +1468,13 @@ def _ensure_thickness_chain(line):
                 cmds.setAttr(mW + ".input2", SCRN_SCALE)
             except Exception:
                 pass
-            _connect(mW + ".output", shd_fres + "." + FRES_MAXW)
+            # v0.1.18: mW.output × gctrl.fresSens → maxWidthPx
+            mWS = base + "_fresMaxWSens"
+            if not cmds.objExists(mWS):
+                mWS = cmds.createNode("multDoubleLinear", name=mWS)
+            _connect(mW + ".output", mWS + ".input1")
+            _connect(gctrl + "." + FRES_SENS_ATTR, mWS + ".input2")
+            _connect(mWS + ".output", shd_fres + "." + FRES_MAXW)
     elif cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
         # スクリーン輪郭は UI 太さ×SCRN_SCALE をピクセル太さ(thickness uniform)へ。
         mS = base + "_scrnScale"
@@ -2436,6 +2449,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ VP2/DirectX11 前提・カメラ依存。ビューポート『テクスチャ表示 ON(ホットキー 6)』で表示。")
         self.btn_create.clicked.connect(self.create_screen_outline)
         crow.addWidget(self.btn_create, 1)
+        # v0.1.18: 選択エッジにチューブ状ラインを出すボタンを復活（内部実装 create_edge_line は残っていた）。
+        b_edge = QtWidgets.QPushButton("選択エッジにライン")
+        b_edge.setToolTip(
+            "選択したポリゴンエッジに沿ってチューブ状のラインを 1 本追加する。\n"
+            "polyToCurve + 円プロファイル extrude + nurbsToPoly。\n"
+            "太さ/曲率起伏/末端細り/プロファイルで調整可能。\n"
+            "※ 非分岐な連続エッジ列を想定（分岐ありはクリース線のように自動 chain 分割されません）。")
+        b_edge.clicked.connect(self.create_edge_line)
+        crow.addWidget(b_edge)
         b_grp = QtWidgets.QPushButton("新規グループ")
         b_grp.clicked.connect(self.new_group)
         crow.addWidget(b_grp)
@@ -2444,14 +2466,32 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow.addWidget(b_ref)
         lay.addLayout(crow)
 
-        # 内側の折れ目/溝(フレネル)も一緒に生成(既定 ON)。
+        # 内側の折れ目/溝(フレネル)も一緒に生成(既定 ON) + 感度スピン
+        fres_row = QtWidgets.QHBoxLayout()
         self.chk_scrn_fresnel = QtWidgets.QCheckBox("内側の折れ目/溝(フレネル)も生成")
         self.chk_scrn_fresnel.setChecked(True)
         self.chk_scrn_fresnel.setToolTip(
             "ON: 輪郭生成時に同じメッシュへフレネル輪郭も一緒に作る。\n"
             "外周(SCRN)+ 内側の折れ目/溝(フレネル)で完全な toon ライン一式になる。\n"
             "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
-        lay.addWidget(self.chk_scrn_fresnel)
+        fres_row.addWidget(self.chk_scrn_fresnel)
+        fres_row.addWidget(QtWidgets.QLabel("感度"))
+        self.spn_fres_sens = QtWidgets.QDoubleSpinBox()
+        self.spn_fres_sens.setRange(0.0, 10.0)
+        self.spn_fres_sens.setDecimals(2)
+        self.spn_fres_sens.setSingleStep(0.1)
+        self.spn_fres_sens.setValue(1.0)
+        self.spn_fres_sens.setFixedWidth(70)
+        self.spn_fres_sens.setToolTip(
+            "フレネル感度（globalCtrl.fresSens）。見た目の太さは変えずに「どこまで内側\n"
+            "（寝た面）まで検出するか」だけ調整する倍率。全フレネル線に効く。\n"
+            "1.0 = 既定（太さそのまま）\n"
+            "0.5 = シルエット直近だけ（細い谷しか拾わない）\n"
+            "2.0 = 深い谷まで拾う（面積広い）")
+        self.spn_fres_sens.valueChanged.connect(self._on_fres_sens)
+        fres_row.addWidget(self.spn_fres_sens)
+        fres_row.addStretch(1)
+        lay.addLayout(fres_row)
 
         # 硬いエッジ(二面角>しきい値)に沿ったクリース線も生成(既定 ON)。
         # しきい値はスピンで調整（大きいほど尖った折り目だけ拾う＝線が減る）。
@@ -3053,6 +3093,38 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         wave=self.spn_brush_wave.value(),
                         scale=self.spn_brush_scale.value())
 
+    def _on_fres_sens(self, *args):
+        """v0.1.18: フレネル感度（globalCtrl.fresSens）を書き込む。
+        接続されていれば全フレネル線の maxWidthPx 倍率に即反映。globalCtrl が
+        まだ無い場合はスピン値だけ保持（次の生成時 _ensure_global_ctrl で attr 追加）。"""
+        gc = None
+        for c in cmds.ls(long=True, type="transform") or []:
+            if _short(c) == GLOBAL_CTRL:
+                gc = c; break
+        if not gc or not cmds.attributeQuery(FRES_SENS_ATTR, node=gc, exists=True):
+            return
+        try:
+            cmds.setAttr(gc + "." + FRES_SENS_ATTR, float(self.spn_fres_sens.value()))
+        except Exception:
+            pass
+
+    def _sync_fres_sens_from_scene(self):
+        """シーン側の globalCtrl.fresSens → UI スピンへ一方向コピー（refresh 時用）。"""
+        gc = None
+        for c in cmds.ls(long=True, type="transform") or []:
+            if _short(c) == GLOBAL_CTRL:
+                gc = c; break
+        if not gc or not cmds.attributeQuery(FRES_SENS_ATTR, node=gc, exists=True):
+            return
+        try:
+            v = float(cmds.getAttr(gc + "." + FRES_SENS_ATTR))
+        except Exception:
+            return
+        if getattr(self, "spn_fres_sens", None) is not None:
+            self.spn_fres_sens.blockSignals(True)
+            self.spn_fres_sens.setValue(v)
+            self.spn_fres_sens.blockSignals(False)
+
     def _on_toggle_occlude(self, state):
         """UIチェックで隠蔽検知ハル（カメラ依存）の ON/OFF。"""
         global _OCC_ENABLED
@@ -3214,6 +3286,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def refresh_tree(self):
         self._populating = True
         self.tree.clear()
+        # v0.1.18: フレネル感度はシーン属性と一方向同期（起動/再取得で現在値を反映）
+        try:
+            self._sync_fres_sens_from_scene()
+        except Exception:
+            pass
         for g in self._managed_groups():
             gvis = True
             try:
