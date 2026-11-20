@@ -318,12 +318,12 @@ float thickness <
 > = 3.0;
 
 float depthBias <
-    string UIName = "Overlap Depth Bias (view)";
-    float UIMin = -20.0;
-    float UIMax = 20.0;
-    float UIStep = 0.01;
-> = 0.02;   // 元メッシュに内側を隠させるビュー空間の押し込み量（重なり線の残り方を調整・符号反転可）
-            // 大きいメッシュ(bbox 対角 >> 1)用に range を広げ、生成時に bbox*0.015 で自動設定。
+    string UIName = "Overlap Depth Bias (view ratio)";
+    float UIMin = -0.5;
+    float UIMax = 0.5;
+    float UIStep = 0.001;
+> = 0.02;   // v0.1.9 以降は相対値: vpos.z *= (1+depthBias)。0.02 = 2% 奥へ押す。
+            // どの距離/どのサイズのメッシュでも同じ値で破綻せず、遠距離 z-fighting も出ない。
 
 float3 lineColor <
     string UIName = "Line Color";
@@ -340,10 +340,15 @@ V2P VShader(APPDATA IN)
     //（w を触ると近接で線が消えたり太さが距離で変わる。ここは不変が鉄則）。
     float4 clip = mul(float4(IN.Position, 1.0f), gWVP);
     float3 vn   = mul(IN.Normal, (float3x3)gWV);          // ビュー空間法線
-    // 深度だけ「ビュー空間で一定量」奥へ押した NDC 深度に差し替える（clip.xy/clip.w は不変）。
-    // 房の実隙間は距離不変なので、遠距離でも重なり線が消えない。符号/量は UI で調整可。
+    // 深度押し込み (★v0.1.9 以降は相対量): vpos.z にビュー距離の N% を上乗せ。
+    //   旧: 固定ワールド単位 (vpos.z -= depthBias) だと小さいメッシュでは相対的に
+    //       強すぎ、大きいメッシュや遠距離では相対的に小さすぎて z-fighting でノイズが出た。
+    //   新: vpos.z *= (1 + depthBias) で、距離に比例した一定比率の押し込みになる。
+    //   これでどの距離/どのサイズのメッシュでも同じ depthBias 値で破綻しない。
+    //   Maya view 空間はカメラが -Z を見るので vpos.z<0。(1+bias)倍すると負値がさらに大きな
+    //   負値になり=カメラから遠ざかる方向。元メッシュがSCRN の前に来て外周だけ残る。
     float4 vpos = mul(float4(IN.Position, 1.0f), gWV);
-    vpos.z -= depthBias;
+    vpos.z *= (1.0f + depthBias);
     float4 clipB = mul(vpos, gProj);
     float  bw = (abs(clipB.w) > 1e-6f) ? clipB.w : 1e-6f;
     clip.z = (clipB.z / bw) * clip.w;                     // 深度のみ差し替え（太さに影響しない）
@@ -587,48 +592,14 @@ def _build_screen_network(line, shape, color):
             cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
         except Exception:
             pass
-    # 重なり深度押し込み（ビュー空間）の既定値を反映。
-    # ★メッシュサイズに応じた自動スケール: depthBias はビュー空間の絶対ワールド単位なので、
-    # 大きいメッシュ(bbox 対角 >> 1)では _SCRN_ZBIAS(0.02 既定)が小さすぎて SCRN メッシュ
-    # が元メッシュを覆い隠す「全面黒」になる。bbox 対角 D に対して D * 0.015 を下限として
-    # 採用し、_SCRN_ZBIAS(UI 値)と比較して大きい方を使う。これで小さい球でも 75 単位の
-    # プロップでも同じ UI 既定値のまま適切な押し込みになる(実機で bbox 75 → 自動 ~1.1)。
+    # 重なり深度押し込み (★v0.1.9+ は相対値 = ビュー距離の N% で押し込み)。
+    # HLSL 側の vpos.z *= (1 + depthBias) に合わせ、距離に比例した相対押し込みになる。
+    # メッシュサイズ依存の bbox スケーリングは不要。_SCRN_ZBIAS 既定 0.02 のまま全スケールで動く。
     if cmds.attributeQuery(SCRN_DEPTH_BIAS, node=shd, exists=True):
-        auto_bias = _SCRN_ZBIAS
-        # 複数の手段で bbox 対角を取る(どれか成功したものを使う)
-        diag = 0.0
-        for try_target in (line, shape):
-            try:
-                bb = cmds.xform(try_target, q=True, ws=True, bb=True)
-                if bb and len(bb) == 6:
-                    d = ((bb[3]-bb[0])**2 + (bb[4]-bb[1])**2 + (bb[5]-bb[2])**2) ** 0.5
-                    if d > diag:
-                        diag = d
-                        break
-            except Exception as _e:
-                try: om2.MGlobal.displayInfo("[SCRN] bbox query on {0} failed: {1}".format(try_target, _e))
-                except Exception: pass
-        if diag <= 0.0:
-            try:
-                bb = cmds.exactWorldBoundingBox(shape)
-                if bb and len(bb) == 6:
-                    diag = ((bb[3]-bb[0])**2 + (bb[4]-bb[1])**2 + (bb[5]-bb[2])**2) ** 0.5
-            except Exception:
-                pass
-        if diag > 0.0:
-            cand = diag * 0.015
-            if cand > auto_bias:
-                auto_bias = cand
-            try:
-                om2.MGlobal.displayInfo(
-                    "[SCRN] {0}: bbox diag={1:.1f} auto depthBias={2:.3f}"
-                    .format(_short(shd), diag, auto_bias))
-            except Exception: pass
         try:
-            cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, auto_bias)
-        except Exception as _e:
-            try: om2.MGlobal.displayWarning("[SCRN] setAttr depthBias failed: {0}".format(_e))
-            except Exception: pass
+            cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, _SCRN_ZBIAS)
+        except Exception:
+            pass
     cmds.sets(shape, e=True, forceElement=sg)
     # ★COLOR0 → SCRN_CSET(頂点カラー) を明示バインド。dx11Shader は既定で頂点色を
     #   自動バインドしないバージョンがあり、この場合 IN.Color.r が 0 のまま届き、
@@ -2196,16 +2167,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         srow = QtWidgets.QHBoxLayout()
         srow.addWidget(QtWidgets.QLabel("重なり深度(スクリーン)"))
         self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
-        # 大きいメッシュ(bbox 対角 >> 1)でも手動オーバーライドできるようにワイドレンジに。
-        # 自動スケール: 生成時に bbox 対角×0.015 を最低値として shader に書き込むので、
-        # 既定 0.02 のままで小さな球から大きなプロップまで追従する。
-        self.spn_scrn_bias.setRange(-20.0, 20.0); self.spn_scrn_bias.setDecimals(3)
-        self.spn_scrn_bias.setSingleStep(0.05); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
+        # v0.1.9 以降は相対値(ビュー深度の N%)。0.02 で view z を 2% 奥へ押す。
+        # どの距離/メッシュサイズでも同じ値で破綻しない(hlsl 側 vpos.z *= (1+depthBias))。
+        self.spn_scrn_bias.setRange(-0.5, 0.5); self.spn_scrn_bias.setDecimals(3)
+        self.spn_scrn_bias.setSingleStep(0.005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
         self.spn_scrn_bias.setToolTip(
-            "スクリーン輪郭の深度押し込み量（ビュー空間＝カメラ実距離基準）。\n"
-            "生成時に自動でメッシュ bbox 対角 × 0.015 を下限として設定されるので、\n"
-            "既定値のままでも大きいメッシュで『全面黒覆い』にならない。\n"
-            "手動で増やすと重なり線がより奥に沈む(効きが逆なら符号を反転)。全スクリーン輪郭に即反映。")
+            "スクリーン輪郭の深度押し込み量(ビュー距離の比率・v0.1.9 以降は相対値)。\n"
+            "0.02 = カメラから見た深度の 2% 分だけ奥へ押す(=元メッシュが前に出て外周だけ残る)。\n"
+            "どの距離・どのサイズのメッシュでも同じ値で動く(距離で線が消えたりせず、\n"
+            "遠距離 z-fighting ノイズも出ない)。符号を反転すると押し出し方向が逆に。")
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
