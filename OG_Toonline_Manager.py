@@ -118,7 +118,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -456,26 +456,45 @@ float facing_dot(float3 vspos, float3 vsnrm)
 }
 
 // エッジ(a,b) 上で facing が符号反転する点(シルエット上)を求め、
-// その点のクリップ座標と ColR を返す。
+// その点のクリップ座標・ColR・view 空間位置と法線 を返す。
 // v0.1.14: distance-invariant 深度バイアス。クリップ空間で cpos.z を depthBias*cpos.w だけ
 // camera 寄りに引く。NDC Z で一定量のオフセットになるので、カメラがどれだけ遠くても
 // 他オブジェクトとの重なり線が消えない。
+// v0.1.15b: perp 計算のため補間済み VSPos と VSNrm も返す（隣接三角形と完全一致する miter joint 用）。
 void edge_crossing(V2G a, V2G b, float fa, float fb,
-                   out float4 cpos, out float colR)
+                   out float4 cpos, out float colR,
+                   out float3 vspos, out float3 vsnrm)
 {
     float t = fa / (fa - fb);
-    float3 vp = lerp(a.VSPos, b.VSPos, t);
-    float4 vp4 = float4(vp, 1.0f);
+    vspos = lerp(a.VSPos, b.VSPos, t);
+    vsnrm = normalize(lerp(a.VSNrm, b.VSNrm, t));
+    float4 vp4 = float4(vspos, 1.0f);
     cpos = mul(vp4, gProj);
     cpos.z -= depthBias * cpos.w;   // 距離不変: NDC-Z を一定量 camera 側へ
     colR = lerp(a.ColR, b.ColR, t);
 }
 
-// 頂点 VSPos を投影した NDC 座標（centroid 計算用）。
+// 頂点 VSPos を投影した NDC 座標。
 float2 vs_to_ndc(float3 vspos)
 {
     float4 cp = mul(float4(vspos, 1.0f), gProj);
     return cp.xy / max(abs(cp.w), 1e-6f);
+}
+
+// v0.1.15b: クロス点の perp（太さ方向）= 法線を NDC に投影した方向。
+// 共有クロス点では隣接三角形も同じ補間 VSPos/VSNrm になるため、両側で完全に同じ perp に
+// なり、quad の外側コーナーが完全一致（miter joint 相当）→ パイスライス隙間/破線が出ない。
+// 法線は正の側＝視差的に外側を向くので、別途「外向きに揃える」判定は不要。
+float2 perp_from_normal(float3 vspos, float3 vsnrm)
+{
+    // 視点距離に比例した小さいステップで前方差分（投影の線形領域内）。
+    float eps = 0.001f * max(abs(vspos.z), 1.0f);
+    float2 n0 = vs_to_ndc(vspos);
+    float2 n1 = vs_to_ndc(vspos + vsnrm * eps);
+    float2 d = n1 - n0;
+    float l = length(d);
+    if (l < 1e-6f) return float2(1.0f, 0.0f);
+    return d / l;
 }
 
 [maxvertexcount(4)]
@@ -492,79 +511,69 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     int ncross = (c01 ? 1 : 0) + (c12 ? 1 : 0) + (c20 ? 1 : 0);
     if (ncross != 2) return;  // 全頂点同符号 → シルエット外
 
-    // 横断する 2 エッジ上で facing=0 となる点を 2 つ求める
+    // 横断する 2 エッジ上で facing=0 となる点を 2 つ求める。VSPos/VSNrm も返す（perp 用）。
     float4 p1, p2;
     float cr1, cr2;
+    float3 vsp1, vsp2, vsn1, vsn2;
     if (c01 && c12) {
-        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1);
-        edge_crossing(tri[1], tri[2], f1, f2, p2, cr2);
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1);
+        edge_crossing(tri[1], tri[2], f1, f2, p2, cr2, vsp2, vsn2);
     } else if (c12 && c20) {
-        edge_crossing(tri[1], tri[2], f1, f2, p1, cr1);
-        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2);
+        edge_crossing(tri[1], tri[2], f1, f2, p1, cr1, vsp1, vsn1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2);
     } else {
-        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1);
-        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2);
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2);
     }
 
-    float w1 = max(abs(p1.w), 1e-6f);
-    float w2 = max(abs(p2.w), 1e-6f);
+    // v0.1.15b: p.w の符号は保つ（abs で潰すと視点裏のクロスで quad が flip）。
+    //   near_eps 未満（ニアプレーン手前・カメラ背後）は丸ごと捨てる。
+    if (p1.w < 1e-3f || p2.w < 1e-3f) return;
+    float w1 = p1.w;
+    float w2 = p2.w;
     float2 ndc1 = p1.xy / w1;
     float2 ndc2 = p2.xy / w2;
 
-    // エッジ方向(NDC) と その 90° 回転(perp) → 太さ方向
-    float2 edir = ndc2 - ndc1;
-    float elen = length(edir);
-    if (elen < 1e-6f) return;
-    edir /= elen;
-    float2 perp = float2(-edir.y, edir.x);
-
-    // v0.1.14: perp 方向を「三角形の外側」に向ける。三角形 centroid の NDC を求め、
-    // perp が centroid から離れる向きになるよう符号を揃える。そうすると quad が
-    // メッシュ内側へ張り出さず、steep angle で「面に黒が乗る」のを防ぐ。
-    float2 c0_ndc = vs_to_ndc(tri[0].VSPos);
-    float2 c1_ndc = vs_to_ndc(tri[1].VSPos);
-    float2 c2_ndc = vs_to_ndc(tri[2].VSPos);
-    float2 tri_center = (c0_ndc + c1_ndc + c2_ndc) * (1.0f / 3.0f);
-    float2 mid = (ndc1 + ndc2) * 0.5f;
-    if (dot(perp, tri_center - mid) > 0.0f) perp = -perp;  // 外向きに反転
-
-    // 距離 attenuation(clip.w ベース): 遠距離で線が緩やかに細くなる
-    float scale = 500.0f;
-    float atten1 = max(scale / max(scale + w1, 1.0f), 0.3f);
-    float atten2 = max(scale / max(scale + w2, 1.0f), 0.3f);
+    // v0.1.15b: perp は補間 VSNrm の NDC 射影方向。共有クロス点では隣接三角形も同じ
+    // 補間値になる = 両側で perp が完全一致 → quad 外側コーナーがピクセル一致で繋がる
+    // → 「破線」化が消える（真の miter joint 相当）。法線は正の側＝外側なので、
+    // 旧 back_avg 判定は不要。
+    float2 perp1 = perp_from_normal(vsp1, vsn1);
+    float2 perp2 = perp_from_normal(vsp2, vsn2);
 
     float2 px = float2(2.0f / max(gScreen.x, 1.0f), 2.0f / max(gScreen.y, 1.0f));
 
-    // v0.1.14: 太さ長手ゆらぎ (waviness)。両端点でハッシュ→線が「震える」ように太さが変わる。
+    // v0.1.15: 太さ長手ゆらぎ (waviness)。両端点でハッシュ→線が「震える」ように太さが変わる。
     float phase1 = hash12(ndc1 * brushNoiseScale * 100.0f);
     float phase2 = hash12(ndc2 * brushNoiseScale * 100.0f);
     float wav1 = 1.0f + brushWaviness * (phase1 - 0.5f) * 2.0f;
     float wav2 = 1.0f + brushWaviness * (phase2 - 0.5f) * 2.0f;
 
-    // v0.1.14: asymmetric quad。内側 15% / 外側 85% に振り分けて、内側オーバーハング最小化
-    // （連結性のため完全に 0 にはしない。わずかに内側にもあることでシルエット交点間がつながる）。
-    float out_ratio = 0.85f;
-    float in_ratio  = 0.15f;
-    float2 off_out1 = perp * (thickness * cr1 * atten1 * wav1 * out_ratio) * px;
-    float2 off_out2 = perp * (thickness * cr2 * atten2 * wav2 * out_ratio) * px;
-    float2 off_in1  = perp * (thickness * cr1 * atten1 * wav1 * in_ratio ) * px;
-    float2 off_in2  = perp * (thickness * cr2 * atten2 * wav2 * in_ratio ) * px;
+    // v0.1.15: 背面法 (inverted hull) と等価な均一太さ。
+    //   - 距離 attenuation なし（頂点ごとの w で太さがばらつく主因だった）
+    //   - 完全に外向きの quad（内側 0、外側 thickness）: 1 本の線＝ thickness ピクセル
+    //   - 線幅 = thickness * cr * wav ピクセル（cr=曲率、wav=ブラシゆらぎ）
+    // perp は NDC 単位ベクトル、px = 2/screen。off を w 乗算後に除算すると
+    // ピクセル距離が perp * thickness とちょうど一致する（長さ厳密に = thickness px）。
+    float2 off1 = perp1 * (thickness * cr1 * wav1) * px;
+    float2 off2 = perp2 * (thickness * cr2 * wav2) * px;
 
-    // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(-1 内側..+1 外側)
+    // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(0 内側=silhouette..1 外側)
     G2P v;
-    v.HPos = float4((ndc1 - off_in1 ) * w1, p1.z, w1); v.UV = float2(0.0f, -1.0f); stream.Append(v);
-    v.HPos = float4((ndc1 + off_out1) * w1, p1.z, w1); v.UV = float2(0.0f,  1.0f); stream.Append(v);
-    v.HPos = float4((ndc2 - off_in2 ) * w2, p2.z, w2); v.UV = float2(1.0f, -1.0f); stream.Append(v);
-    v.HPos = float4((ndc2 + off_out2) * w2, p2.z, w2); v.UV = float2(1.0f,  1.0f); stream.Append(v);
+    v.HPos = float4(ndc1         * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
+    v.HPos = float4((ndc1 + off1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
+    v.HPos = float4(ndc2         * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
+    v.HPos = float4((ndc2 + off2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
 }
 
 float4 PShader(G2P i) : SV_Target
 {
-    // v0.1.14: ペンシル風縁のカサつき。
-    // |V| が 1 に近いほど線の縁 → そこでランダム discard すると毛羽立ち/鉛筆質感に。
+    // v0.1.15: ペンシル風縁のカサつき。
+    // UV.y: 0 = シルエット側(内), 1 = 外側。両端ほど「縁」なので、|UV.y - 0.5|*2 で縁度。
+    // 中央(0.5)は残し、両端ほどランダム discard して毛羽立たせる。
     if (brushRoughness > 0.001f) {
-        float edge = abs(i.UV.y);           // 0=中心, 1=縁
-        float rough = brushRoughness * edge * edge;  // 中心は残し縁ほど強く
+        float edge = abs(i.UV.y - 0.5f) * 2.0f;  // 0=中心, 1=縁
+        float rough = brushRoughness * edge * edge;
         float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
         if (h < rough) discard;
     }
