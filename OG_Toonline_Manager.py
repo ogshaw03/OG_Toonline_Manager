@@ -112,7 +112,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -319,10 +319,11 @@ float thickness <
 
 float depthBias <
     string UIName = "Overlap Depth Bias (view)";
-    float UIMin = -1.0;
-    float UIMax = 1.0;
-    float UIStep = 0.001;
+    float UIMin = -20.0;
+    float UIMax = 20.0;
+    float UIStep = 0.01;
 > = 0.02;   // 元メッシュに内側を隠させるビュー空間の押し込み量（重なり線の残り方を調整・符号反転可）
+            // 大きいメッシュ(bbox 対角 >> 1)用に range を広げ、生成時に bbox*0.015 で自動設定。
 
 float3 lineColor <
     string UIName = "Line Color";
@@ -586,12 +587,48 @@ def _build_screen_network(line, shape, color):
             cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
         except Exception:
             pass
-    # 重なり深度押し込み（ビュー空間）の既定値を現在の UI 値で反映
+    # 重なり深度押し込み（ビュー空間）の既定値を反映。
+    # ★メッシュサイズに応じた自動スケール: depthBias はビュー空間の絶対ワールド単位なので、
+    # 大きいメッシュ(bbox 対角 >> 1)では _SCRN_ZBIAS(0.02 既定)が小さすぎて SCRN メッシュ
+    # が元メッシュを覆い隠す「全面黒」になる。bbox 対角 D に対して D * 0.015 を下限として
+    # 採用し、_SCRN_ZBIAS(UI 値)と比較して大きい方を使う。これで小さい球でも 75 単位の
+    # プロップでも同じ UI 既定値のまま適切な押し込みになる(実機で bbox 75 → 自動 ~1.1)。
     if cmds.attributeQuery(SCRN_DEPTH_BIAS, node=shd, exists=True):
+        auto_bias = _SCRN_ZBIAS
+        # 複数の手段で bbox 対角を取る(どれか成功したものを使う)
+        diag = 0.0
+        for try_target in (line, shape):
+            try:
+                bb = cmds.xform(try_target, q=True, ws=True, bb=True)
+                if bb and len(bb) == 6:
+                    d = ((bb[3]-bb[0])**2 + (bb[4]-bb[1])**2 + (bb[5]-bb[2])**2) ** 0.5
+                    if d > diag:
+                        diag = d
+                        break
+            except Exception as _e:
+                try: om2.MGlobal.displayInfo("[SCRN] bbox query on {0} failed: {1}".format(try_target, _e))
+                except Exception: pass
+        if diag <= 0.0:
+            try:
+                bb = cmds.exactWorldBoundingBox(shape)
+                if bb and len(bb) == 6:
+                    diag = ((bb[3]-bb[0])**2 + (bb[4]-bb[1])**2 + (bb[5]-bb[2])**2) ** 0.5
+            except Exception:
+                pass
+        if diag > 0.0:
+            cand = diag * 0.015
+            if cand > auto_bias:
+                auto_bias = cand
+            try:
+                om2.MGlobal.displayInfo(
+                    "[SCRN] {0}: bbox diag={1:.1f} auto depthBias={2:.3f}"
+                    .format(_short(shd), diag, auto_bias))
+            except Exception: pass
         try:
-            cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, _SCRN_ZBIAS)
-        except Exception:
-            pass
+            cmds.setAttr(shd + "." + SCRN_DEPTH_BIAS, auto_bias)
+        except Exception as _e:
+            try: om2.MGlobal.displayWarning("[SCRN] setAttr depthBias failed: {0}".format(_e))
+            except Exception: pass
     cmds.sets(shape, e=True, forceElement=sg)
     # ★COLOR0 → SCRN_CSET(頂点カラー) を明示バインド。dx11Shader は既定で頂点色を
     #   自動バインドしないバージョンがあり、この場合 IN.Color.r が 0 のまま届き、
@@ -2159,12 +2196,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         srow = QtWidgets.QHBoxLayout()
         srow.addWidget(QtWidgets.QLabel("重なり深度(スクリーン)"))
         self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
-        self.spn_scrn_bias.setRange(-1.0, 1.0); self.spn_scrn_bias.setDecimals(3)
-        self.spn_scrn_bias.setSingleStep(0.005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
+        # 大きいメッシュ(bbox 対角 >> 1)でも手動オーバーライドできるようにワイドレンジに。
+        # 自動スケール: 生成時に bbox 対角×0.015 を最低値として shader に書き込むので、
+        # 既定 0.02 のままで小さな球から大きなプロップまで追従する。
+        self.spn_scrn_bias.setRange(-20.0, 20.0); self.spn_scrn_bias.setDecimals(3)
+        self.spn_scrn_bias.setSingleStep(0.05); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
         self.spn_scrn_bias.setToolTip(
             "スクリーン輪郭の深度押し込み量（ビュー空間＝カメラ実距離基準）。\n"
-            "遠ざかると重なり線が消える場合に調整（下げる／効きが逆なら符号を反転）。\n"
-            "小さすぎると外周がチラつき、大きすぎると重なり線が沈む。全スクリーン輪郭に即反映。")
+            "生成時に自動でメッシュ bbox 対角 × 0.015 を下限として設定されるので、\n"
+            "既定値のままでも大きいメッシュで『全面黒覆い』にならない。\n"
+            "手動で増やすと重なり線がより奥に沈む(効きが逆なら符号を反転)。全スクリーン輪郭に即反映。")
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
