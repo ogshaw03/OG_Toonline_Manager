@@ -118,7 +118,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.15"
+__version__ = "0.1.16"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2453,16 +2453,37 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
         lay.addWidget(self.chk_scrn_fresnel)
 
-        # 硬いエッジ(二面角>30°)に沿ったクリース線も生成(既定 ON)。
+        # 硬いエッジ(二面角>しきい値)に沿ったクリース線も生成(既定 ON)。
+        # しきい値はスピンで調整（大きいほど尖った折り目だけ拾う＝線が減る）。
+        crease_row = QtWidgets.QHBoxLayout()
         self.chk_scrn_crease = QtWidgets.QCheckBox(
             "硬いエッジ(折り目)にもペン線を出す(クリース線)")
         self.chk_scrn_crease.setChecked(True)
         self.chk_scrn_crease.setToolTip(
-            "ON: 輪郭生成時に、メッシュの硬いエッジ(二面角 > 30°)に沿って\n"
+            "ON: 輪郭生成時に、メッシュの硬いエッジ(二面角 > しきい値)に沿って\n"
             "チューブ状のラインを自動生成する。立方体の角や服の折り目など、\n"
             "SCRN/フレネルでは拾いにくいシャープな折り目に Pencil+4 風のペン線が入る。\n"
             "滑らかな閉曲面(球など)では折り目が無いため生成されない。")
-        lay.addWidget(self.chk_scrn_crease)
+        crease_row.addWidget(self.chk_scrn_crease)
+        crease_row.addWidget(QtWidgets.QLabel("角度"))
+        self.spn_crease_angle = QtWidgets.QDoubleSpinBox()
+        self.spn_crease_angle.setRange(1.0, 179.0)
+        self.spn_crease_angle.setDecimals(0)
+        self.spn_crease_angle.setSingleStep(5.0)
+        self.spn_crease_angle.setValue(CREASE_ANGLE)
+        self.spn_crease_angle.setSuffix("°")
+        self.spn_crease_angle.setFixedWidth(70)
+        self.spn_crease_angle.setToolTip(
+            "クリース判定の二面角しきい値。値が大きいほど「より尖った折り目だけ」拾う。\n"
+            "既定 30°: 少しでも曲がれば拾う（線が多め）\n"
+            "45°: 中くらい\n"
+            "60°: 立方体の角のような直角級だけ（線が少ない）")
+        crease_row.addWidget(self.spn_crease_angle)
+        crease_row.addStretch(1)
+        lay.addLayout(crease_row)
+        # チェック OFF のときはスピンもグレーに
+        self.chk_scrn_crease.toggled.connect(self.spn_crease_angle.setEnabled)
+        self.spn_crease_angle.setEnabled(self.chk_scrn_crease.isChecked())
 
         # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
         srow = QtWidgets.QHBoxLayout()
@@ -4220,6 +4241,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sel = cmds.ls(sl=True, long=True, type="transform")
         if not sel:
             cmds.warning("メッシュを選択してください"); return
+        # しきい値は UI スピンから取得（無ければ既定 CREASE_ANGLE）。
+        try:
+            crease_angle = float(self.spn_crease_angle.value())
+        except Exception:
+            crease_angle = CREASE_ANGLE
         made = 0
         skipped = 0
         cmds.undoInfo(openChunk=True)
@@ -4228,7 +4254,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
                     continue
-                edges = _crease_border_edges(shps[0], obj, CREASE_ANGLE)
+                edges = _crease_border_edges(shps[0], obj, crease_angle)
                 if not edges:
                     skipped += 1
                     continue
@@ -4263,7 +4289,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                          "折れ目/境界が無いメッシュは生成されません。".format(made))
         elif skipped:
             cmds.warning("クリース（二面角>{:.0f}°）も境界エッジも見つかりませんでした"
-                         "（滑らかな閉曲面では折れ目が無いため線は出ません）。".format(CREASE_ANGLE))
+                         "（滑らかな閉曲面では折れ目が無いため線は出ません）。".format(crease_angle))
 
     def create_edge_line(self, *args):
         """選択ポリゴンエッジに沿ってチューブ状のラインを追加（太さ調整可・元に追従）。"""
