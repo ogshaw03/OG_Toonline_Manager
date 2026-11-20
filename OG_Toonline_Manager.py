@@ -115,27 +115,49 @@ COL_GLOBAL  = (0.4, 0.8, 1.0)        # 全体=水色
 COL_GROUP   = (0.55, 0.9, 0.2)       # グループ=黄緑
 COL_LINE    = (1.0, 0.8, 0.0)        # ライン=黄
 
-# v0.1.19: プライマリ（主要アクション）ボタンの QSS。Maya のバージョン/テーマ差でも
-# 「選択メッシュに輪郭を生成 / 選択をすべてリセット / バージョン選択」が同じ dusty pink で
-# 統一表示されるよう明示指定。
+# v0.1.20: 配色をダークグレー背景 + 暖色イエローのプライマリボタンに変更。
+# ピンクより落ち着いた印象で、全体のダーク UI に馴染む色味。
+_WINDOW_BG     = "#2d2d2d"   # メインウィンドウ背景（ダークグレー）
+_WINDOW_FG     = "#e0e0e0"   # 文字色
+
+# プライマリ（主要アクション）ボタン QSS。Maya のバージョン/テーマ差でも
+# 「選択メッシュに輪郭を生成 / 選択をすべてリセット / バージョン選択」が
+# 同じ暖色イエローで統一表示されるよう明示指定。
 _PRIMARY_BTN_CSS = (
     "QPushButton {"
-    " background-color: #c38ba3;"
-    " color: #fff;"
-    " border: 1px solid #333;"
+    " background-color: #c9a848;"      # 暖色イエロー（dark gray に馴染む muted amber）
+    " color: #1a1a1a;"                 # コントラスト確保用の濃色文字
+    " border: 1px solid #5a4a20;"
     " padding: 4px 6px;"
     " border-radius: 3px;"
     "}"
-    "QPushButton:hover    { background-color: #d39bb3; }"
-    "QPushButton:pressed  { background-color: #a36b83; }"
-    "QPushButton:disabled { background-color: #6a5560; color:#aaa; }"
+    "QPushButton:hover    { background-color: #e0bf65; color:#111; }"
+    "QPushButton:pressed  { background-color: #a88a35; color:#000; }"
+    "QPushButton:disabled { background-color: #6a5e40; color:#9a9a9a; }"
+)
+
+# ダークグレー背景を Dialog に当てるための QSS（objectName=WINDOW_OBJ に一致）
+_DIALOG_BG_CSS = (
+    "QDialog#OG_Toonline_ManagerWin { background-color: " + _WINDOW_BG + "; }"
+    "QDialog#OG_Toonline_ManagerWin QLabel { color: " + _WINDOW_FG + "; background: transparent; }"
+)
+
+# 左上タイトルラベル QSS
+_TITLE_CSS = (
+    "QLabel#OG_Toonline_TitleLabel {"
+    " color: #c9a848;"                  # 暖色イエロー（プライマリ色）
+    " font-size: 14pt;"
+    " font-weight: bold;"
+    " padding: 4px 2px 2px 2px;"
+    " background: transparent;"
+    "}"
 )
 WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起動の防止に使用）
 
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2363,6 +2385,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         super(ToonOutlineUI, self).__init__(parent)
         self.setWindowTitle("OG_Toonline_Manager  —  v{0}".format(__version__))
         self.setObjectName(WINDOW_OBJ)
+        # v0.1.20: ダークグレー背景 + 暖色イエロー配色（objectName セット後に適用）
+        try:
+            self.setStyleSheet(_DIALOG_BG_CSS + _TITLE_CSS)
+        except Exception:
+            pass
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
@@ -2437,6 +2464,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
+
+        # v0.1.20: 左上タイトルラベル。暖色イエローの太字でブランドを明示。
+        self.lbl_title = QtWidgets.QLabel("OG Toonline Manager")
+        self.lbl_title.setObjectName("OG_Toonline_TitleLabel")
+        self.lbl_title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        lay.addWidget(self.lbl_title)
 
         # 全体倍率（常に最上部）
         self.w_global = QtWidgets.QWidget()
