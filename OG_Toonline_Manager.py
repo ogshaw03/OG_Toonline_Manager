@@ -75,8 +75,11 @@ GMULT       = "thicknessMult"        # グループ/全体コントローラー�
 FRES_SENS_ATTR = "fresSens"          # 全体コントローラーのフレネル感度アトリビュート（全フレネル線の maxWidthPx 倍率）
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
 CREASE_TAG  = "isToonCreaseLine"      # v0.1.24: クリース自動生成ラインの識別タグ（EDGE_TAG との並行指標）
-CREASES_GROUP_NAME = "__Creases__"    # v0.1.24: クリース線をまとめる専用グループ名（Outline_grp 直下）
+CREASES_GROUP_NAME = "__Creases__"    # v0.1.24: クリース線をまとめる専用サブグループ名
 CREASES_GROUP_DISPLAY = "クリース"    # v0.1.26: ツリー表示名（ノード名は内部で __Creases__ のまま）
+EDGES_GROUP_NAME   = "__Edges__"     # v0.1.31: 手動エッジ線をまとめる専用サブグループ名
+EDGES_GROUP_DISPLAY = "エッジ"        # v0.1.31: ツリー表示名
+MESH_GROUP_SUFFIX  = "_outlines"     # v0.1.31: オブジェクトごとのトップグループ接尾辞
 
 # v0.1.26: ライン単体表示モード（メッシュを useBackground で holdout）
 HOLDOUT_SHADER_NAME = "_toonHoldoutShader"
@@ -218,7 +221,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.30"
+__version__ = "0.1.31"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -3139,6 +3142,27 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.addAttr(grp, ln=GROUP_TAG, at="bool", dv=True)
         return grp
 
+    def _ensure_mesh_group(self, mesh_short):
+        """v0.1.31: メッシュごとのトップグループ <mesh>_outlines を確保。"""
+        return self._ensure_group(mesh_short + MESH_GROUP_SUFFIX)
+
+    def _ensure_sub_group(self, parent_group, sub_name):
+        """v0.1.31: 指定グループ直下のサブグループを確保。"""
+        for c in cmds.listRelatives(parent_group, c=True, type="transform", f=True) or []:
+            if _short(c) == sub_name:
+                return c
+        grp = cmds.group(em=True, name=sub_name, parent=parent_group)
+        cmds.addAttr(grp, ln=GROUP_TAG, at="bool", dv=True)
+        return grp
+
+    def _subgroups_of(self, group):
+        """GROUP_TAG を持つ直下のサブグループ。"""
+        out = []
+        for c in cmds.listRelatives(group, c=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(GROUP_TAG, node=c, exists=True):
+                out.append(c)
+        return out
+
     def _current_group(self):
         name = self.group_combo.currentText().strip() if self.group_combo.count() else ""
         return self._ensure_group(name or DEFAULT_GROUP)
@@ -3560,12 +3584,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         parent_item.addChild(it)
         return it
 
-    def _add_group_item(self, group_node, lines, visible):
-        """展開式（プルダウン）のグループ項目を追加する。"""
+    def _add_group_item(self, group_node, lines, visible, parent_item=None):
+        """v0.1.31: parent_item 指定でサブグループとしてネスト追加。
+        指定なし=トップレベル追加（既存動作）。"""
         label = _short(group_node) if group_node else "(未分類)"
-        # v0.1.26: __Creases__ はツリー表示では「クリース」に見せる（ノード名は内部で維持）
+        # v0.1.26: __Creases__ はツリー表示では「クリース」に見せる。v0.1.31: __Edges__ も。
         if label == CREASES_GROUP_NAME:
             label = CREASES_GROUP_DISPLAY
+        elif label == EDGES_GROUP_NAME:
+            label = EDGES_GROUP_DISPLAY
         gi = QtWidgets.QTreeWidgetItem([label, "", ""])
         if group_node:
             gi.setData(0, QtCore.Qt.UserRole, group_node)
@@ -3586,11 +3613,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         & ~QtCore.Qt.ItemIsUserCheckable & ~QtCore.Qt.ItemIsDragEnabled)
         f = gi.font(0); f.setBold(True); gi.setFont(0, f)
         gi.setBackground(0, QtGui.QBrush(QtGui.QColor(70, 78, 88)))
-        self.tree.addTopLevelItem(gi)
+        if parent_item is None:
+            self.tree.addTopLevelItem(gi)
+        else:
+            parent_item.addChild(gi)
         for line in lines:
             self._add_line_item(gi, line)
-            # 既存ラインにもコントローラー・接続・追従ジョブを確保（旧データ/再開対応）
             _ensure_line_anim(line, self._thickness_of(line) or 0.05)
+        # v0.1.31: サブグループを再帰的に子として追加
+        if group_node:
+            for sub in self._subgroups_of(group_node):
+                sub_vis = True
+                try:
+                    sub_vis = bool(cmds.getAttr(sub + ".visibility"))
+                except Exception:
+                    pass
+                self._add_group_item(sub, self._lines_in(sub), sub_vis, parent_item=gi)
         gi.setExpanded(True)
         return gi
 
@@ -4473,7 +4511,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not sel:
             cmds.warning("メッシュを選択してください"); return
         thick = DEFAULT_THICK
-        grp = self._current_group()
 
         cmds.undoInfo(openChunk=True)
         made = []
@@ -4483,6 +4520,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if not shps:
                     continue
                 src = shps[0]
+                # v0.1.31: オブジェクトごとのトップグループに入れる
+                grp = self._ensure_mesh_group(_short(obj))
 
                 # 元と同じ位置に複製 → 履歴削除で静的化
                 dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
@@ -4548,7 +4587,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not sel:
             cmds.warning("メッシュを選択してください"); return
         thick = DEFAULT_THICK
-        grp = self._current_group()
 
         cmds.undoInfo(openChunk=True)
         made = []
@@ -4558,6 +4596,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if not shps:
                     continue
                 src = shps[0]
+                # v0.1.31: オブジェクトごとのトップグループに入れる
+                grp = self._ensure_mesh_group(_short(obj))
                 dup = cmds.duplicate(obj, name=_short(obj) + "_screen", rr=True)[0]
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
@@ -4688,6 +4728,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 chains = _split_edges_into_chains(shps[0], indices)
                 any_made = False
+                # v0.1.31: このメッシュのクリースサブグループを事前確保
+                mesh_grp = self._ensure_mesh_group(short)
+                crease_sub = self._ensure_sub_group(mesh_grp, CREASES_GROUP_NAME)
                 for chain in chains:
                     if not chain: continue
                     comps = ["{}.e[{}]".format(short, i) for i in chain]
@@ -4697,39 +4740,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         any_made = True
                     except Exception:
                         pass
-                if any_made:
-                    made += 1
-            # v0.1.24: 新規生成されたクリース線だけを処理する
-            new_lines = _all_edges() - before
-            if new_lines:
-                # 専用グループ (__Creases__) 確保 → 全クリース線を集約
-                creases_grp = self._ensure_group(CREASES_GROUP_NAME)
-                for ln in new_lines:
-                    # CREASE_TAG を付けてクリース出自を識別
+                # v0.1.31: 新規作成されたエッジラインをこのメッシュのクリースサブグループへ移動＋タグ付け
+                after_edges = _all_edges()
+                new_now = after_edges - before
+                before = after_edges   # 次のメッシュのため update
+                for ln in new_now:
                     if not cmds.attributeQuery(CREASE_TAG, node=ln, exists=True):
-                        try:
-                            cmds.addAttr(ln, ln=CREASE_TAG, at="bool", dv=True)
-                        except Exception:
-                            pass
-                    # __Creases__ へ親子移動
+                        try: cmds.addAttr(ln, ln=CREASE_TAG, at="bool", dv=True)
+                        except Exception: pass
                     try:
                         cur_parent = cmds.listRelatives(ln, parent=True, f=True)
-                        if not cur_parent or cur_parent[0] != creases_grp:
-                            cmds.parent(ln, creases_grp)
+                        if not cur_parent or cur_parent[0] != crease_sub:
+                            cmds.parent(ln, crease_sub)
                     except Exception:
                         pass
-                    # v0.1.23: ランププロファイルの書き込み（フラットなら変更しない）
-                    if crease_profile_str:
-                        ctrl = _ctrl_of(ln)
-                        if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
-                            try:
-                                cmds.setAttr(ctrl + "." + CTRL_PROFILE, crease_profile_str, type="string")
-                            except Exception:
-                                pass
-                        try:
-                            _update_curv_weights(ln)
-                        except Exception:
-                            pass
+                if any_made:
+                    made += 1
         finally:
             cmds.undoInfo(closeChunk=True)
         cmds.select(clear=True)
@@ -4750,7 +4776,27 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # 新規エッジラインは UI の現在値ではなく初期値で生成する
         thick = DEFAULT_EDGE_THICK
         _, sg = _ensure_shader(self._color)
-        grp = self._current_group()
+        # v0.1.31: エッジ所属メッシュを特定 → <mesh>_outlines/__Edges__ サブグループへ
+        mesh_short = None
+        try:
+            # edges[0] = "pCube1.e[3]" → mesh transform name
+            mesh_sh_path = edges[0].split(".")[0]
+            # path may be short or full; get the mesh shape → parent transform short name
+            shp = cmds.ls(mesh_sh_path, type="transform") or cmds.ls(mesh_sh_path, type="mesh") or []
+            if shp:
+                node = shp[0]
+                if cmds.objectType(node) == "mesh":
+                    par = cmds.listRelatives(node, parent=True) or []
+                    if par: mesh_short = par[0]
+                else:
+                    mesh_short = node
+        except Exception:
+            mesh_short = None
+        if mesh_short:
+            mesh_grp = self._ensure_mesh_group(mesh_short)
+            grp = self._ensure_sub_group(mesh_grp, EDGES_GROUP_NAME)
+        else:
+            grp = self._current_group()
 
         cmds.undoInfo(openChunk=True)
         line = None
