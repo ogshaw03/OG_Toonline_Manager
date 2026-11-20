@@ -142,22 +142,37 @@ _DIALOG_BG_CSS = (
     "QDialog#OG_Toonline_ManagerWin QLabel { color: " + _WINDOW_FG + "; background: transparent; }"
 )
 
-# 左上タイトルラベル QSS
+# 左上タイトルラベル QSS + ヘッダーバージョン + ⋮メニューボタン
 _TITLE_CSS = (
     "QLabel#OG_Toonline_TitleLabel {"
     " color: #c9a848;"                  # 暖色イエロー（プライマリ色）
     " font-size: 14pt;"
     " font-weight: bold;"
-    " padding: 4px 2px 2px 2px;"
+    " padding: 4px 4px 2px 2px;"
     " background: transparent;"
     "}"
+    "QLabel#OG_Toonline_HeaderVer {"
+    " color: #888;"                     # 小さいグレーの version 表示
+    " font-size: 8pt;"
+    " padding-bottom: 6px;"
+    " background: transparent;"
+    "}"
+    "QToolButton#OG_Toonline_MenuBtn {"
+    " background: transparent;"
+    " color: #c0c0c0;"
+    " border: none;"
+    " font-size: 16pt;"
+    " padding: 0 4px;"
+    "}"
+    "QToolButton#OG_Toonline_MenuBtn:hover { color: #ffffff; background: #3a3a3a; border-radius: 3px; }"
+    "QToolButton#OG_Toonline_MenuBtn::menu-indicator { image: none; width:0px; }"
 )
 WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起動の防止に使用）
 
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.20"
+__version__ = "0.1.21"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2465,11 +2480,38 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
 
-        # v0.1.20: 左上タイトルラベル。暖色イエローの太字でブランドを明示。
-        self.lbl_title = QtWidgets.QLabel("OG Toonline Manager")
+        # v0.1.21: ヘッダー: 左にタイトル+バージョン小、右に ⋮ メニュー（SIMFLOW 風）。
+        hrow = QtWidgets.QHBoxLayout()
+        hrow.setContentsMargins(0, 0, 0, 0)
+        self.lbl_title = QtWidgets.QLabel("OG TOONLINE")
         self.lbl_title.setObjectName("OG_Toonline_TitleLabel")
         self.lbl_title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        lay.addWidget(self.lbl_title)
+        hrow.addWidget(self.lbl_title)
+        self.lbl_header_ver = QtWidgets.QLabel("v{0}".format(__version__))
+        self.lbl_header_ver.setObjectName("OG_Toonline_HeaderVer")
+        self.lbl_header_ver.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+        hrow.addWidget(self.lbl_header_ver)
+        hrow.addStretch(1)
+        # ⋮ メニューボタン
+        self.btn_menu = QtWidgets.QToolButton()
+        self.btn_menu.setObjectName("OG_Toonline_MenuBtn")
+        self.btn_menu.setText(u"⋮")   # U+22EE vertical ellipsis
+        self.btn_menu.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.btn_menu.setToolTip("メニュー（バージョン選択・情報など）")
+        self.btn_menu.setFixedWidth(28)
+        menu = QtWidgets.QMenu(self)
+        act_ver = menu.addAction("バージョン選択…")
+        act_ver.setToolTip("GitHub Releases/開発ブランチ先端から任意バージョンに切替。Maya 再起動不要。")
+        act_ver.triggered.connect(open_version_dialog)
+        act_upd = menu.addAction("最新を取得")
+        act_upd.setToolTip("開発ブランチの先端を即座にインストール。")
+        act_upd.triggered.connect(update_from_github)
+        menu.addSeparator()
+        act_about = menu.addAction("バージョン情報…")
+        act_about.triggered.connect(self._show_about)
+        self.btn_menu.setMenu(menu)
+        hrow.addWidget(self.btn_menu)
+        lay.addLayout(hrow)
 
         # 全体倍率（常に最上部）
         self.w_global = QtWidgets.QWidget()
@@ -2789,20 +2831,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_del.setStyleSheet("color:#888;")
         lay.addWidget(self.lbl_del)
 
-        # ---- フッター: バージョン表示 + バージョン管理(リリース一覧から切替) ----
-        frow = QtWidgets.QHBoxLayout()
-        self.lbl_version = QtWidgets.QLabel("OG_Toonline_Manager  v{0}".format(__version__))
-        self.lbl_version.setStyleSheet("color:#888;")
-        frow.addWidget(self.lbl_version, 1)
-        self.btn_update = QtWidgets.QPushButton("バージョン選択")
-        self.btn_update.setToolTip(
-            "GitHub の Releases から任意のバージョンをインストール。\n"
-            "開発ブランチ(dev)の先端も選択可。Maya 再起動不要。\n"
-            "※ ネットワーク接続と Maya 2022+(Python3) が必要。")
-        self.btn_update.clicked.connect(open_version_dialog)
-        self.btn_update.setStyleSheet(_PRIMARY_BTN_CSS)
-        frow.addWidget(self.btn_update)
-        lay.addLayout(frow)
+        # v0.1.21: フッターのバージョン表示/選択ボタンは ⋮ ヘッダーメニューへ移動済み。
 
     # ========== シーン走査ヘルパ ==========
     def _ensure_line_holder(self):
@@ -3157,6 +3186,21 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         try:
             cmds.setAttr(gc + "." + FRES_SENS_ATTR, float(self.spn_fres_sens.value()))
+        except Exception:
+            pass
+
+    def _show_about(self, *args):
+        """バージョン情報 ダイアログ（⋮ メニューから）。"""
+        try:
+            QtWidgets.QMessageBox.information(
+                self, "OG_Toonline_Manager",
+                "OG_Toonline_Manager v{0}\n\n"
+                "Maya 用の輪郭線生成ツール。\n"
+                "SCRN (GS シルエット) / フレネル (facing) / クリース (折れ目) を組み合わせて\n"
+                "Pencil+4 風の toon ラインを生成します。\n\n"
+                "取得元: {1}\n"
+                "GitHub: https://github.com/{2}/{3}".format(
+                    __version__, _GITHUB_BRANCH, _GITHUB_OWNER, _GITHUB_REPO))
         except Exception:
             pass
 
