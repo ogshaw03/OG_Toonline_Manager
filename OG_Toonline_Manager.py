@@ -194,7 +194,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.22"
+__version__ = "0.1.23"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2633,26 +2633,35 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "45°: 中くらい\n"
             "60°: 立方体の角のような直角級だけ（線が少ない）")
         crease_row.addWidget(self.spn_crease_angle)
-        crease_row.addWidget(QtWidgets.QLabel("端細り"))
-        self.spn_crease_taper = QtWidgets.QDoubleSpinBox()
-        self.spn_crease_taper.setRange(0.0, 1.0)
-        self.spn_crease_taper.setDecimals(2)
-        self.spn_crease_taper.setSingleStep(0.1)
-        self.spn_crease_taper.setValue(0.0)
-        self.spn_crease_taper.setFixedWidth(70)
-        self.spn_crease_taper.setToolTip(
-            "生成するクリース線の末端細り（0〜1）。線端が徐々に細くなって消える演出に。\n"
-            "0 = 端まで同じ太さ（既定）\n"
-            "0.5 = 端の半分が少しずつ細く\n"
-            "1.0 = 端がほぼ 0 まで細り、鉛筆の書き始め/書き終わりっぽく\n"
-            "生成後も個別ラインを選んで「太さプロファイル」で微調整可能。")
-        crease_row.addWidget(self.spn_crease_taper)
         crease_row.addStretch(1)
         lay.addLayout(crease_row)
-        # チェック OFF のときはスピンもグレーに
+
+        # v0.1.23: 生成時のクリース線プロファイル（ランプ）。端細り単発スピンを撤去し、
+        # 太さプロファイルで両端細り・片端細り・中央太らせ等を自由に設定できるように。
+        # 生成時に全新規ラインへ setAttr → _update_curv_weights で即反映。
+        prow2 = QtWidgets.QHBoxLayout()
+        prow2.addSpacing(16)   # チェック項目配下っぽく軽くインデント
+        prow2.addWidget(QtWidgets.QLabel("プロファイル"))
+        self.crease_ramp = _RampWidget()
+        self.crease_ramp.setMinimumHeight(28)
+        self.crease_ramp.setToolTip(
+            "生成するクリース線の太さプロファイル（長手方向の強弱）。\n"
+            "左クリックで点追加/移動、右クリックで削除。\n"
+            "例: 両端細り = (0,0) (0.1,1) (0.9,1) (1,0) で鉛筆風の線になる。\n"
+            "既定フラット (0,1)(1,1) の場合は線を均一に出す。\n"
+            "生成後も個別ラインを選んで同じランプで微調整可能。")
+        prow2.addWidget(self.crease_ramp, 1)
+        b_crp = QtWidgets.QPushButton(u"↺"); b_crp.setFixedWidth(26)
+        b_crp.setToolTip("プロファイルをフラット (0,1)(1,1) にリセット")
+        b_crp.clicked.connect(lambda: self.crease_ramp.set_points([[0.0, 1.0], [1.0, 1.0]]))
+        prow2.addWidget(b_crp)
+        lay.addLayout(prow2)
+
+        # チェック OFF のときは配下もグレーに
         def _crease_enabled(on):
             self.spn_crease_angle.setEnabled(on)
-            self.spn_crease_taper.setEnabled(on)
+            self.crease_ramp.setEnabled(on)
+            b_crp.setEnabled(on)
         self.chk_scrn_crease.toggled.connect(_crease_enabled)
         _crease_enabled(self.chk_scrn_crease.isChecked())
 
@@ -4458,11 +4467,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
             crease_angle = float(self.spn_crease_angle.value())
         except Exception:
             crease_angle = CREASE_ANGLE
-        # 端細り（0〜1）。生成後に各クリース線の endTaper に流す。
+        # v0.1.23: ランプから太さプロファイル文字列を作る。フラット (0,1)(1,1) なら何もしない。
+        crease_profile_str = None
         try:
-            crease_taper = float(self.spn_crease_taper.value())
+            pts = self.crease_ramp.points()
         except Exception:
-            crease_taper = 0.0
+            pts = None
+        if pts and not (len(pts) == 2 and
+                        abs(pts[0][0]) < 1e-4 and abs(pts[0][1] - 1.0) < 1e-4 and
+                        abs(pts[-1][0] - 1.0) < 1e-4 and abs(pts[-1][1] - 1.0) < 1e-4):
+            try:
+                crease_profile_str = _serialize_profile(pts)
+            except Exception:
+                crease_profile_str = None
         # 生成前の EDGE_TAG ライン集合を snapshot（生成後に差分で新規ラインを特定）
         def _all_edges():
             out = set()
@@ -4505,14 +4522,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 if any_made:
                     made += 1
-            # v0.1.17: 新規生成されたクリース線だけに端細りを書き込む
-            if crease_taper > 1e-4:
+            # v0.1.23: 新規生成されたクリース線だけに太さプロファイルを書き込む。
+            # フラット (0,1)(1,1) の場合は何もしない（既定と同じ）。
+            if crease_profile_str:
                 new_lines = _all_edges() - before
                 for ln in new_lines:
                     ctrl = _ctrl_of(ln)
-                    if ctrl and cmds.attributeQuery(CTRL_TAPER, node=ctrl, exists=True):
+                    if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
                         try:
-                            cmds.setAttr(ctrl + "." + CTRL_TAPER, crease_taper)
+                            cmds.setAttr(ctrl + "." + CTRL_PROFILE, crease_profile_str, type="string")
                         except Exception:
                             pass
                     try:
