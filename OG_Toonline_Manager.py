@@ -218,7 +218,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.26"
+__version__ = "0.1.27"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -3693,8 +3693,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
-        # v0.1.25: 種別色ドットをアイコンで表示（テキスト不要）
-        it.setIcon(0, _type_dot_icon(type_color))
+        # v0.1.27: 種別はテキスト色で表現（旧ドットアイコンはチェックボックスと紛らわしかったため）
+        it.setForeground(0, QtGui.QBrush(QtGui.QColor(*type_color)))
         it.setToolTip(0, "{} ({})".format(_short(line), type_label))
         # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
         it.setFlags((it.flags() | QtCore.Qt.ItemIsUserCheckable
