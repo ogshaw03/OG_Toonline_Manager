@@ -74,6 +74,8 @@ CTRL_LINK   = "toonCtrl"            # line 側の message 属性（→ controlle
 GMULT       = "thicknessMult"        # グループ/全体コントローラーの太さ倍率アトリビュート
 FRES_SENS_ATTR = "fresSens"          # 全体コントローラーのフレネル感度アトリビュート（全フレネル線の maxWidthPx 倍率）
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
+CREASE_TAG  = "isToonCreaseLine"      # v0.1.24: クリース自動生成ラインの識別タグ（EDGE_TAG との並行指標）
+CREASES_GROUP_NAME = "__Creases__"    # v0.1.24: クリース線をまとめる専用グループ名（Outline_grp 直下）
 PROFILE_LINK = "toonProfile"         # エッジラインの円プロファイル(makeNurbCircle)への message
 FRES_TAG    = "isToonFresnelLine"    # フレネル輪郭（カメラ依存・VP2/バッチ対応）の識別タグ
 FRES_LINK   = "toonFresnelCond"      # フレネルの condition ノードへの message（太さ＝しきい値）
@@ -162,6 +164,16 @@ _DIALOG_BG_CSS = (
     "QDialog#OG_Toonline_ManagerWin QSlider::handle:horizontal:pressed {"
     " background: #a88a35;"
     "}"
+    # v0.1.24: 「生成オプション」「全体設定」の QGroupBox 枠。
+    "QDialog#OG_Toonline_ManagerWin QGroupBox {"
+    " border: 1px solid #4a4a4a; border-radius: 4px; margin-top: 10px;"
+    " padding-top: 6px; background: #333333;"
+    "}"
+    "QDialog#OG_Toonline_ManagerWin QGroupBox::title {"
+    " subcontrol-origin: margin; subcontrol-position: top left;"
+    " padding: 0 6px; color: #c9a848; font-weight: bold;"
+    " left: 8px; top: -2px; background: " + _WINDOW_BG + ";"
+    "}"
 )
 
 # 左上タイトルラベル QSS + ヘッダーバージョン + ⋮メニューボタン
@@ -194,7 +206,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.23"
+__version__ = "0.1.24"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2580,35 +2592,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow.addWidget(b_ref)
         lay.addLayout(crow)
 
-        # 内側の折れ目/溝(フレネル)も一緒に生成(既定 ON) + 感度スピン
-        fres_row = QtWidgets.QHBoxLayout()
+        # v0.1.24: 「新規作成時のみ有効」なオプションと、「作成済みラインに常時反映」
+        # される設定を QGroupBox で視覚的に分離。
+        # ---- 新規作成時のオプション ----
+        gb_gen = QtWidgets.QGroupBox("🆕 新規作成時のオプション（『選択メッシュに輪郭を生成』で有効）")
+        gb_gen.setObjectName("OG_Toonline_GenBox")
+        glay = QtWidgets.QVBoxLayout(gb_gen)
+        glay.setContentsMargins(8, 6, 8, 6); glay.setSpacing(4)
+
+        # フレネル生成チェック
         self.chk_scrn_fresnel = QtWidgets.QCheckBox("内側の折れ目/溝(フレネル)も生成")
         self.chk_scrn_fresnel.setChecked(True)
         self.chk_scrn_fresnel.setToolTip(
             "ON: 輪郭生成時に同じメッシュへフレネル輪郭も一緒に作る。\n"
             "外周(SCRN)+ 内側の折れ目/溝(フレネル)で完全な toon ライン一式になる。\n"
             "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
-        fres_row.addWidget(self.chk_scrn_fresnel)
-        fres_row.addWidget(QtWidgets.QLabel("感度"))
-        self.spn_fres_sens = QtWidgets.QDoubleSpinBox()
-        self.spn_fres_sens.setRange(0.0, 10.0)
-        self.spn_fres_sens.setDecimals(2)
-        self.spn_fres_sens.setSingleStep(0.1)
-        self.spn_fres_sens.setValue(1.0)
-        self.spn_fres_sens.setFixedWidth(70)
-        self.spn_fres_sens.setToolTip(
-            "フレネル感度（globalCtrl.fresSens）。見た目の太さは変えずに「どこまで内側\n"
-            "（寝た面）まで検出するか」だけ調整する倍率。全フレネル線に効く。\n"
-            "1.0 = 既定（太さそのまま）\n"
-            "0.5 = シルエット直近だけ（細い谷しか拾わない）\n"
-            "2.0 = 深い谷まで拾う（面積広い）")
-        self.spn_fres_sens.valueChanged.connect(self._on_fres_sens)
-        fres_row.addWidget(self.spn_fres_sens)
-        fres_row.addStretch(1)
-        lay.addLayout(fres_row)
+        glay.addWidget(self.chk_scrn_fresnel)
 
-        # 硬いエッジ(二面角>しきい値)に沿ったクリース線も生成(既定 ON)。
-        # しきい値はスピンで調整（大きいほど尖った折り目だけ拾う＝線が減る）。
+        # クリース生成チェック + 角度
         crease_row = QtWidgets.QHBoxLayout()
         self.chk_scrn_crease = QtWidgets.QCheckBox(
             "硬いエッジ(折り目)にもペン線を出す(クリース線)")
@@ -2617,7 +2618,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "ON: 輪郭生成時に、メッシュの硬いエッジ(二面角 > しきい値)に沿って\n"
             "チューブ状のラインを自動生成する。立方体の角や服の折り目など、\n"
             "SCRN/フレネルでは拾いにくいシャープな折り目に Pencil+4 風のペン線が入る。\n"
-            "滑らかな閉曲面(球など)では折り目が無いため生成されない。")
+            "v0.1.24: 全クリース線は __Creases__ 専用グループに自動集約され、\n"
+            "グループ倍率でまとめて太さ調整できる。")
         crease_row.addWidget(self.chk_scrn_crease)
         crease_row.addWidget(QtWidgets.QLabel("角度"))
         self.spn_crease_angle = QtWidgets.QDoubleSpinBox()
@@ -2634,13 +2636,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "60°: 立方体の角のような直角級だけ（線が少ない）")
         crease_row.addWidget(self.spn_crease_angle)
         crease_row.addStretch(1)
-        lay.addLayout(crease_row)
+        glay.addLayout(crease_row)
 
-        # v0.1.23: 生成時のクリース線プロファイル（ランプ）。端細り単発スピンを撤去し、
-        # 太さプロファイルで両端細り・片端細り・中央太らせ等を自由に設定できるように。
-        # 生成時に全新規ラインへ setAttr → _update_curv_weights で即反映。
+        # クリース線プロファイル（ランプ）+ 再適用ボタン
         prow2 = QtWidgets.QHBoxLayout()
-        prow2.addSpacing(16)   # チェック項目配下っぽく軽くインデント
+        prow2.addSpacing(16)
         prow2.addWidget(QtWidgets.QLabel("プロファイル"))
         self.crease_ramp = _RampWidget()
         self.crease_ramp.setMinimumHeight(28)
@@ -2655,7 +2655,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_crp.setToolTip("プロファイルをフラット (0,1)(1,1) にリセット")
         b_crp.clicked.connect(lambda: self.crease_ramp.set_points([[0.0, 1.0], [1.0, 1.0]]))
         prow2.addWidget(b_crp)
-        lay.addLayout(prow2)
+        self.btn_apply_ramp = QtWidgets.QPushButton("適用")
+        self.btn_apply_ramp.setFixedWidth(50)
+        self.btn_apply_ramp.setToolTip(
+            "現在のランプを __Creases__ グループ内のすべての既存クリース線に適用する\n"
+            "（生成時以外に、あとから一括で変更したいとき）。")
+        self.btn_apply_ramp.clicked.connect(self._apply_ramp_to_all_creases)
+        prow2.addWidget(self.btn_apply_ramp)
+        glay.addLayout(prow2)
 
         # チェック OFF のときは配下もグレーに
         def _crease_enabled(on):
@@ -2665,12 +2672,36 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.chk_scrn_crease.toggled.connect(_crease_enabled)
         _crease_enabled(self.chk_scrn_crease.isChecked())
 
-        # スクリーン輪郭の重なり深度押し込み（ビュー空間・遠距離で重なり線が消える対策）
+        lay.addWidget(gb_gen)
+
+        # ---- 作成済みラインに常時反映される設定 ----
+        gb_live = QtWidgets.QGroupBox("🎛 作成済みラインに常時反映")
+        gb_live.setObjectName("OG_Toonline_LiveBox")
+        llay = QtWidgets.QVBoxLayout(gb_live)
+        llay.setContentsMargins(8, 6, 8, 6); llay.setSpacing(4)
+
+        # フレネル感度（既存全フレネル線に live で乗算）
+        fs_row = QtWidgets.QHBoxLayout()
+        fs_row.addWidget(QtWidgets.QLabel("フレネル感度"))
+        self.spn_fres_sens = QtWidgets.QDoubleSpinBox()
+        self.spn_fres_sens.setRange(0.0, 10.0)
+        self.spn_fres_sens.setDecimals(2)
+        self.spn_fres_sens.setSingleStep(0.1)
+        self.spn_fres_sens.setValue(1.0)
+        self.spn_fres_sens.setFixedWidth(80)
+        self.spn_fres_sens.setToolTip(
+            "フレネル感度（globalCtrl.fresSens）。見た目の太さは変えずに「どこまで内側\n"
+            "（寝た面）まで検出するか」だけ調整する倍率。全フレネル線に効く。\n"
+            "1.0 = 既定 / 0.5 = シルエット直近だけ / 2.0 = 深い谷まで")
+        self.spn_fres_sens.valueChanged.connect(self._on_fres_sens)
+        fs_row.addWidget(self.spn_fres_sens)
+        fs_row.addStretch(1)
+        llay.addLayout(fs_row)
+
+        # 重なり深度（SCRN）
         srow = QtWidgets.QHBoxLayout()
         srow.addWidget(QtWidgets.QLabel("重なり深度(スクリーン)"))
         self.spn_scrn_bias = QtWidgets.QDoubleSpinBox()
-        # v0.1.9 以降は相対値(ビュー深度の N%)。0.02 で view z を 2% 奥へ押す。
-        # どの距離/メッシュサイズでも同じ値で破綻しない(hlsl 側 vpos.z *= (1+depthBias))。
         self.spn_scrn_bias.setRange(-0.5, 0.5); self.spn_scrn_bias.setDecimals(4)
         self.spn_scrn_bias.setSingleStep(0.0005); self.spn_scrn_bias.setValue(_SCRN_ZBIAS)
         self.spn_scrn_bias.setToolTip(
@@ -2682,9 +2713,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
-        lay.addLayout(srow)
+        llay.addLayout(srow)
 
-        # v0.1.14: ブラシ質感（ペンシル風の縁カサつき・太さゆらぎ）
+        # ブラシ質感
         brow = QtWidgets.QHBoxLayout()
         brow.addWidget(QtWidgets.QLabel("ブラシ:カサつき"))
         self.spn_brush_rough = QtWidgets.QDoubleSpinBox()
@@ -2713,7 +2744,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_brush_scale.valueChanged.connect(self._on_brush_changed)
         brow.addWidget(self.spn_brush_scale)
         brow.addStretch(1)
-        lay.addLayout(brow)
+        llay.addLayout(brow)
+
+        lay.addWidget(gb_live)
 
         # 対象グループ（生成先）
         crow2 = QtWidgets.QHBoxLayout()
@@ -3220,6 +3253,37 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             pass
 
+    def _apply_ramp_to_all_creases(self, *args):
+        """v0.1.24: UI のクリースランプを、既存の全クリース線（CREASE_TAG 付き）に適用。
+        生成時だけでなく「あとから一括変更」したいときに使う。"""
+        try:
+            pts = self.crease_ramp.points()
+        except Exception:
+            cmds.warning("ランプの値が取れませんでした"); return
+        s = _serialize_profile(pts) if pts else "0:1,1:1"
+        creases = [t for t in (cmds.ls(type="transform", long=True) or [])
+                   if cmds.attributeQuery(CREASE_TAG, node=t, exists=True)]
+        if not creases:
+            cmds.warning("クリース線（CREASE_TAG 付き）が見つかりません"); return
+        n = 0
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in creases:
+                ctrl = _ctrl_of(ln)
+                if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                    try:
+                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
+                        n += 1
+                    except Exception:
+                        pass
+                try:
+                    _update_curv_weights(ln)
+                except Exception:
+                    pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        cmds.warning("現在のランプを {} 本のクリース線に適用しました。".format(n))
+
     def _show_about(self, *args):
         """バージョン情報 ダイアログ（⋮ メニューから）。"""
         try:
@@ -3347,13 +3411,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     # ========== ツリー ==========
     def _add_line_item(self, parent_item, line):
+        is_crease = cmds.attributeQuery(CREASE_TAG, node=line, exists=True)
         is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
         is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
         is_scrn = cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
+        # v0.1.24: CREASE_TAG を EDGE_TAG より優先して [クリース] 表示
         if is_scrn:
             suffix = "  [スクリーン]"
         elif is_fres:
             suffix = "  [フレネル]"
+        elif is_crease:
+            suffix = "  [クリース]"
         elif is_edge:
             suffix = "  [エッジ]"
         else:
@@ -4522,21 +4590,37 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 if any_made:
                     made += 1
-            # v0.1.23: 新規生成されたクリース線だけに太さプロファイルを書き込む。
-            # フラット (0,1)(1,1) の場合は何もしない（既定と同じ）。
-            if crease_profile_str:
-                new_lines = _all_edges() - before
+            # v0.1.24: 新規生成されたクリース線だけを処理する
+            new_lines = _all_edges() - before
+            if new_lines:
+                # 専用グループ (__Creases__) 確保 → 全クリース線を集約
+                creases_grp = self._ensure_group(CREASES_GROUP_NAME)
                 for ln in new_lines:
-                    ctrl = _ctrl_of(ln)
-                    if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                    # CREASE_TAG を付けてクリース出自を識別
+                    if not cmds.attributeQuery(CREASE_TAG, node=ln, exists=True):
                         try:
-                            cmds.setAttr(ctrl + "." + CTRL_PROFILE, crease_profile_str, type="string")
+                            cmds.addAttr(ln, ln=CREASE_TAG, at="bool", dv=True)
                         except Exception:
                             pass
+                    # __Creases__ へ親子移動
                     try:
-                        _update_curv_weights(ln)
+                        cur_parent = cmds.listRelatives(ln, parent=True, f=True)
+                        if not cur_parent or cur_parent[0] != creases_grp:
+                            cmds.parent(ln, creases_grp)
                     except Exception:
                         pass
+                    # v0.1.23: ランププロファイルの書き込み（フラットなら変更しない）
+                    if crease_profile_str:
+                        ctrl = _ctrl_of(ln)
+                        if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                            try:
+                                cmds.setAttr(ctrl + "." + CTRL_PROFILE, crease_profile_str, type="string")
+                            except Exception:
+                                pass
+                        try:
+                            _update_curv_weights(ln)
+                        except Exception:
+                            pass
         finally:
             cmds.undoInfo(closeChunk=True)
         cmds.select(clear=True)
