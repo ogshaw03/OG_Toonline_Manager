@@ -224,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.34"
+__version__ = "0.1.35"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -1563,6 +1563,132 @@ def _set_line_only_mode(on):
                 pass
 
 
+# --------------------------------------------------------------------------- #
+# v0.1.35: 選択からレンダーレイヤーを作成
+# --------------------------------------------------------------------------- #
+def _collect_lines_from_selection(nodes):
+    """選択ノード列（ライン or グループ）から、含まれる全ラインを重複なく収集。"""
+    lines = []
+    seen = set()
+    def _add(ln):
+        if ln not in seen:
+            seen.add(ln); lines.append(ln)
+    for n in nodes:
+        if not n or not cmds.objExists(n):
+            continue
+        if cmds.attributeQuery(TAG, node=n, exists=True):
+            _add(n)
+        elif cmds.attributeQuery(GROUP_TAG, node=n, exists=True):
+            for d in cmds.listRelatives(n, ad=True, type="transform", f=True) or []:
+                if cmds.attributeQuery(TAG, node=d, exists=True):
+                    _add(d)
+    return lines
+
+
+def _source_meshes_of(lines):
+    """ライン列から元メッシュ transform をユニークに返す（_source_mesh_transforms の選択版）。"""
+    srcs = []
+    seen = set()
+    for ln in lines:
+        try:
+            sh = _line_src_shape(ln)
+        except Exception:
+            continue
+        if not sh or not cmds.objExists(sh):
+            continue
+        par = cmds.listRelatives(sh, parent=True, f=True) or []
+        if par and par[0] not in seen:
+            seen.add(par[0]); srcs.append(par[0])
+    return srcs
+
+
+def _sanitize_layer_name(name):
+    """Render Setup レイヤー名を Maya のノード名規則に正規化（英数/アンダースコアのみ）。"""
+    import re
+    s = re.sub(r"[^A-Za-z0-9_]+", "_", name)
+    if not s or not s[0].isalpha():
+        s = "layer_" + s
+    return s
+
+
+def _unique_rs_layer_name(name):
+    """既存レイヤーと衝突しない名前にする。"""
+    try:
+        import maya.app.renderSetup.model.renderSetup as rsM
+        existing = {L.name() for L in rsM.instance().getRenderLayers()}
+    except Exception:
+        existing = set()
+    base = name; i = 1
+    while name in existing:
+        i += 1
+        name = "{0}_{1}".format(base, i)
+    return name
+
+
+def create_outline_render_layer(name, lines, src_meshes):
+    """Render Setup に 「ライン include + 元メッシュ useBackground 差替」レイヤーを 1 つ作る。
+
+    - collection_lines: 選択ラインを含める（グループが渡されても、呼び出し側で展開済み）
+    - collection_src: 元メッシュを include → 配下に SG を拾う子コレクション →
+        shaderOverride で useBackground に差替（Hardware 2.0 ホールドアウト）"""
+    try:
+        import maya.app.renderSetup.model.renderSetup as rsM
+        import maya.app.renderSetup.model.selector as selectorM
+        import maya.app.renderSetup.model.override as overrideM
+    except ImportError as e:
+        raise RuntimeError("Render Setup が利用できません: {0}".format(e))
+
+    sg = _ensure_holdout_sg()                    # useBackground + _toonHoldoutSG
+    shd = HOLDOUT_SHADER_NAME                    # 差替元 shader
+
+    rs = rsM.instance()
+    name = _unique_rs_layer_name(_sanitize_layer_name(name))
+    layer = rs.createRenderLayer(name)
+
+    # --- ライン include ---
+    c_lines = layer.createCollection(name + "_lines")
+    sel = c_lines.getSelector()
+    try:
+        sel.staticSelection.set([_short(ln) for ln in lines])
+    except Exception:
+        sel.staticSelection.set(list(lines))
+
+    # --- 元メッシュを include + その SG を useBackground 差替 ---
+    if src_meshes:
+        c_src = layer.createCollection(name + "_src")
+        sel2 = c_src.getSelector()
+        try:
+            sel2.staticSelection.set([_short(m) for m in src_meshes])
+        except Exception:
+            sel2.staticSelection.set(list(src_meshes))
+
+        c_sg = c_src.createCollection(name + "_src_SG")
+        sel3 = c_sg.getSelector()
+        try:
+            sel3.setFilterType(11)               # 11 = ShadingEngine filter
+        except Exception:
+            pass
+        try:
+            sel3.setPattern("*")
+        except Exception:
+            pass
+
+        try:
+            ov = c_sg.createOverride(name + "_holdout",
+                                     overrideM.ShaderOverride.kTypeName)
+        except Exception:
+            # 旧API名フォールバック
+            ov = c_sg.createOverride(name + "_holdout", "shaderOverride")
+        # useBackground の outColor を override の attrValue に接続
+        ov_node = ov.name() if hasattr(ov, "name") else str(ov)
+        try:
+            cmds.connectAttr(shd + ".outColor", ov_node + ".attrValue", f=True)
+        except Exception:
+            pass
+
+    return name
+
+
 def _ensure_follow(line):
     """元オブジェクトのトランスフォーム移動にラインを追従させる（parent/scale 拘束）。
     outMesh は変形のみ追従するので、移動/回転/スケールは拘束で合わせる。"""
@@ -2815,6 +2941,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_ref.clicked.connect(self.refresh_tree)
         crow2.addWidget(b_ref)
         lay.addLayout(crow2)
+
+        # v0.1.35: 選択からレンダーレイヤー作成
+        crow3 = QtWidgets.QHBoxLayout()
+        self.btn_render_layer = QtWidgets.QPushButton("選択からレンダーレイヤー")
+        self.btn_render_layer.setToolTip(
+            "ツリーで選んだライン（グループを選ぶと配下の全ライン）だけが見える\n"
+            "Render Setup レイヤーを作る。元メッシュは useBackground で透明化し\n"
+            "線は Outline グループから include。Hardware 2.0 プレイブラスト用。\n"
+            "作成時にレイヤー名を入力。既存名と被れば自動連番。")
+        self.btn_render_layer.clicked.connect(self.create_render_layer_from_selection)
+        crow3.addWidget(self.btn_render_layer)
+        lay.addLayout(crow3)
 
         # v0.1.25: タイトルは短く、構造だけで「新規」「ライブ」を分離。
         # ---- 新規作成時のオプション ----
@@ -5333,6 +5471,53 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 it.setText(1, "x{:.2f}".format(gm))
         self._populating = False
         self._on_tree_selection()   # スライダー類を初期値表示へ同期
+
+    def create_render_layer_from_selection(self):
+        """v0.1.35: 選択したライン／ライングループだけを含む Render Setup レイヤーを作成。
+        元メッシュは useBackground 差替で透明化。レイヤー名は入力ダイアログで指定。"""
+        nodes = self._selected_nodes()
+        if not nodes:
+            cmds.warning("レンダーレイヤーに入れるライン／グループをツリーで選んでください"); return
+        lines = _collect_lines_from_selection(nodes)
+        if not lines:
+            cmds.warning("選択にラインが含まれていません（グループが空の可能性）"); return
+        srcs = _source_meshes_of(lines)
+
+        # デフォルト名: 単一グループ選択→そのグループ名、単一ラインなら ライン名、
+        # 複数なら "outlines"
+        tops_groups = [n for n in nodes if cmds.attributeQuery(GROUP_TAG, node=n, exists=True)]
+        tops_lines  = [n for n in nodes if cmds.attributeQuery(TAG, node=n, exists=True)]
+        if len(tops_groups) == 1 and not tops_lines:
+            default = _short(tops_groups[0])
+        elif len(tops_lines) == 1 and not tops_groups:
+            default = _short(tops_lines[0])
+        else:
+            default = "outlines"
+
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "レンダーレイヤーを作成",
+            u"レイヤー名（英数/_）:",
+            QtWidgets.QLineEdit.Normal, default)
+        if not ok:
+            return
+        name = (name or "").strip()
+        if not name:
+            cmds.warning("レイヤー名が空です"); return
+
+        cmds.undoInfo(openChunk=True)
+        try:
+            try:
+                final_name = create_outline_render_layer(name, lines, srcs)
+            except RuntimeError as e:
+                cmds.warning(str(e)); return
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        try:
+            cmds.inViewMessage(amg=u'レンダーレイヤー <hl>' + final_name + u'</hl> を作成（線 '
+                               + str(len(lines)) + u' 本 / 元メッシュ ' + str(len(srcs)) + u' 個）',
+                               pos='topCenter', fade=True)
+        except Exception:
+            pass
 
     def delete_selected(self):
         nodes = self._selected_nodes()
