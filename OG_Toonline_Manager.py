@@ -210,8 +210,15 @@ technique11 Main < int isTransparent = 1; >
 """
 
 
+_FRES_FX_PATH_CACHE = None
+
+
 def _fresnel_fx_path():
-    """フレネル用 HLSL(.fx) をユーザー領域に書き出してパスを返す（毎回上書き）。"""
+    """フレネル用 HLSL(.fx) をユーザー領域へ 1 セッション 1 回だけ書き出し、以降はキャッシュ。"""
+    global _FRES_FX_PATH_CACHE
+    if _FRES_FX_PATH_CACHE and os.path.exists(_FRES_FX_PATH_CACHE) and \
+       os.path.getsize(_FRES_FX_PATH_CACHE) == len(_FRES_FX_HLSL):
+        return _FRES_FX_PATH_CACHE
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
         if not os.path.isdir(d):
@@ -220,10 +227,24 @@ def _fresnel_fx_path():
         d = cmds.internalVar(userTmpDir=True)
     path = os.path.join(d, "OG_ToonFresnel.fx").replace("\\", "/")
     try:
-        with open(path, "w") as f:
-            f.write(_FRES_FX_HLSL)
+        if os.path.exists(path) and os.path.getsize(path) == len(_FRES_FX_HLSL):
+            _FRES_FX_PATH_CACHE = path
+            return path
     except Exception:
         pass
+    # 書き込み(fsync で確実に flush)
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_FRES_FX_HLSL)
+            f.flush()
+            try: os.fsync(f.fileno())
+            except Exception: pass
+    except Exception as e:
+        try:
+            om2.MGlobal.displayWarning("[FRES] FX write failed: {0}".format(e))
+        except Exception:
+            pass
+    _FRES_FX_PATH_CACHE = path
     return path
 
 
@@ -390,7 +411,16 @@ technique11 Main
 """
 
 
+_SCRN_FX_PATH_CACHE = None
+
+
 def _screen_fx_path():
+    """SCRN 用 HLSL(.fx) を 1 セッション 1 回だけ書き出してキャッシュ。dx11Shader との
+    read/write 競合で 0 バイトになる事故を回避。"""
+    global _SCRN_FX_PATH_CACHE
+    if _SCRN_FX_PATH_CACHE and os.path.exists(_SCRN_FX_PATH_CACHE) and \
+       os.path.getsize(_SCRN_FX_PATH_CACHE) == len(_SCRN_FX_HLSL):
+        return _SCRN_FX_PATH_CACHE
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
         if not os.path.isdir(d):
@@ -399,10 +429,29 @@ def _screen_fx_path():
         d = cmds.internalVar(userTmpDir=True)
     path = os.path.join(d, "OG_ToonScreen.fx").replace("\\", "/")
     try:
-        with open(path, "w") as f:
-            f.write(_SCRN_FX_HLSL)
+        if os.path.exists(path) and os.path.getsize(path) == len(_SCRN_FX_HLSL):
+            _SCRN_FX_PATH_CACHE = path
+            return path
     except Exception:
         pass
+    import tempfile
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".fx", prefix="OG_ToonScreen_", dir=d)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(_SCRN_FX_HLSL)
+            os.replace(tmp, path)
+        except Exception:
+            try: os.remove(tmp)
+            except Exception: pass
+            raise
+    except Exception:
+        try:
+            with open(path, "w") as f:
+                f.write(_SCRN_FX_HLSL)
+        except Exception:
+            pass
+    _SCRN_FX_PATH_CACHE = path
     return path
 
 
