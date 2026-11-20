@@ -174,6 +174,12 @@ _DIALOG_BG_CSS = (
     " padding: 0 6px; color: #c9a848; font-weight: bold;"
     " left: 8px; top: -2px; background: " + _WINDOW_BG + ";"
     "}"
+    # v0.1.25: クリース系の設定をネスト表示するためのフレーム（左黄枠）。
+    "QFrame#OG_Toonline_CreaseFrame {"
+    " border-left: 3px solid #c9a848; border-radius: 0;"
+    " margin-left: 4px; padding-left: 4px;"
+    " background: transparent;"
+    "}"
 )
 
 # 左上タイトルラベル QSS + ヘッダーバージョン + ⋮メニューボタン
@@ -206,7 +212,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.24"
+__version__ = "0.1.25"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2288,6 +2294,29 @@ def _ensure_curv_jobs(line):
     _CURV_JOBS[line] = jobs
 
 
+# v0.1.25: 種別ドットアイコン（カラー別にキャッシュ）
+_TYPE_ICON_CACHE = {}
+
+def _type_dot_icon(rgb):
+    """ツリー項目の種別表現用カラードット QIcon。rgb は (r,g,b) in 0..255。キャッシュ。"""
+    key = tuple(rgb)
+    if key in _TYPE_ICON_CACHE:
+        return _TYPE_ICON_CACHE[key]
+    size = 14
+    pix = QtGui.QPixmap(size, size)
+    pix.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pix)
+    p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    p.setPen(QtGui.QPen(QtGui.QColor(30, 30, 30), 1))
+    p.setBrush(QtGui.QBrush(QtGui.QColor(*key)))
+    pad = 2
+    p.drawEllipse(pad, pad, size - 2 * pad, size - 2 * pad)
+    p.end()
+    icon = QtGui.QIcon(pix)
+    _TYPE_ICON_CACHE[key] = icon
+    return icon
+
+
 class _RampWidget(QtWidgets.QWidget):
     """長手方向の太さプロファイルを編集するカーブ（ランプ）ウィジェット。
     左クリック=点の追加/ドラッグ、右クリック=点の削除。y は太さ倍率(0〜2、基準1)。"""
@@ -2339,11 +2368,14 @@ class _RampWidget(QtWidgets.QWidget):
     def paintEvent(self, e):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        p.fillRect(self.rect(), QtGui.QColor(45, 45, 45))
+        # v0.1.25: ダーク UI と馴染ませる配色（控えめ）
+        p.fillRect(self.rect(), QtGui.QColor(38, 38, 38))
+        p.setPen(QtGui.QPen(QtGui.QColor(74, 74, 74), 1))
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         p.setPen(QtGui.QColor(80, 80, 80))
         x0, by = self._to_px(0.0, 1.0); x1, _ = self._to_px(1.0, 1.0)
         p.drawLine(int(x0), int(by), int(x1), int(by))   # 基準 y=1
-        p.setPen(QtGui.QPen(QtGui.QColor(120, 200, 255), 2))
+        p.setPen(QtGui.QPen(QtGui.QColor(170, 170, 170), 2))   # カーブ: 中間グレー（景観に馴染む）
         prev = None
         steps = 60
         for k in range(steps + 1):
@@ -2353,8 +2385,9 @@ class _RampWidget(QtWidgets.QWidget):
             if prev is not None:
                 p.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
             prev = (px, py)
-        p.setPen(QtGui.QColor(20, 20, 20))
-        p.setBrush(QtGui.QColor(255, 200, 80))
+        # ハンドル: 暖色イエロー（UI プライマリ色に合わせる・小さめ）
+        p.setPen(QtGui.QPen(QtGui.QColor(30, 30, 30), 1))
+        p.setBrush(QtGui.QBrush(QtGui.QColor(201, 168, 72)))
         for x, y in self._pts:
             px, py = self._to_px(x, y)
             p.drawEllipse(QtCore.QPointF(px, py), 4, 4)
@@ -2442,7 +2475,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.setMinimumWidth(380)
         # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
         # リストが余白を吸収するので下に余分な余白は出ない。
-        self.setMinimumHeight(650)
+        self.setMinimumHeight(880)   # v0.1.25: ランプ(90) + GroupBox 2つ + ツリー + パネル
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -2592,34 +2625,23 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow.addWidget(b_ref)
         lay.addLayout(crow)
 
-        # v0.1.24: 「新規作成時のみ有効」なオプションと、「作成済みラインに常時反映」
-        # される設定を QGroupBox で視覚的に分離。
+        # v0.1.25: タイトルは短く、構造だけで「新規」「ライブ」を分離。
         # ---- 新規作成時のオプション ----
-        gb_gen = QtWidgets.QGroupBox("🆕 新規作成時のオプション（『選択メッシュに輪郭を生成』で有効）")
+        gb_gen = QtWidgets.QGroupBox("新規作成")
         gb_gen.setObjectName("OG_Toonline_GenBox")
+        gb_gen.setMinimumHeight(300)   # v0.1.25: ランプが潰れないよう余裕を持たせる
         glay = QtWidgets.QVBoxLayout(gb_gen)
-        glay.setContentsMargins(8, 6, 8, 6); glay.setSpacing(4)
+        glay.setContentsMargins(8, 10, 8, 6); glay.setSpacing(4)
 
         # フレネル生成チェック
-        self.chk_scrn_fresnel = QtWidgets.QCheckBox("内側の折れ目/溝(フレネル)も生成")
+        self.chk_scrn_fresnel = QtWidgets.QCheckBox("フレネル線も生成（滑らかな凹み用）")
         self.chk_scrn_fresnel.setChecked(True)
-        self.chk_scrn_fresnel.setToolTip(
-            "ON: 輪郭生成時に同じメッシュへフレネル輪郭も一緒に作る。\n"
-            "外周(SCRN)+ 内側の折れ目/溝(フレネル)で完全な toon ライン一式になる。\n"
-            "※ フレネルも VP2/DirectX11・テクスチャ表示 ON(6)で表示。")
         glay.addWidget(self.chk_scrn_fresnel)
 
-        # クリース生成チェック + 角度
+        # ---- クリース関連（QFrame ネスト撤去して layout を直に）----
         crease_row = QtWidgets.QHBoxLayout()
-        self.chk_scrn_crease = QtWidgets.QCheckBox(
-            "硬いエッジ(折り目)にもペン線を出す(クリース線)")
+        self.chk_scrn_crease = QtWidgets.QCheckBox("クリース線も生成（硬い折り目）")
         self.chk_scrn_crease.setChecked(True)
-        self.chk_scrn_crease.setToolTip(
-            "ON: 輪郭生成時に、メッシュの硬いエッジ(二面角 > しきい値)に沿って\n"
-            "チューブ状のラインを自動生成する。立方体の角や服の折り目など、\n"
-            "SCRN/フレネルでは拾いにくいシャープな折り目に Pencil+4 風のペン線が入る。\n"
-            "v0.1.24: 全クリース線は __Creases__ 専用グループに自動集約され、\n"
-            "グループ倍率でまとめて太さ調整できる。")
         crease_row.addWidget(self.chk_scrn_crease)
         crease_row.addWidget(QtWidgets.QLabel("角度"))
         self.spn_crease_angle = QtWidgets.QDoubleSpinBox()
@@ -2629,56 +2651,52 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_crease_angle.setValue(CREASE_ANGLE)
         self.spn_crease_angle.setSuffix("°")
         self.spn_crease_angle.setFixedWidth(70)
-        self.spn_crease_angle.setToolTip(
-            "クリース判定の二面角しきい値。値が大きいほど「より尖った折り目だけ」拾う。\n"
-            "既定 30°: 少しでも曲がれば拾う（線が多め）\n"
-            "45°: 中くらい\n"
-            "60°: 立方体の角のような直角級だけ（線が少ない）")
         crease_row.addWidget(self.spn_crease_angle)
         crease_row.addStretch(1)
         glay.addLayout(crease_row)
 
-        # クリース線プロファイル（ランプ）+ 再適用ボタン
-        prow2 = QtWidgets.QHBoxLayout()
-        prow2.addSpacing(16)
-        prow2.addWidget(QtWidgets.QLabel("プロファイル"))
-        self.crease_ramp = _RampWidget()
-        self.crease_ramp.setMinimumHeight(28)
-        self.crease_ramp.setToolTip(
-            "生成するクリース線の太さプロファイル（長手方向の強弱）。\n"
-            "左クリックで点追加/移動、右クリックで削除。\n"
-            "例: 両端細り = (0,0) (0.1,1) (0.9,1) (1,0) で鉛筆風の線になる。\n"
-            "既定フラット (0,1)(1,1) の場合は線を均一に出す。\n"
-            "生成後も個別ラインを選んで同じランプで微調整可能。")
-        prow2.addWidget(self.crease_ramp, 1)
-        b_crp = QtWidgets.QPushButton(u"↺"); b_crp.setFixedWidth(26)
-        b_crp.setToolTip("プロファイルをフラット (0,1)(1,1) にリセット")
-        b_crp.clicked.connect(lambda: self.crease_ramp.set_points([[0.0, 1.0], [1.0, 1.0]]))
-        prow2.addWidget(b_crp)
-        self.btn_apply_ramp = QtWidgets.QPushButton("適用")
-        self.btn_apply_ramp.setFixedWidth(50)
+        # クリース線の太さ形状: ラベル + ボタン 2 つを 1 行に、ランプ本体はその下
+        lbl_row = QtWidgets.QHBoxLayout()
+        lbl_profile = QtWidgets.QLabel("クリース線の太さ形状")
+        lbl_row.addWidget(lbl_profile)
+        lbl_row.addStretch(1)
+        b_crp = QtWidgets.QPushButton(u"↺ フラット"); b_crp.setFixedHeight(22)
+        b_crp.setToolTip("ランプを (0,1)(1,1) フラットにリセット")
+        lbl_row.addWidget(b_crp)
+        self.btn_apply_ramp = QtWidgets.QPushButton("既存ラインに適用")
+        self.btn_apply_ramp.setFixedHeight(22)
         self.btn_apply_ramp.setToolTip(
-            "現在のランプを __Creases__ グループ内のすべての既存クリース線に適用する\n"
-            "（生成時以外に、あとから一括で変更したいとき）。")
-        self.btn_apply_ramp.clicked.connect(self._apply_ramp_to_all_creases)
-        prow2.addWidget(self.btn_apply_ramp)
-        glay.addLayout(prow2)
+            "現在の形状を既存ラインに適用。\n"
+            "ツリーで選択あり → 選択ラインのみ\n"
+            "選択なし → __Creases__ 内の全クリース線")
+        self.btn_apply_ramp.setStyleSheet(_PRIMARY_BTN_CSS)
+        self.btn_apply_ramp.clicked.connect(self._apply_ramp_to_lines)
+        lbl_row.addWidget(self.btn_apply_ramp)
+        glay.addLayout(lbl_row)
+        self.crease_ramp = _RampWidget()
+        self.crease_ramp.setMinimumHeight(90)
+        self.crease_ramp.setToolTip(
+            "クリース線の太さ形状。左クリックで点追加/移動、右クリックで削除。\n"
+            "両端細り = (0,0)(0.1,1)(0.9,1)(1,0) で鉛筆風。")
+        glay.addWidget(self.crease_ramp)
+        b_crp.clicked.connect(lambda: self.crease_ramp.set_points([[0.0, 1.0], [1.0, 1.0]]))
 
-        # チェック OFF のときは配下もグレーに
         def _crease_enabled(on):
             self.spn_crease_angle.setEnabled(on)
             self.crease_ramp.setEnabled(on)
+            lbl_profile.setEnabled(on)
             b_crp.setEnabled(on)
+            self.btn_apply_ramp.setEnabled(on)
         self.chk_scrn_crease.toggled.connect(_crease_enabled)
         _crease_enabled(self.chk_scrn_crease.isChecked())
 
         lay.addWidget(gb_gen)
 
         # ---- 作成済みラインに常時反映される設定 ----
-        gb_live = QtWidgets.QGroupBox("🎛 作成済みラインに常時反映")
+        gb_live = QtWidgets.QGroupBox("ライブ調整")
         gb_live.setObjectName("OG_Toonline_LiveBox")
         llay = QtWidgets.QVBoxLayout(gb_live)
-        llay.setContentsMargins(8, 6, 8, 6); llay.setSpacing(4)
+        llay.setContentsMargins(8, 10, 8, 6); llay.setSpacing(4)
 
         # フレネル感度（既存全フレネル線に live で乗算）
         fs_row = QtWidgets.QHBoxLayout()
@@ -2771,6 +2789,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemDoubleClicked.connect(self._on_double_click)
+        # v0.1.25: 右クリックメニュー
+        self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         # リストは余白(ウィンドウの伸縮分)を吸収して広がる。スライダーパネル側を
         # 固定高さにすることで、選択でパネルが切り替わってもリストの大きさは一定。
         self.tree.setMinimumHeight(120)
@@ -3253,6 +3274,43 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             pass
 
+    def _apply_ramp_to_lines(self, *args):
+        """v0.1.25: ツリー選択があれば選択ラインへ、無ければ全クリース線へランプ適用。
+        既存ラインにも同じプロファイルを使いたいとき用。"""
+        try:
+            pts = self.crease_ramp.points()
+        except Exception:
+            cmds.warning("ランプの値が取れませんでした"); return
+        s = _serialize_profile(pts) if pts else "0:1,1:1"
+        sel = self._selected_lines() if hasattr(self, "_selected_lines") else []
+        if sel:
+            targets = [ln for ln in sel if cmds.objExists(ln)]
+            label = "選択 {} 本".format(len(targets))
+        else:
+            targets = [t for t in (cmds.ls(type="transform", long=True) or [])
+                       if cmds.attributeQuery(CREASE_TAG, node=t, exists=True)]
+            label = "クリース {} 本".format(len(targets))
+        if not targets:
+            cmds.warning("適用対象のラインがありません"); return
+        n = 0
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in targets:
+                ctrl = _ctrl_of(ln)
+                if ctrl and cmds.attributeQuery(CTRL_PROFILE, node=ctrl, exists=True):
+                    try:
+                        cmds.setAttr(ctrl + "." + CTRL_PROFILE, s, type="string")
+                        n += 1
+                    except Exception:
+                        pass
+                try:
+                    _update_curv_weights(ln)
+                except Exception:
+                    pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        cmds.warning("ランプを {} に適用しました（{} 本）".format(label, n))
+
     def _apply_ramp_to_all_creases(self, *args):
         """v0.1.24: UI のクリースランプを、既存の全クリース線（CREASE_TAG 付き）に適用。
         生成時だけでなく「あとから一括変更」したいときに使う。"""
@@ -3415,20 +3473,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
         is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
         is_fres = cmds.attributeQuery(FRES_TAG, node=line, exists=True)
         is_scrn = cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
-        # v0.1.24: CREASE_TAG を EDGE_TAG より優先して [クリース] 表示
+        # v0.1.25: 種別はテキスト suffix でなく色付きドット（アイコン）で表現。
         if is_scrn:
-            suffix = "  [スクリーン]"
+            type_color, type_label = (96, 192, 255), "スクリーン"
         elif is_fres:
-            suffix = "  [フレネル]"
+            type_color, type_label = (255, 143, 176), "フレネル"
         elif is_crease:
-            suffix = "  [クリース]"
+            type_color, type_label = (230, 192, 96), "クリース"
         elif is_edge:
-            suffix = "  [エッジ]"
+            type_color, type_label = (255, 158, 64), "エッジ"
         else:
-            suffix = "  [背面]"
+            type_color, type_label = (128, 224, 128), "背面"
+        suffix = ""  # 旧テキスト撤去（アイコンで判別）
         label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
+        # v0.1.25: 種別色ドットをアイコンで表示（テキスト不要）
+        it.setIcon(0, _type_dot_icon(type_color))
+        it.setToolTip(0, "{} ({})".format(_short(line), type_label))
         # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
         it.setFlags((it.flags() | QtCore.Qt.ItemIsUserCheckable
                      | QtCore.Qt.ItemIsDragEnabled) & ~QtCore.Qt.ItemIsDropEnabled)
@@ -4042,6 +4104,22 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.undoInfo(closeChunk=True)
             self.refresh_tree()
 
+    def _apply_line_color(self, line, rgb):
+        """v0.1.25: 1 本のラインに色を適用するコア処理（undo チャンクは呼び出し側で）。"""
+        sh = self._shape_of(line)
+        if not sh:
+            return
+        # フレネル/スクリーンは dx11Shader の lineColor uniform を直接変更
+        if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
+                or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
+            shd = _fresnel_shader(line)
+            if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
+                cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
+            return
+        ss, sg = self._ensure_line_shader(line)
+        cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+        cmds.sets(sh, e=True, forceElement=sg)
+
     def set_individual_color(self):
         """選択ラインに個別カラーを割り当てる（専用シェーダを生成）。"""
         lines = self._selected_lines()
@@ -4055,19 +4133,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         try:
             for line in lines:
-                sh = self._shape_of(line)
-                if not sh:
-                    continue
-                # フレネル/スクリーンは dx11Shader の lineColor uniform を直接変更（SG は差し替えない）
-                if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
-                        or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
-                    shd = _fresnel_shader(line)
-                    if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
-                        cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
-                    continue
-                ss, sg = self._ensure_line_shader(line)
-                cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
-                cmds.sets(sh, e=True, forceElement=sg)
+                self._apply_line_color(line, rgb)
         finally:
             cmds.undoInfo(closeChunk=True)
         self.refresh_tree()
@@ -4759,13 +4825,114 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
 
     def _on_double_click(self, item, column):
-        """ライン・グループともダブルクリックでリネーム。"""
+        """ライン・グループともダブルクリックでリネーム。
+        v0.1.25: 色列(2) ダブルクリックは直接カラーピッカーを開く。"""
         node = item.data(0, QtCore.Qt.UserRole)
         if not node or not cmds.objExists(node):
+            return
+        # 色列: 直接カラーピッカー → そのラインに個別カラー適用
+        if column == 2 and cmds.attributeQuery(TAG, node=node, exists=True):
+            self._pick_color_for_line(node)
             return
         if (cmds.attributeQuery(TAG, node=node, exists=True)
                 or cmds.attributeQuery(GROUP_TAG, node=node, exists=True)):
             self.rename_node(node)
+
+    def _pick_color_for_line(self, line):
+        """v0.1.25: 単一ラインに個別カラーを即設定するピッカー。"""
+        if not line or not cmds.objExists(line): return
+        init = self._line_color(line) or (0.0, 0.0, 0.0)
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor.fromRgbF(*init), self, "ラインのカラー")
+        if not c.isValid(): return
+        rgb = (c.redF(), c.greenF(), c.blueF())
+        cmds.undoInfo(openChunk=True)
+        try:
+            self._apply_line_color(line, rgb)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+
+    def _on_tree_context_menu(self, pos):
+        """v0.1.25: ツリーで右クリック → コンテキストメニュー。
+        グループ行: 全ライン表示/非表示、色を揃える、ランプ適用(クリースのみ)
+        ライン行:  表示/非表示、色変更、削除
+        """
+        item = self.tree.itemAt(pos)
+        if item is None: return
+        node = item.data(0, QtCore.Qt.UserRole)
+        if not node or not cmds.objExists(node): return
+        menu = QtWidgets.QMenu(self.tree)
+        is_group = cmds.attributeQuery(GROUP_TAG, node=node, exists=True)
+        is_line  = cmds.attributeQuery(TAG, node=node, exists=True)
+        is_crease_group = is_group and _short(node) == CREASES_GROUP_NAME
+        if is_group:
+            a1 = menu.addAction("全ライン 表示")
+            a1.triggered.connect(lambda: self._set_group_lines_vis(node, True))
+            a2 = menu.addAction("全ライン 非表示")
+            a2.triggered.connect(lambda: self._set_group_lines_vis(node, False))
+            menu.addSeparator()
+            a3 = menu.addAction("色を揃える…")
+            a3.triggered.connect(lambda: self._unify_group_color(node))
+            if is_crease_group:
+                menu.addSeparator()
+                a4 = menu.addAction("現在のランプを適用")
+                a4.triggered.connect(self._apply_ramp_to_all_creases)
+            menu.addSeparator()
+            a5 = menu.addAction("リネーム…")
+            a5.triggered.connect(lambda: self.rename_node(node))
+            a6 = menu.addAction("削除")
+            a6.triggered.connect(lambda: self.delete_selected())
+        elif is_line:
+            a1 = menu.addAction("表示切替")
+            a1.triggered.connect(lambda: self._toggle_line_vis(node))
+            a2 = menu.addAction("色を変える…")
+            a2.triggered.connect(lambda: self._pick_color_for_line(node))
+            menu.addSeparator()
+            a3 = menu.addAction("リネーム…")
+            a3.triggered.connect(lambda: self.rename_node(node))
+            a4 = menu.addAction("削除")
+            a4.triggered.connect(lambda: self.delete_selected())
+        menu.exec_(self.tree.viewport().mapToGlobal(pos))
+
+    def _set_group_lines_vis(self, group, show):
+        """グループ配下の全ラインの visibility を一括設定。"""
+        if not group or not cmds.objExists(group): return
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in self._lines_in(group):
+                try: cmds.setAttr(ln + ".visibility", int(bool(show)))
+                except Exception: pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
+
+    def _toggle_line_vis(self, line):
+        if not line or not cmds.objExists(line): return
+        try:
+            cur = bool(cmds.getAttr(line + ".visibility"))
+        except Exception:
+            cur = True
+        try: cmds.setAttr(line + ".visibility", 0 if cur else 1)
+        except Exception: pass
+        self.refresh_tree()
+
+    def _unify_group_color(self, group):
+        """グループ内の全ラインに同じ色を適用するピッカー。"""
+        if not group or not cmds.objExists(group): return
+        lines = self._lines_in(group)
+        if not lines: return
+        init = self._line_color(lines[0]) or (0.0, 0.0, 0.0)
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor.fromRgbF(*init), self, "グループの色を揃える")
+        if not c.isValid(): return
+        rgb = (c.redF(), c.greenF(), c.blueF())
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in lines:
+                try: self._apply_line_color(ln, rgb)
+                except Exception: pass
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.refresh_tree()
 
     # ========== ドラッグ&ドロップ移動 ==========
     def _group_of_item(self, item):
