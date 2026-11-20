@@ -224,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.32"
+__version__ = "0.1.33"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -432,6 +432,25 @@ def _scrn_set_depth_bias(v):
         pass
 
 
+def _scrn_set_stability(v):
+    """v0.1.33: 全 SCRN shader に stability uniform を反映。"""
+    try:
+        v = float(v)
+    except Exception:
+        return
+    for line in _all_screen_lines():
+        shd = _fresnel_shader(line)
+        if shd and cmds.attributeQuery("stability", node=shd, exists=True):
+            try:
+                cmds.setAttr(shd + ".stability", v)
+            except Exception:
+                pass
+    try:
+        cmds.refresh()
+    except Exception:
+        pass
+
+
 def _scrn_set_brush(rough=None, wave=None, scale=None):
     """v0.1.14: 全スクリーン輪郭ラインのブラシ質感（縁カサつき/太さゆらぎ/ノイズ周期）を設定。
     None の項目は変更しない。"""
@@ -486,6 +505,18 @@ float depthBias <
     float UIMax = 0.5;
     float UIStep = 0.001;
 > = 0.02;   // 相対量: vpos.z *= (1+depthBias)。0.02 = 2% 奥へ押す。
+
+// v0.1.33: 時間的安定性（チラつき抑制）
+// 0.0 = 無効（既定）。0.0〜1.0 で境界付近の弱い三角形を emission 抑制。
+// GS 内で min(|f0|,|f1|,|f2|) が stability * 0.02 以下の三角形をスキップ。
+// 弱い triangle は camera 動きでフリップしやすいので止めるとチラつきが減る。
+// 高い値にすると線が薄くなる・小さな隙間が出ることがある。
+float stability <
+    string UIName = "Temporal Stability";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+    float UIStep = 0.01;
+> = 0.0;
 
 float3 lineColor <
     string UIName = "Line Color";
@@ -609,6 +640,13 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     float f0 = facing_dot(tri[0].VSPos, tri[0].VSNrm);
     float f1 = facing_dot(tri[1].VSPos, tri[1].VSNrm);
     float f2 = facing_dot(tri[2].VSPos, tri[2].VSNrm);
+
+    // v0.1.33: 時間的安定性。min(|f0|,|f1|,|f2|) が閾値以下の弱い triangle は
+    // camera 微動で sign が flipしてチラつきの原因になるためスキップ。
+    if (stability > 0.001f) {
+        float minMag = min(min(abs(f0), abs(f1)), abs(f2));
+        if (minMag < stability * 0.02f) return;
+    }
 
     // どのエッジがシルエットを横切るか(符号混在)
     bool c01 = (f0 * f1) < 0.0f;
@@ -1624,24 +1662,34 @@ def _ensure_thickness_chain(line):
 
     is_edge = cmds.attributeQuery(EDGE_TAG, node=line, exists=True)
     if is_edge:
+        # v0.1.33: 距離減衰 attr を先に乗算（offset と radius の両方に効かせる）
+        if not cmds.attributeQuery(CTRL_DISTATTEN, node=ctrl, exists=True):
+            try:
+                cmds.addAttr(ctrl, ln=CTRL_DISTATTEN, at="double", dv=1.0, min=0.0, keyable=True)
+            except Exception:
+                pass
+        mTD = base + "_edgeDist"
+        if not cmds.objExists(mTD):
+            mTD = cmds.createNode("multDoubleLinear", name=mTD)
+        _connect(mB + ".output", mTD + ".input1")
+        _connect(ctrl + "." + CTRL_DISTATTEN, mTD + ".input2")
         # エッジは UI 太さ×EDGE_THICK_SCALE を offset に流す（同じ数値でも細く見せる）
         mS = base + "_thkScale"
         if not cmds.objExists(mS):
             mS = cmds.createNode("multDoubleLinear", name=mS)
-        _connect(mB + ".output", mS + ".input1")
+        _connect(mTD + ".output", mS + ".input1")   # v0.1.33: mB→mTD→mS
         try:
             cmds.setAttr(mS + ".input2", EDGE_THICK_SCALE)
         except Exception:
             pass
         _connect(mS + ".output", target)
         # 円プロファイルの基準半径も太さに比例させ、細くするとチューブ全体が細る
-        # （固定半径だと細くしても基準半径分の太さが残ってしまうため）。
         circ = _line_circle_node(line)
         if circ:
             mR = base + "_radScale"
             if not cmds.objExists(mR):
                 mR = cmds.createNode("multDoubleLinear", name=mR)
-            _connect(mB + ".output", mR + ".input1")
+            _connect(mTD + ".output", mR + ".input1")   # v0.1.33: distAtten 後の値を使う
             try:
                 cmds.setAttr(mR + ".input2", EDGE_BASE_SCALE)
             except Exception:
@@ -2877,6 +2925,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         brow.addStretch(1)
         llay.addLayout(brow)
 
+        # v0.1.33: チラつき抑制（時間的安定性）
+        stab_row = QtWidgets.QHBoxLayout()
+        stab_row.addWidget(QtWidgets.QLabel("チラつき抑制"))
+        self.spn_stability = QtWidgets.QDoubleSpinBox()
+        self.spn_stability.setRange(0.0, 1.0)
+        self.spn_stability.setDecimals(2)
+        self.spn_stability.setSingleStep(0.1)
+        self.spn_stability.setValue(0.0)
+        self.spn_stability.setFixedWidth(80)
+        self.spn_stability.setToolTip(
+            "カメラを動かしたときに境界付近の線がチカチカするのを抑える。\n"
+            "0 = 無効 / 0.5 = 中程度 / 1.0 = 強め\n"
+            "高い値にすると線が薄くなったり小さな隙間が出ることがある。")
+        self.spn_stability.valueChanged.connect(
+            lambda v: _scrn_set_stability(v))
+        stab_row.addWidget(self.spn_stability)
+        stab_row.addStretch(1)
+        llay.addLayout(stab_row)
+
         # v0.1.32: 遠景で細くする（距離減衰・SCRN のみ）
         dist_row = QtWidgets.QHBoxLayout()
         dist_row.addWidget(QtWidgets.QLabel("遠景で細くする"))
@@ -3323,7 +3390,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         cx, cy, cz = cam_pos[0], cam_pos[1], cam_pos[2]
         for ln in (cmds.ls(long=True, type="transform") or []):
-            if not cmds.attributeQuery(SCRN_TAG, node=ln, exists=True):
+            # v0.1.33: SCRN と EDGE_TAG (クリース/エッジ) 両方に適用
+            is_target = (cmds.attributeQuery(SCRN_TAG, node=ln, exists=True) or
+                         cmds.attributeQuery(EDGE_TAG, node=ln, exists=True))
+            if not is_target:
                 continue
             ctrl = _ctrl_of(ln)
             if not ctrl or not cmds.attributeQuery(CTRL_DISTATTEN, node=ctrl, exists=True):
