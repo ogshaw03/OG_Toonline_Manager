@@ -6083,17 +6083,152 @@ technique11 Main { pass p0 {
 """
 
 
+_EDGE_OGSFX = """// OG Toonline Manager - edge outline (OGSFX/GLSL variant for OpenGL VP2)
+
+uniform texture2D gColorTex;
+uniform sampler2D gColorSamp = sampler_state { texture = <gColorTex>; };
+uniform texture2D gDepthTex;
+uniform sampler2D gDepthSamp = sampler_state { texture = <gDepthTex>; };
+uniform texture2D gDepthOtherTex;
+uniform sampler2D gDepthOtherSamp = sampler_state { texture = <gDepthOtherTex>; };
+
+uniform vec2 gTexel;
+uniform float gThreshold;
+uniform vec3 gLineColor;
+uniform float gNear;
+uniform float gFar;
+uniform int gDebug;
+uniform int gIntersectMode;
+uniform float gIntersectThresh;
+
+attribute VS_IN {
+    vec3 Pos : POSITION;
+    vec2 UV : TEXCOORD0;
+};
+attribute VS_TO_PS {
+    vec2 VSUV : TEXCOORD0;
+};
+attribute PS_OUT {
+    vec4 colorOut : COLOR0;
+};
+
+GLSLShader VS {
+    void main() {
+        gl_Position = vec4(Pos, 1.0);
+        VSUV = UV;
+    }
+}
+
+GLSLShader PS {
+    float linearize(float z) {
+        float denom = gFar - z * (gFar - gNear);
+        return (gNear * gFar) / max(denom, 1e-6);
+    }
+
+    float intersectEdge(vec2 uv, vec2 t) {
+        float ra_c = texture2D(gDepthSamp, uv).r;
+        float rb_c = texture2D(gDepthOtherSamp, uv).r;
+        if (ra_c >= 0.9999 || rb_c >= 0.9999) return 0.0;
+        float za_c = linearize(ra_c);
+        float zb_c = linearize(rb_c);
+        float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4);
+        if (rel_c > gIntersectThresh * 3.0) return 0.0;
+        bool a_front_c = (za_c <= zb_c);
+        bool any_flip = false;
+        float min_rel = rel_c;
+        for (int k = 0; k < 4; ++k) {
+            vec2 off;
+            if (k == 0)      off = vec2(0.0, -t.y);
+            else if (k == 1) off = vec2(0.0,  t.y);
+            else if (k == 2) off = vec2(-t.x, 0.0);
+            else             off = vec2( t.x, 0.0);
+            vec2 nuv = uv + off;
+            float ra_n = texture2D(gDepthSamp, nuv).r;
+            float rb_n = texture2D(gDepthOtherSamp, nuv).r;
+            if (ra_n >= 0.9999 || rb_n >= 0.9999) continue;
+            float za_n = linearize(ra_n);
+            float zb_n = linearize(rb_n);
+            bool a_front_n = (za_n <= zb_n);
+            if (a_front_c != a_front_n) any_flip = true;
+            float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4);
+            min_rel = min(min_rel, rel_n);
+        }
+        if (!any_flip) return 0.0;
+        float hi = gIntersectThresh * 1.5;
+        return 1.0 - smoothstep(gIntersectThresh * 0.5, hi, min_rel);
+    }
+
+    void main() {
+        vec2 t = gTexel;
+        float zc = texture2D(gDepthSamp, VSUV).r;
+        float zu = texture2D(gDepthSamp, VSUV + vec2(0.0, -t.y)).r;
+        float zd = texture2D(gDepthSamp, VSUV + vec2(0.0,  t.y)).r;
+        float zl = texture2D(gDepthSamp, VSUV + vec2(-t.x, 0.0)).r;
+        float zr = texture2D(gDepthSamp, VSUV + vec2( t.x, 0.0)).r;
+
+        float c = linearize(zc);
+        float u = linearize(zu);
+        float d = linearize(zd);
+        float l = linearize(zl);
+        float r = linearize(zr);
+
+        float dmax = max(max(abs(u - c), abs(d - c)), max(abs(l - c), abs(r - c)));
+        float rel = dmax / max(c, 1e-4);
+
+        if (gDebug != 0) {
+            float span = max(gFar - gNear, 1e-4);
+            float g = clamp((c - gNear) / span, 0.0, 1.0);
+            colorOut = vec4(g, g, g, 1.0);
+            return;
+        }
+
+        vec3 scene = texture2D(gColorSamp, VSUV).rgb;
+        float mask = (zc >= 0.9999) ? 0.0 : 1.0;
+        float hi = gThreshold * 1.15;
+        float e = mask * smoothstep(gThreshold, hi, rel);
+
+        if (gIntersectMode != 0) {
+            float ei = intersectEdge(VSUV, t);
+            e = max(e, ei);
+        }
+
+        colorOut = vec4(mix(scene, gLineColor, e), 1.0);
+    }
+}
+
+technique Main {
+    pass p0 {
+        VertexShader (in VS_IN, out VS_TO_PS) = VS;
+        PixelShader (in VS_TO_PS, out PS_OUT) = PS;
+    }
+}
+"""
+
+
 def _edge_fx_path():
+    """現 drawAPI に応じて HLSL(.fx) か GLSL(.ogsfx) のパスを返して書き出す。
+    v0.1.36: OpenGL VP2 でも動くように GLSL 版を追加。"""
+    try:
+        import maya.api.OpenMayaRender as omr
+        api = omr.MRenderer.drawAPI()
+        is_gl = (api == omr.MRenderer.kOpenGL or api == omr.MRenderer.kOpenGLCoreProfile)
+    except Exception:
+        is_gl = False
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
         if not os.path.isdir(d):
             os.makedirs(d)
     except Exception:
         d = cmds.internalVar(userTmpDir=True)
-    p = os.path.join(d, "OG_EdgeOutline.fx").replace("\\", "/")
+    if is_gl:
+        p = os.path.join(d, "OG_EdgeOutline.ogsfx").replace("\\", "/")
+        src = _EDGE_OGSFX
+    else:
+        p = os.path.join(d, "OG_EdgeOutline.fx").replace("\\", "/")
+        src = _EDGE_FX
     try:
-        with open(p, "w") as f:
-            f.write(_EDGE_FX)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(src)
     except Exception:
         pass
     return p
