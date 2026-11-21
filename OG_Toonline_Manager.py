@@ -224,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.35"
+__version__ = "0.1.36"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -3103,6 +3103,34 @@ class ToonOutlineUI(QtWidgets.QDialog):
         dist_row.addStretch(1)
         llay.addLayout(dist_row)
 
+        # v0.1.36: 交差線（他オブジェクトとの重なりに線）
+        ix_row = QtWidgets.QHBoxLayout()
+        self.chk_intersect = QtWidgets.QCheckBox("交差線（選んだメッシュと他の重なり）")
+        self.chk_intersect.setChecked(False)
+        self.chk_intersect.setToolTip(
+            "ON で、ビューポートで選んだメッシュと他のメッシュが『実際に交差している』\n"
+            "位置に画面空間で線を出す（SCRN とは別の後処理レイヤー）。\n"
+            "・選んだメッシュを対象、それ以外のメッシュ(ラインは除外)を『他』として比較\n"
+            "・両方の深度が近接しかつ隣接ピクセルで前後が反転する所＝実交差\n"
+            "・VP2/DirectX11・テクスチャ表示 ON (ホットキー 6) 前提\n"
+            "・カメラ依存、プレイブラスト対応、他レンダラー不可")
+        self.chk_intersect.toggled.connect(self._on_toggle_intersect)
+        ix_row.addWidget(self.chk_intersect)
+        ix_row.addStretch(1)
+        ix_row.addWidget(QtWidgets.QLabel("敏感度"))
+        self.spn_intersect_thr = QtWidgets.QDoubleSpinBox()
+        self.spn_intersect_thr.setRange(0.001, 0.2); self.spn_intersect_thr.setDecimals(3)
+        self.spn_intersect_thr.setSingleStep(0.005); self.spn_intersect_thr.setValue(0.010)
+        self.spn_intersect_thr.setFixedWidth(64)
+        self.spn_intersect_thr.setToolTip(
+            "交差線の検出しきい値（相対深度差）。\n"
+            "小 = 厳密な交差だけ / 大 = 近接も交差扱い（線が太く・多く）\n"
+            "0.005〜0.03 が実用域。")
+        self.spn_intersect_thr.valueChanged.connect(
+            lambda v: _edge_set_params(intersect_threshold=float(v)))
+        ix_row.addWidget(self.spn_intersect_thr)
+        llay.addLayout(ix_row)
+
         # v0.1.26: ライン単体表示モード（メッシュを useBackground で透明に・奥側線を隠蔽）
         self.chk_line_only = QtWidgets.QCheckBox(
             "ライン単体表示（メッシュを透明化・奥側の線は隠す）")
@@ -3712,6 +3740,36 @@ class ToonOutlineUI(QtWidgets.QDialog):
         _scrn_set_brush(rough=self.spn_brush_rough.value(),
                         wave=self.spn_brush_wave.value(),
                         scale=self.spn_brush_scale.value())
+
+    def _on_toggle_intersect(self, state):
+        """v0.1.36: 交差線（画像空間、対象 vs 他メッシュ）の ON/OFF。
+        ON 時はビューポートで選択中のメッシュを対象にする。"""
+        if state:
+            sel = cmds.ls(sl=True, long=True, type="transform") or []
+            targets = [o for o in sel
+                       if cmds.listRelatives(o, shapes=True, type="mesh", ni=True)
+                       and not _is_toon_node(o)]
+            if not targets:
+                cmds.warning("交差線の対象メッシュをビューポートで選択してから ON にしてください")
+                self.chk_intersect.blockSignals(True)
+                self.chk_intersect.setChecked(False)
+                self.chk_intersect.blockSignals(False)
+                return
+            _edge_set_targets(targets)
+            _edge_set_params(threshold=0.05, thickness=1.0, color=self._color,
+                             intersect_mode=True,
+                             intersect_threshold=float(self.spn_intersect_thr.value()))
+            if not _edge_enable():
+                self.chk_intersect.blockSignals(True)
+                self.chk_intersect.setChecked(False)
+                self.chk_intersect.blockSignals(False)
+            else:
+                om2.MGlobal.displayInfo(
+                    "交差線 ON（対象 {0} メッシュ・他メッシュとの重なりに線）"
+                    .format(len(targets)))
+        else:
+            _edge_set_params(intersect_mode=False)
+            _edge_disable()
 
     def _on_toggle_line_only(self, state):
         """v0.1.26: ライン単体表示モードのトグル。"""
@@ -4534,6 +4592,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                  type="double3")
                 finally:
                     cmds.undoInfo(closeChunk=True)
+            # v0.1.36: 交差線が有効なら線色も追従
+            try:
+                if _edge_active():
+                    _edge_set_params(color=self._color)
+            except Exception:
+                pass
             self.refresh_tree()
 
     def _apply_line_color(self, line, rgb):
@@ -5888,15 +5952,19 @@ def _reopen_after_update():
 EDGE_OVR_NAME = "OG_ToonEdgeOutline"
 # しきい値はビュー空間深度で「相対差」|Δz|/z を測る無次元値（既定 0.05 = 5%）。
 # 実機検証で 0.01 は微差まで拾って線が滲む/太る（かすれ）、0.05〜0.1 が実用域だった。
+# v0.1.36: intersect_mode=1 で「対象メッシュと他オブジェクトの交差線」モード。
+#   intersect_threshold は target と other の深度一致判定しきい値（相対差 |Δz|/z）。
 _EDGE_PARAMS = {"threshold": 0.05, "thickness": 1.0, "color": (0.0, 0.0, 0.0),
-                "near": 0.1, "far": 10000.0, "debug": 0}
+                "near": 0.1, "far": 10000.0, "debug": 0,
+                "intersect_mode": 0, "intersect_threshold": 0.01}
 _EDGE_TARGETS = []          # エッジ検出対象の transform 名リスト（オブジェクト単位を保持）
 _edge_override = None
 _edge_size_logged = (0, 0)  # 直近ログしたターゲット (w, h) — 変化時に一度だけ報告
 
 _EDGE_FX = """// OG Toonline Manager - object-scoped screen-space depth-edge outline
-Texture2D gColorTex;   // 全シーンの色
-Texture2D gDepthTex;   // 対象メッシュだけを描いた深度（対象なしなら 1.0=遠クリア）
+Texture2D gColorTex;      // 全シーンの色
+Texture2D gDepthTex;      // 対象メッシュだけを描いた深度（対象なしなら 1.0=遠クリア）
+Texture2D gDepthOtherTex; // 対象を除いた他メッシュだけの深度（対象を含まない部分）
 
 SamplerState gSamp { Filter = MIN_MAG_MIP_POINT; AddressU = Clamp; AddressV = Clamp; };
 
@@ -5906,6 +5974,8 @@ float3 gLineColor = {0.0f, 0.0f, 0.0f};
 float  gNear      = 0.1f;
 float  gFar       = 10000.0f;
 int    gDebug     = 0;                  // 1: 線形化深度を可視化（切り分け用）
+int    gIntersectMode    = 0;           // 1: 対象と他オブジェクトの交差線モード
+float  gIntersectThresh  = 0.01f;       // 深度一致とみなす相対差しきい値
 
 struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
 struct VOUT { float4 Pos : SV_Position; float2 UV : TEXCOORD0; };
@@ -5918,6 +5988,48 @@ float linearizeDepth(float z)
     // near*far / (far - z*(far-near)). z=1(遠)→far, z=0(近)→near
     float denom = gFar - z * (gFar - gNear);
     return (gNear * gFar) / max(denom, 1e-6f);
+}
+
+// 交差モード本体: 対象と他の 2 深度が「近接」かつ「隣接で前後が反転」した位置に線を出す。
+// near-miss（近いが交差していない）を避けるため sign flip を併用。
+float intersectEdge(float2 uv, float2 t)
+{
+    float ra_c = gDepthTex.Sample(gSamp, uv).r;
+    float rb_c = gDepthOtherTex.Sample(gSamp, uv).r;
+    // 片方でも遠クリア（対象 or 他がこのピクセルに無い）は交差ではない
+    if (ra_c >= 0.9999f || rb_c >= 0.9999f) return 0.0f;
+    float za_c = linearizeDepth(ra_c);
+    float zb_c = linearizeDepth(rb_c);
+    float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4f);
+    // 中心が近接の目安を外れていればまず線にしない（範囲を少し緩めて取りこぼし防止）
+    if (rel_c > gIntersectThresh * 3.0f) return 0.0f;
+    bool a_front_c = (za_c <= zb_c);
+
+    bool any_flip = false;
+    float min_rel = rel_c;
+    // 4 方向で前後関係が反転しているか（= 実際に 3D で交差している証拠）
+    [unroll]
+    for (int k = 0; k < 4; k++)
+    {
+        float2 off = (k == 0) ? float2(0.0f, -t.y)
+                   : (k == 1) ? float2(0.0f,  t.y)
+                   : (k == 2) ? float2(-t.x, 0.0f)
+                   :            float2( t.x, 0.0f);
+        float2 nuv = uv + off;
+        float ra_n = gDepthTex.Sample(gSamp, nuv).r;
+        float rb_n = gDepthOtherTex.Sample(gSamp, nuv).r;
+        if (ra_n >= 0.9999f || rb_n >= 0.9999f) continue;
+        float za_n = linearizeDepth(ra_n);
+        float zb_n = linearizeDepth(rb_n);
+        bool a_front_n = (za_n <= zb_n);
+        if (a_front_c != a_front_n) any_flip = true;
+        float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4f);
+        min_rel = min(min_rel, rel_n);
+    }
+    if (!any_flip) return 0.0f;
+    // 強度: 近接ほど強い。min_rel（周辺で一番近い点）で smoothstep
+    float hi = gIntersectThresh * 1.5f;
+    return 1.0f - smoothstep(gIntersectThresh * 0.5f, hi, min_rel);
 }
 
 float4 PS(VOUT i) : SV_Target
@@ -5949,12 +6061,18 @@ float4 PS(VOUT i) : SV_Target
     }
 
     float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
-    // 対象未描画（背景）ピクセルは線化しない
+
+    // 既存のシルエット/自己段差エッジ
     float mask = (zc >= 0.9999f) ? 0.0f : 1.0f;
-    // 遷移幅は最小 1 ピクセルAA程度に絞って線をハッキリさせる（かすれ対策）。
-    // 幅を広くすると内部の緩い深度勾配がだらだら半透明で塗られて滲む。
     float hi = gThreshold * 1.15f;
     float e  = mask * smoothstep(gThreshold, hi, rel);
+
+    // v0.1.36: 交差線モードを合成（既存エッジより優先して表示）
+    if (gIntersectMode != 0)
+    {
+        float ei = intersectEdge(i.UV, t);
+        e = max(e, ei);
+    }
     return float4(lerp(scene, gLineColor, e), 1.0f);
 }
 
@@ -5987,7 +6105,8 @@ def _edge_set_targets(names):
     _EDGE_TARGETS = [n for n in (names or []) if cmds.objExists(n)]
 
 
-def _edge_set_params(threshold=None, thickness=None, color=None, debug=None):
+def _edge_set_params(threshold=None, thickness=None, color=None, debug=None,
+                     intersect_mode=None, intersect_threshold=None):
     if threshold is not None:
         # smoothstep(gThreshold, gThreshold*2, ..) が 0/0 になる事故を防ぐ最小値
         _EDGE_PARAMS["threshold"] = max(1e-4, float(threshold))
@@ -5997,10 +6116,53 @@ def _edge_set_params(threshold=None, thickness=None, color=None, debug=None):
         _EDGE_PARAMS["color"] = (color[0], color[1], color[2])
     if debug is not None:
         _EDGE_PARAMS["debug"] = 1 if debug else 0
+    if intersect_mode is not None:
+        _EDGE_PARAMS["intersect_mode"] = 1 if intersect_mode else 0
+    if intersect_threshold is not None:
+        _EDGE_PARAMS["intersect_threshold"] = max(1e-4, float(intersect_threshold))
     try:
         cmds.refresh()
     except Exception:
         pass
+
+
+def _is_toon_node(xform):
+    """toon 系（ハル/エッジ/フレネル/SCRN/マスク/隙間埋め）のラインを交差検出の『他』集合から外すための判定。"""
+    try:
+        for a in (TAG, EDGE_TAG, FRES_TAG, SCRN_TAG, MASK_TAG, GAPFILL_TAG):
+            if cmds.attributeQuery(a, node=xform, exists=True):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _edge_other_transforms():
+    """『他オブジェクト』= シーンのポリメッシュ transform から target と toon ラインを除いたもの。"""
+    others = []
+    try:
+        tgt = set(_EDGE_TARGETS)
+        meshes = cmds.ls(type="mesh", long=True) or []
+        seen = set()
+        for m in meshes:
+            try:
+                par = cmds.listRelatives(m, parent=True, fullPath=True) or []
+            except Exception:
+                par = []
+            for p in par:
+                if p in seen:
+                    continue
+                seen.add(p)
+                # short name での一致も見る（EDGE_TARGETS は短名のことがある）
+                short = p.rsplit("|", 1)[-1]
+                if p in tgt or short in tgt:
+                    continue
+                if _is_toon_node(p):
+                    continue
+                others.append(p)
+    except Exception:
+        pass
+    return others
 
 
 def _edge_active_camera_near_far(destination=None):
@@ -6114,6 +6276,31 @@ def _edge_enable():
                 def objectSetOverride(self):
                     return _targets_sel()
 
+            def _others_sel():
+                sel = om2.MSelectionList()
+                for n in _edge_other_transforms():
+                    try:
+                        sel.add(n)
+                    except Exception:
+                        pass
+                return sel
+
+            class _SceneOthers(omr.MSceneRender):
+                """対象を除いた他メッシュだけを tDepthOther へ（交差線用）。"""
+                def __init__(self, name, ovr):
+                    omr.MSceneRender.__init__(self, name); self.ovr = ovr
+                def targetOverrideList(self):
+                    return [self.ovr.tColorScratch, self.ovr.tDepthOther]
+                def clearOperation(self):
+                    c = self.mClearOperation
+                    c.setClearGradient(False)
+                    c.setClearColor([0.0, 0.0, 0.0, 0.0])
+                    c.setClearDepth(1.0)
+                    c.setMask(omr.MClearOperation.kClearAll)
+                    return c
+                def objectSetOverride(self):
+                    return _others_sel()
+
             class _QuadEdge(omr.MQuadRender):
                 def __init__(self, name, ovr):
                     omr.MQuadRender.__init__(self, name); self.ovr = ovr; self.shaderInst = None
@@ -6131,6 +6318,7 @@ def _edge_enable():
                     try:
                         s.setParameter("gColorTex", self.ovr.tColor)
                         s.setParameter("gDepthTex", self.ovr.tDepth)
+                        s.setParameter("gDepthOtherTex", self.ovr.tDepthOther)
                         w = max(1, self.ovr.w); h = max(1, self.ovr.h)
                         th = max(0.0, _EDGE_PARAMS["thickness"])
                         s.setParameter("gTexel", (th / float(w), th / float(h)))
@@ -6144,6 +6332,8 @@ def _edge_enable():
                         s.setParameter("gNear", float(n))
                         s.setParameter("gFar", float(f))
                         s.setParameter("gDebug", int(_EDGE_PARAMS["debug"]))
+                        s.setParameter("gIntersectMode", int(_EDGE_PARAMS["intersect_mode"]))
+                        s.setParameter("gIntersectThresh", float(_EDGE_PARAMS["intersect_threshold"]))
                     except Exception as exc:
                         om2.MGlobal.displayWarning("[OG edge] shader param: {0}".format(exc))
                     return s
@@ -6155,6 +6345,7 @@ def _edge_enable():
                     self.destination = None    # 現在描画中のパネル名（shader() が使う）
                     self.tColor = None; self.tColorScratch = None
                     self.tDepthScene = None; self.tDepth = None
+                    self.tDepthOther = None    # v0.1.36: 交差線用（対象を除いた他メッシュ深度）
                     self._tmgr = omr.MRenderer.getRenderTargetManager()
                     self._cDesc = omr.MRenderTargetDescription(
                         "OG_edgeColor", 256, 256, 1, omr.MRenderer.kR8G8B8A8_UNORM, 0, False)
@@ -6164,12 +6355,16 @@ def _edge_enable():
                         "OG_edgeDepthScene", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
                     self._dDesc = omr.MRenderTargetDescription(
                         "OG_edgeDepth", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    self._doDesc = omr.MRenderTargetDescription(
+                        "OG_edgeDepthOther", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
                     self._sceneFull = _SceneFull("og_edge_full", self)
                     self._sceneTgt = _SceneTargets("og_edge_tgt", self)
+                    self._sceneOther = _SceneOthers("og_edge_other", self)
                     self._quad = _QuadEdge("og_edge_quad", self)
                     self._hud = omr.MHUDRender()
                     self._present = omr.MPresentTarget("og_edge_present")
-                    self._ops = [self._sceneFull, self._sceneTgt, self._quad, self._hud, self._present]
+                    self._ops = [self._sceneFull, self._sceneTgt, self._sceneOther,
+                                 self._quad, self._hud, self._present]
                     self._it = 0
                 def supportedDrawAPIs(self):
                     return omr.MRenderer.kAllDevices
@@ -6210,7 +6405,7 @@ def _edge_enable():
                                 .format(self.w, self.h, destination or ""))
                         except Exception:
                             pass
-                    for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc):
+                    for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc, self._doDesc):
                         desc.setWidth(self.w); desc.setHeight(self.h)
                     if self.tColor is None:
                         self.tColor = self._tmgr.acquireRenderTarget(self._cDesc)
@@ -6228,6 +6423,10 @@ def _edge_enable():
                         self.tDepth = self._tmgr.acquireRenderTarget(self._dDesc)
                     else:
                         self.tDepth.updateDescription(self._dDesc)
+                    if self.tDepthOther is None:
+                        self.tDepthOther = self._tmgr.acquireRenderTarget(self._doDesc)
+                    else:
+                        self.tDepthOther.updateDescription(self._doDesc)
                 def cleanup(self):
                     pass
                 def startOperationIterator(self):
@@ -6237,7 +6436,7 @@ def _edge_enable():
                 def nextRenderOperation(self):
                     self._it += 1; return self._it < len(self._ops)
                 def release(self):
-                    for a in ("tColor", "tColorScratch", "tDepthScene", "tDepth"):
+                    for a in ("tColor", "tColorScratch", "tDepthScene", "tDepth", "tDepthOther"):
                         t = getattr(self, a, None)
                         if t is not None:
                             try:
