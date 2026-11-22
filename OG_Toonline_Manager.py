@@ -1224,7 +1224,9 @@ def _screen_fx_path():
         fd, tmp = tempfile.mkstemp(suffix=(".ogsfx" if is_gl else ".fx"),
                                     prefix="OG_ToonScreen_", dir=d)
         try:
-            with os.fdopen(fd, "w") as f:
+            # v0.1.38: 日本語コメントが cp932 で書き出されると dx11Shader/glslShader の
+            # パーサで文字化け → effect ファイル読込失敗の原因になるため UTF-8 固定で書く。
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
                 f.write(src)
             os.replace(tmp, path)
         except Exception:
@@ -1233,7 +1235,7 @@ def _screen_fx_path():
             raise
     except Exception:
         try:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(src)
         except Exception:
             pass
