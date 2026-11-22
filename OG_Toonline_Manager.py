@@ -224,7 +224,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.36"
+__version__ = "0.1.37"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -257,6 +257,26 @@ def _ensure_shader(color):
         cmds.connectAttr(SHADER + ".outColor", SG + ".surfaceShader", f=True)
         cmds.setAttr(SHADER + ".outColor", color[0], color[1], color[2], type="double3")
     return SHADER, SG
+
+
+def _vp2_is_opengl():
+    """現在の VP2 バックエンドが OpenGL（旧 OGL か Core Profile）かを返す。
+    判定不能なら False（＝DirectX11 想定）。SCRN/Fresnel/EdgeOverride の
+    HLSL(.fx) vs OGSFX(.ogsfx) 書き分けに使う。"""
+    try:
+        import maya.api.OpenMayaRender as omr
+        api = omr.MRenderer.drawAPI()
+        return api == omr.MRenderer.kOpenGL or api == omr.MRenderer.kOpenGLCoreProfile
+    except Exception:
+        return False
+
+
+def _hw_shader_plugin():
+    """VP2 バックエンドに合う自前シェーダ用プラグイン名とノード型を返す。
+    OpenGL → ('glslShader', 'GLSLShader') / DirectX11 → ('dx11Shader', 'dx11Shader')。"""
+    if _vp2_is_opengl():
+        return ("glslShader", "GLSLShader")
+    return ("dx11Shader", "dx11Shader")
 
 
 _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / HLSL)
@@ -322,14 +342,96 @@ technique11 Main < int isTransparent = 1; >
 """
 
 
+_FRES_FX_OGSFX = """#version 410
+// OG Toonline Manager - Fresnel contour (Maya glslShader / OGSFX / GLSL for OpenGL VP2)
+// HLSL 版 (_FRES_FX_HLSL) と同じ facing=|VN.z|＋fwidth で一定px幅の輪郭。v0.1.37 で OpenGL 対応追加。
+
+uniform mat4 gWVP : WorldViewProjection;
+uniform mat4 gWV  : WorldView;
+
+uniform float threshold
+<
+    string UIName = "Threshold";
+> = 0.15;
+
+uniform float maxWidthPx
+<
+    string UIName = "Width (px)";
+> = 3.0;
+
+uniform vec3 lineColor
+<
+    string UIName = "Line Color";
+    string UIWidget = "ColorPicker";
+> = { 0.0, 0.0, 0.0 };
+
+attribute VS_INPUT
+{
+    vec3 Pos : POSITION;
+    vec3 Nrm : NORMAL;
+};
+
+attribute VS_TO_PS
+{
+    vec3 vn;
+};
+
+attribute PS_OUTPUT
+{
+    vec4 outColor : COLOR0;
+};
+
+GLSLShader ShaderVertex
+{
+    void main()
+    {
+        gl_Position = gWVP * vec4(Pos, 1.0);
+        VS_OUT.vn = mat3(gWV) * Nrm;
+    }
+}
+
+GLSLShader ShaderPixel
+{
+    void main()
+    {
+        vec3 N = normalize(PS_IN.vn);
+        float facing = abs(N.z);
+        float w = max(fwidth(facing), 1e-6);
+        float sd = facing / w;
+        float a = 1.0 - smoothstep(maxWidthPx - 1.0, maxWidthPx + 1.0, sd);
+        if (a <= 0.002) discard;
+        outColor = vec4(lineColor, a);
+    }
+}
+
+technique Main
+<
+    string transparency = "transparent";
+>
+{
+    pass P0
+    <
+        string drawContext = "colorPass";
+    >
+    {
+        VertexShader (in VS_INPUT, out VS_TO_PS VS_OUT) = ShaderVertex;
+        PixelShader  (in VS_TO_PS PS_IN, out PS_OUTPUT) = ShaderPixel;
+    }
+}
+"""
+
+
 _FRES_FX_PATH_CACHE = None
 
 
 def _fresnel_fx_path():
-    """フレネル用 HLSL(.fx) をユーザー領域へ 1 セッション 1 回だけ書き出し、以降はキャッシュ。"""
+    """フレネル用シェーダを現 drawAPI に応じて HLSL(.fx) か OGSFX(.ogsfx) で書き出してパスを返す。
+    v0.1.37: OpenGL VP2 でも動くように GLSL(OGSFX) 版を追加。"""
     global _FRES_FX_PATH_CACHE
+    is_gl = _vp2_is_opengl()
+    src = _FRES_FX_OGSFX if is_gl else _FRES_FX_HLSL
     if _FRES_FX_PATH_CACHE and os.path.exists(_FRES_FX_PATH_CACHE) and \
-       os.path.getsize(_FRES_FX_PATH_CACHE) == len(_FRES_FX_HLSL):
+       os.path.getsize(_FRES_FX_PATH_CACHE) == len(src):
         return _FRES_FX_PATH_CACHE
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
@@ -337,17 +439,17 @@ def _fresnel_fx_path():
             os.makedirs(d)
     except Exception:
         d = cmds.internalVar(userTmpDir=True)
-    path = os.path.join(d, "OG_ToonFresnel.fx").replace("\\", "/")
+    fname = "OG_ToonFresnel.ogsfx" if is_gl else "OG_ToonFresnel.fx"
+    path = os.path.join(d, fname).replace("\\", "/")
     try:
-        if os.path.exists(path) and os.path.getsize(path) == len(_FRES_FX_HLSL):
+        if os.path.exists(path) and os.path.getsize(path) == len(src):
             _FRES_FX_PATH_CACHE = path
             return path
     except Exception:
         pass
-    # 書き込み(fsync で確実に flush)
     try:
         with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(_FRES_FX_HLSL)
+            f.write(src)
             f.flush()
             try: os.fsync(f.fileno())
             except Exception: pass
@@ -361,29 +463,31 @@ def _fresnel_fx_path():
 
 
 def _build_fresnel_network(line, shape, color):
-    """フレネル輪郭シェーダ（VP2 ハードウェア = dx11Shader + 自前 HLSL）を shape に割り当てる。
-    カメラから見て寝た面（facingRatio が小さい縁＝シルエット/凹み）だけ不透明な線色、他は透明。
+    """フレネル輪郭シェーダを shape に割り当てる。
+    VP2 が DirectX11 なら dx11Shader + HLSL、OpenGL なら glslShader + OGSFX を使う（v0.1.37）。
+    カメラから見て寝た面（facing が 0 付近のシルエット/凹み）だけ不透明な線色、他は透明。
     VP2/Hardware 2.0 バッチで反映・カメラ依存・scriptJob 不要。
-    太さ＝dx11Shader の threshold uniform（_ensure_thickness_chain が駆動）。
-    ※ samplerInfo.facingRatio は VP2 で評価されないため、ハードウェアシェーダで計算する。"""
+    太さ＝shader の maxWidthPx uniform（_ensure_thickness_chain が駆動）。"""
+    plug, node_type = _hw_shader_plugin()
     try:
-        if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
-            cmds.loadPlugin("dx11Shader", quiet=True)
+        if not cmds.pluginInfo(plug, q=True, loaded=True):
+            cmds.loadPlugin(plug, quiet=True)
     except Exception:
-        cmds.warning("dx11Shader プラグインを読み込めません。VP2 を DirectX11 に設定してください。")
+        cmds.warning("{0} プラグインを読み込めません。VP2 のバックエンドをご確認ください。".format(plug))
         return None, None
     base = "toonFresnel_" + _short(line)
     fx = _fresnel_fx_path()
-    shd = cmds.shadingNode("dx11Shader", asShader=True, name=base + "_DX11")
+    suffix = "_GL" if node_type == "GLSLShader" else "_DX11"
+    shd = cmds.shadingNode(node_type, asShader=True, name=base + suffix)
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
     try:
         cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
     except Exception:
         pass
     try:
-        cmds.setAttr(shd + ".shader", fx, type="string")   # .fx をロード → uniform が attr 化
+        cmds.setAttr(shd + ".shader", fx, type="string")   # .fx/.ogsfx をロード → uniform が attr 化
     except Exception:
-        cmds.warning("フレネル用シェーダの読み込みに失敗しました（VP2/DirectX11 をご確認ください）")
+        cmds.warning("フレネル用シェーダの読み込みに失敗しました（{0} をご確認ください）".format(plug))
     # 線色 uniform を設定
     if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
         try:
@@ -736,15 +840,250 @@ technique11 Main
 """
 
 
+_SCRN_FX_OGSFX = """#version 410
+// OG Toonline Manager - Geometry-shader silhouette outline (glslShader / OGSFX / GLSL for OpenGL VP2)
+// HLSL 版 (_SCRN_FX_HLSL) と同じアルゴリズム: VS でビュー空間 pos/法線計算 → GS でシルエット
+// 三角形を検出し横断点 2 つを結ぶ細い quad をスクリーン空間で押し出す（v0.1.37 で GLSL 版追加）。
+
+uniform mat4 gWVP : WorldViewProjection;
+uniform mat4 gWV  : WorldView;
+uniform mat4 gProj : Projection;
+uniform vec2 gScreen : ViewportPixelSize;
+
+uniform float thickness
+<
+    string UIName = "Thickness(px)";
+> = 3.0;
+
+uniform float depthBias
+<
+    string UIName = "Overlap Depth Bias (view ratio)";
+> = 0.02;
+
+uniform float stability
+<
+    string UIName = "Temporal Stability";
+> = 0.0;
+
+uniform vec3 lineColor
+<
+    string UIName = "Line Color";
+    string UIWidget = "ColorPicker";
+> = { 0.0, 0.0, 0.0 };
+
+uniform float brushRoughness
+<
+    string UIName = "Brush Roughness (edge noise)";
+> = 0.0;
+
+uniform float brushWaviness
+<
+    string UIName = "Brush Waviness (thickness noise)";
+> = 0.0;
+
+uniform float brushNoiseScale
+<
+    string UIName = "Brush Noise Scale (px freq)";
+> = 20.0;
+
+attribute VS_INPUT
+{
+    vec3 Pos : POSITION;
+    vec3 Nrm : NORMAL;
+    vec4 Color : COLOR0;
+};
+
+attribute VS_TO_GS
+{
+    vec3 vspos;
+    vec3 vsnrm;
+    float colR;
+};
+
+attribute GS_TO_PS
+{
+    vec2 uv;
+};
+
+attribute PS_OUTPUT
+{
+    vec4 outColor : COLOR0;
+};
+
+GLSLShader ShaderVertex
+{
+    void main()
+    {
+        vec4 vp = gWV * vec4(Pos, 1.0);
+        VS_OUT.vspos = vp.xyz;
+        VS_OUT.vsnrm = mat3(gWV) * Nrm;
+        gl_Position = gProj * vp;
+        float w = Color.r;
+        VS_OUT.colR = (w < 0.001) ? 1.0 : w;
+    }
+}
+
+GLSLShader ShaderGeometry
+{
+    layout(triangles) in;
+    layout(triangle_strip, max_vertices = 4) out;
+
+    float ogHash12(vec2 p)
+    {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+    }
+
+    float facingDot(vec3 vspos, vec3 vsnrm)
+    {
+        vec3 n = normalize(vsnrm);
+        float len = length(vspos);
+        if (len < 1e-6) return 1.0;
+        vec3 v = vspos / len;
+        return -dot(n, v);
+    }
+
+    vec2 vsToNdc(vec3 vspos)
+    {
+        vec4 cp = gProj * vec4(vspos, 1.0);
+        return cp.xy / max(abs(cp.w), 1e-6);
+    }
+
+    vec2 perpFromNormal(vec3 vspos, vec3 vsnrm)
+    {
+        float eps = 0.001 * max(abs(vspos.z), 1.0);
+        vec2 n0 = vsToNdc(vspos);
+        vec2 n1 = vsToNdc(vspos + vsnrm * eps);
+        vec2 d = n1 - n0;
+        float l = length(d);
+        if (l < 1e-6) return vec2(1.0, 0.0);
+        return d / l;
+    }
+
+    void edgeCrossing(int ia, int ib, float fa, float fb,
+                      out vec4 cpos, out float colR,
+                      out vec3 vspos, out vec3 vsnrm)
+    {
+        float t = fa / (fa - fb);
+        vspos = mix(GS_IN[ia].vspos, GS_IN[ib].vspos, t);
+        vsnrm = normalize(mix(GS_IN[ia].vsnrm, GS_IN[ib].vsnrm, t));
+        cpos = gProj * vec4(vspos, 1.0);
+        cpos.z -= depthBias * cpos.w;
+        colR = mix(GS_IN[ia].colR, GS_IN[ib].colR, t);
+    }
+
+    void emitVert(vec2 ndc, float z, float w, vec2 uv)
+    {
+        gl_Position = vec4(ndc * w, z, w);
+        GS_OUT.uv = uv;
+        EmitVertex();
+    }
+
+    void main()
+    {
+        float f0 = facingDot(GS_IN[0].vspos, GS_IN[0].vsnrm);
+        float f1 = facingDot(GS_IN[1].vspos, GS_IN[1].vsnrm);
+        float f2 = facingDot(GS_IN[2].vspos, GS_IN[2].vsnrm);
+
+        if (stability > 0.001) {
+            float minMag = min(min(abs(f0), abs(f1)), abs(f2));
+            if (minMag < stability * 0.02) return;
+        }
+
+        bool c01 = (f0 * f1) < 0.0;
+        bool c12 = (f1 * f2) < 0.0;
+        bool c20 = (f2 * f0) < 0.0;
+        int ncross = (c01 ? 1 : 0) + (c12 ? 1 : 0) + (c20 ? 1 : 0);
+        if (ncross != 2) return;
+
+        vec4 p1, p2;
+        float cr1, cr2;
+        vec3 vsp1, vsp2, vsn1, vsn2;
+        if (c01 && c12) {
+            edgeCrossing(0, 1, f0, f1, p1, cr1, vsp1, vsn1);
+            edgeCrossing(1, 2, f1, f2, p2, cr2, vsp2, vsn2);
+        } else if (c12 && c20) {
+            edgeCrossing(1, 2, f1, f2, p1, cr1, vsp1, vsn1);
+            edgeCrossing(2, 0, f2, f0, p2, cr2, vsp2, vsn2);
+        } else {
+            edgeCrossing(0, 1, f0, f1, p1, cr1, vsp1, vsn1);
+            edgeCrossing(2, 0, f2, f0, p2, cr2, vsp2, vsn2);
+        }
+
+        if (p1.w < 1e-3 || p2.w < 1e-3) return;
+        float w1 = p1.w;
+        float w2 = p2.w;
+        vec2 ndc1 = p1.xy / w1;
+        vec2 ndc2 = p2.xy / w2;
+
+        vec2 perp1 = perpFromNormal(vsp1, vsn1);
+        vec2 perp2 = perpFromNormal(vsp2, vsn2);
+
+        vec2 px = vec2(2.0 / max(gScreen.x, 1.0), 2.0 / max(gScreen.y, 1.0));
+
+        float phase1 = ogHash12(ndc1 * brushNoiseScale * 100.0);
+        float phase2 = ogHash12(ndc2 * brushNoiseScale * 100.0);
+        float wav1 = 1.0 + brushWaviness * (phase1 - 0.5) * 2.0;
+        float wav2 = 1.0 + brushWaviness * (phase2 - 0.5) * 2.0;
+
+        vec2 off1 = perp1 * (thickness * cr1 * wav1) * px;
+        vec2 off2 = perp2 * (thickness * cr2 * wav2) * px;
+
+        emitVert(ndc1,        p1.z, w1, vec2(0.0, 0.0));
+        emitVert(ndc1 + off1, p1.z, w1, vec2(0.0, 1.0));
+        emitVert(ndc2,        p2.z, w2, vec2(1.0, 0.0));
+        emitVert(ndc2 + off2, p2.z, w2, vec2(1.0, 1.0));
+        EndPrimitive();
+    }
+}
+
+GLSLShader ShaderPixel
+{
+    float ogHash12(vec2 p)
+    {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+    }
+    void main()
+    {
+        if (brushRoughness > 0.001) {
+            float edge = abs(PS_IN.uv.y - 0.5) * 2.0;
+            float rough = brushRoughness * edge * edge;
+            float h = ogHash12(gl_FragCoord.xy * 0.37 + PS_IN.uv * 11.0);
+            if (h < rough) discard;
+        }
+        outColor = vec4(lineColor, 1.0);
+    }
+}
+
+technique Main
+{
+    pass P0
+    <
+        string drawContext = "colorPass";
+    >
+    {
+        VertexShader   (in VS_INPUT,  out VS_TO_GS VS_OUT) = ShaderVertex;
+        GeometryShader (in VS_TO_GS GS_IN, out GS_TO_PS GS_OUT) = ShaderGeometry;
+        PixelShader    (in GS_TO_PS PS_IN, out PS_OUTPUT) = ShaderPixel;
+    }
+}
+"""
+
+
 _SCRN_FX_PATH_CACHE = None
 
 
 def _screen_fx_path():
-    """SCRN 用 HLSL(.fx) を 1 セッション 1 回だけ書き出してキャッシュ。dx11Shader との
-    read/write 競合で 0 バイトになる事故を回避。"""
+    """SCRN 用シェーダを 1 セッション 1 回だけ書き出してキャッシュ。drawAPI に応じて
+    HLSL(.fx) か OGSFX(.ogsfx) を書き分ける（v0.1.37 で OGSFX 版追加）。"""
     global _SCRN_FX_PATH_CACHE
+    is_gl = _vp2_is_opengl()
+    src = _SCRN_FX_OGSFX if is_gl else _SCRN_FX_HLSL
     if _SCRN_FX_PATH_CACHE and os.path.exists(_SCRN_FX_PATH_CACHE) and \
-       os.path.getsize(_SCRN_FX_PATH_CACHE) == len(_SCRN_FX_HLSL):
+       os.path.getsize(_SCRN_FX_PATH_CACHE) == len(src):
         return _SCRN_FX_PATH_CACHE
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
@@ -752,19 +1091,21 @@ def _screen_fx_path():
             os.makedirs(d)
     except Exception:
         d = cmds.internalVar(userTmpDir=True)
-    path = os.path.join(d, "OG_ToonScreen.fx").replace("\\", "/")
+    fname = "OG_ToonScreen.ogsfx" if is_gl else "OG_ToonScreen.fx"
+    path = os.path.join(d, fname).replace("\\", "/")
     try:
-        if os.path.exists(path) and os.path.getsize(path) == len(_SCRN_FX_HLSL):
+        if os.path.exists(path) and os.path.getsize(path) == len(src):
             _SCRN_FX_PATH_CACHE = path
             return path
     except Exception:
         pass
     import tempfile
     try:
-        fd, tmp = tempfile.mkstemp(suffix=".fx", prefix="OG_ToonScreen_", dir=d)
+        fd, tmp = tempfile.mkstemp(suffix=(".ogsfx" if is_gl else ".fx"),
+                                    prefix="OG_ToonScreen_", dir=d)
         try:
             with os.fdopen(fd, "w") as f:
-                f.write(_SCRN_FX_HLSL)
+                f.write(src)
             os.replace(tmp, path)
         except Exception:
             try: os.remove(tmp)
@@ -773,7 +1114,7 @@ def _screen_fx_path():
     except Exception:
         try:
             with open(path, "w") as f:
-                f.write(_SCRN_FX_HLSL)
+                f.write(src)
         except Exception:
             pass
     _SCRN_FX_PATH_CACHE = path
@@ -950,18 +1291,20 @@ def _rebind_all_scrn_shaders():
 
 
 def _build_screen_network(line, shape, color):
-    """スクリーン空間押し出し輪郭シェーダ（dx11Shader + 自前 HLSL）を shape に割り当てる。
-    頂点シェーダでクリップ空間に一定ピクセル押し出し＋フロントカリングで均一太さの輪郭。
-    隙間/浮きが出ず凸部でも細らない。太さ＝thickness uniform（ピクセル）。"""
+    """スクリーン空間押し出し輪郭シェーダを shape に割り当てる。GS でシルエット三角形を検出し
+    横断点を結ぶ細い quad をスクリーン空間で押し出す。VP2 の backend に応じて dx11Shader+HLSL か
+    glslShader+OGSFX を使う（v0.1.37）。太さ＝thickness uniform（ピクセル）。"""
+    plug, node_type = _hw_shader_plugin()
     try:
-        if not cmds.pluginInfo("dx11Shader", q=True, loaded=True):
-            cmds.loadPlugin("dx11Shader", quiet=True)
+        if not cmds.pluginInfo(plug, q=True, loaded=True):
+            cmds.loadPlugin(plug, quiet=True)
     except Exception:
-        cmds.warning("dx11Shader プラグインを読み込めません。VP2 を DirectX11 に設定してください。")
+        cmds.warning("{0} プラグインを読み込めません。VP2 のバックエンドをご確認ください。".format(plug))
         return None, None
     base = "toonScreen_" + _short(line)
     fx = _screen_fx_path()
-    shd = cmds.shadingNode("dx11Shader", asShader=True, name=base + "_DX11")
+    suffix = "_GL" if node_type == "GLSLShader" else "_DX11"
+    shd = cmds.shadingNode(node_type, asShader=True, name=base + suffix)
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=base + "_SG")
     try:
         cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
@@ -970,7 +1313,7 @@ def _build_screen_network(line, shape, color):
     try:
         cmds.setAttr(shd + ".shader", fx, type="string")
     except Exception:
-        cmds.warning("スクリーン輪郭用シェーダの読み込みに失敗（VP2/DirectX11 をご確認ください）")
+        cmds.warning("スクリーン輪郭用シェーダの読み込みに失敗（{0} をご確認ください）".format(plug))
     if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
         try:
             cmds.setAttr(shd + "." + FRES_COLOR, color[0], color[1], color[2], type="double3")
@@ -1088,10 +1431,11 @@ def _line_deformer(line):
 
 
 def _fresnel_shader(line):
-    """フレネルラインの dx11Shader ノード（threshold=太さ, lineColor=線色 の uniform を持つ）。"""
+    """フレネル/スクリーン輪郭ラインの自前シェーダノード（dx11Shader か GLSLShader）。
+    maxWidthPx/thickness・lineColor 等の uniform を持つ。VP2 バックエンドで型が変わる（v0.1.37）。"""
     if cmds.objExists(line) and cmds.attributeQuery(FRES_LINK, node=line, exists=True):
         c = cmds.listConnections(line + "." + FRES_LINK, s=True, d=False) or []
-        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) == "dx11Shader"]
+        c = [x for x in c if cmds.objExists(x) and cmds.nodeType(x) in ("dx11Shader", "GLSLShader")]
         if c:
             return c[0]
     return None
@@ -6208,12 +6552,7 @@ technique Main {
 def _edge_fx_path():
     """現 drawAPI に応じて HLSL(.fx) か GLSL(.ogsfx) のパスを返して書き出す。
     v0.1.36: OpenGL VP2 でも動くように GLSL 版を追加。"""
-    try:
-        import maya.api.OpenMayaRender as omr
-        api = omr.MRenderer.drawAPI()
-        is_gl = (api == omr.MRenderer.kOpenGL or api == omr.MRenderer.kOpenGLCoreProfile)
-    except Exception:
-        is_gl = False
+    is_gl = _vp2_is_opengl()
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
         if not os.path.isdir(d):
