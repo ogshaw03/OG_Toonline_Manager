@@ -79,7 +79,10 @@ DIST_ATTEN_REF = 100.0               # 減衰の基準距離（world units）
 EDGE_TAG    = "isToonEdgeLine"        # エッジ由来チューブラインの識別タグ
 CREASE_TAG  = "isToonCreaseLine"      # v0.1.24: クリース自動生成ラインの識別タグ（EDGE_TAG との並行指標）
 CREASES_GROUP_NAME = "__Creases__"    # v0.1.24: クリース線をまとめる専用サブグループ名
+MATBOUND_TAG = "isToonMatBoundLine"   # v0.1.38: マテリアル境界ライン識別タグ
+MATBOUND_GROUP_NAME = "__MatBounds__" # v0.1.38: マテリアル境界ラインをまとめる専用サブグループ名
 CREASES_GROUP_DISPLAY = "クリース"    # v0.1.26: ツリー表示名（ノード名は内部で __Creases__ のまま）
+MATBOUND_GROUP_DISPLAY = "マテリアル境界"  # v0.1.38: ツリー表示名
 EDGES_GROUP_NAME   = "__Edges__"     # v0.1.31: 手動エッジ線をまとめる専用サブグループ名
 EDGES_GROUP_DISPLAY = "エッジ"        # v0.1.31: ツリー表示名
 MESH_GROUP_SUFFIX  = "_outlines"     # v0.1.31: オブジェクトごとのトップグループ接尾辞
@@ -110,6 +113,14 @@ SCRN_BRUSH_SCALE = "brushNoiseScale" # v0.1.14 ペンシル質感: ノイズ周�
 _SCRN_BRUSH_ROUGH_DEF = 0.0          # 既定値（0=クリーン、OFF）
 _SCRN_BRUSH_WAVE_DEF  = 0.0
 _SCRN_BRUSH_SCALE_DEF = 20.0
+SCRN_HIDDEN_SHOW = "showHidden"      # v0.1.38 隠れ線（裏側シルエット）を破線表示する uniform（int 0/1, DX11のみ）
+SCRN_HIDDEN_DASH = "hiddenDashLen"   # v0.1.38 隠れ線の 1 周期ピクセル長
+SCRN_HIDDEN_FILL = "hiddenDashFill"  # v0.1.38 隠れ線の塗り比率 (0-1)
+SCRN_HIDDEN_ALPHA = "hiddenAlpha"    # v0.1.38 隠れ線の alpha（透明度）
+_SCRN_HIDDEN_DEF = 0                  # 既定 OFF（互換性）
+_SCRN_HIDDEN_DASH_DEF = 10.0
+_SCRN_HIDDEN_FILL_DEF = 0.55
+_SCRN_HIDDEN_ALPHA_DEF = 0.6
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -224,7 +235,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.37"
+__version__ = "0.1.38"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -582,6 +593,39 @@ def _scrn_set_brush(rough=None, wave=None, scale=None):
     except Exception: pass
 
 
+def _scrn_set_hidden(enabled=None, dash_len=None, dash_fill=None, alpha=None):
+    """v0.1.38: 全スクリーン輪郭ラインの隠れ線（破線で裏側シルエット）設定。
+    HLSL(DX11) の 2nd pass に効く。OpenGL(OGSFX) の shader にはこれらの uniform
+    が無いので attributeQuery で存在チェックしてから setAttr（＝OpenGL では無効）。
+    None の項目は変更しない。"""
+    global _SCRN_HIDDEN_DEF, _SCRN_HIDDEN_DASH_DEF, _SCRN_HIDDEN_FILL_DEF, _SCRN_HIDDEN_ALPHA_DEF
+    if enabled is not None:
+        try: _SCRN_HIDDEN_DEF = 1 if enabled else 0
+        except Exception: pass
+    if dash_len is not None:
+        try: _SCRN_HIDDEN_DASH_DEF = float(dash_len)
+        except Exception: pass
+    if dash_fill is not None:
+        try: _SCRN_HIDDEN_FILL_DEF = float(dash_fill)
+        except Exception: pass
+    if alpha is not None:
+        try: _SCRN_HIDDEN_ALPHA_DEF = float(alpha)
+        except Exception: pass
+    pairs = ((SCRN_HIDDEN_SHOW,  _SCRN_HIDDEN_DEF),
+             (SCRN_HIDDEN_DASH,  _SCRN_HIDDEN_DASH_DEF),
+             (SCRN_HIDDEN_FILL,  _SCRN_HIDDEN_FILL_DEF),
+             (SCRN_HIDDEN_ALPHA, _SCRN_HIDDEN_ALPHA_DEF))
+    for line in _all_screen_lines():
+        shd = _fresnel_shader(line)
+        if not shd: continue
+        for an, v in pairs:
+            if cmds.attributeQuery(an, node=shd, exists=True):
+                try: cmds.setAttr(shd + "." + an, v)
+                except Exception: pass
+    try: cmds.refresh()
+    except Exception: pass
+
+
 _SCRN_FX_HLSL = """// OG Toonline Manager - Geometry-shader silhouette outline (dx11Shader / HLSL5)
 // v0.1.11+ 本格派: VS でビュー空間座標・法線を計算 → GS で三角形ごとに
 // シルエット検出(頂点の facing 符号が混在する三角形だけ処理) → エッジ横断点
@@ -647,6 +691,34 @@ float brushNoiseScale <
     float UIStep = 0.5;
 > = 20.0;
 
+// v0.1.38: 隠れ線（裏側シルエット）を破線で表示するモード
+int showHidden <
+    string UIName = "Show Hidden Lines (dashed)";
+    int UIMin = 0;
+    int UIMax = 1;
+> = 0;
+
+float hiddenDashLen <
+    string UIName = "Hidden Dash Length (px)";
+    float UIMin = 1.0;
+    float UIMax = 80.0;
+    float UIStep = 0.5;
+> = 10.0;
+
+float hiddenDashFill <
+    string UIName = "Hidden Dash Fill (0-1)";
+    float UIMin = 0.05;
+    float UIMax = 0.95;
+    float UIStep = 0.01;
+> = 0.55;
+
+float hiddenAlpha <
+    string UIName = "Hidden Line Alpha";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+    float UIStep = 0.01;
+> = 0.6;
+
 struct APPDATA {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
@@ -659,8 +731,9 @@ struct V2G {
     float  ColR  : TEXCOORD2;    // 曲率倍率(COLOR0.r)
 };
 struct G2P {
-    float4 HPos : SV_Position;
-    float2 UV   : TEXCOORD0;     // v0.1.14: U=長手(0-1), V=太さ方向(-1..+1)
+    float4 HPos  : SV_Position;
+    float2 UV    : TEXCOORD0;     // v0.1.14: U=長手(0-1), V=太さ方向(-1..+1)
+    float  LenPx : TEXCOORD1;     // v0.1.38: この quad の長手方向のスクリーン pixel 長
 };
 
 // 1D ハッシュ (iq/Hugo Elias 系)
@@ -806,8 +879,11 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     float2 off1 = perp1 * (thickness * cr1 * wav1) * px;
     float2 off2 = perp2 * (thickness * cr2 * wav2) * px;
 
+    // v0.1.38: 隠れ線の破線用に quad の長手ピクセル長を算出し全頂点に乗せる
+    float lenPx = length((ndc2 - ndc1) * gScreen * 0.5f);
+
     // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(0 内側=silhouette..1 外側)
-    G2P v;
+    G2P v; v.LenPx = lenPx;
     v.HPos = float4(ndc1         * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
     v.HPos = float4((ndc1 + off1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
     v.HPos = float4(ndc2         * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
@@ -828,6 +904,41 @@ float4 PShader(G2P i) : SV_Target
     return float4(lineColor, 1.0f);
 }
 
+// v0.1.38: 隠れ線用 PS (quad の長手方向にスクリーン px 基準の破線)。
+// 2nd pass で DepthFunc=GREATER にするので「裏側に回ったシルエット」だけここに来る。
+// showHidden=0 なら discard して描画しない（UI トグルで切替）。
+float4 PShaderHidden(G2P i) : SV_Target
+{
+    if (showHidden == 0) discard;
+    // ブラシのカサつきは可視側と同じ処理
+    if (brushRoughness > 0.001f) {
+        float edge = abs(i.UV.y - 0.5f) * 2.0f;
+        float rough = brushRoughness * edge * edge;
+        float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
+        if (h < rough) discard;
+    }
+    // スクリーン px 単位の破線: 1 周期 = hiddenDashLen, 塗り部= 周期*hiddenDashFill
+    float dashPosPx = i.UV.x * i.LenPx;
+    float period = max(hiddenDashLen, 1.0f);
+    float phase = frac(dashPosPx / period);
+    if (phase > hiddenDashFill) discard;
+    return float4(lineColor, clamp(hiddenAlpha, 0.0f, 1.0f));
+}
+
+// v0.1.38: DX11 用 state ブロック。pass p0 = 可視(標準深度), pass p1 = 隠れ線(深度逆転)。
+DepthStencilState DSS_Visible { DepthEnable = TRUE; DepthFunc = LESS_EQUAL; DepthWriteMask = ALL; };
+DepthStencilState DSS_Hidden  { DepthEnable = TRUE; DepthFunc = GREATER;    DepthWriteMask = ZERO; };
+BlendState BS_HiddenBlend {
+    BlendEnable[0] = TRUE;
+    SrcBlend[0] = SRC_ALPHA;
+    DestBlend[0] = INV_SRC_ALPHA;
+    SrcBlendAlpha[0] = SRC_ALPHA;
+    DestBlendAlpha[0] = INV_SRC_ALPHA;
+    BlendOp[0] = ADD;
+    BlendOpAlpha[0] = ADD;
+    RenderTargetWriteMask[0] = 0x0F;
+};
+
 technique11 Main
 {
     pass p0
@@ -835,6 +946,15 @@ technique11 Main
         SetVertexShader(CompileShader(vs_5_0, VShader()));
         SetGeometryShader(CompileShader(gs_5_0, GShader()));
         SetPixelShader(CompileShader(ps_5_0, PShader()));
+        SetDepthStencilState(DSS_Visible, 0);
+    }
+    pass p1
+    {
+        SetVertexShader(CompileShader(vs_5_0, VShader()));
+        SetGeometryShader(CompileShader(gs_5_0, GShader()));
+        SetPixelShader(CompileShader(ps_5_0, PShaderHidden()));
+        SetDepthStencilState(DSS_Hidden, 0);
+        SetBlendState(BS_HiddenBlend, float4(0,0,0,0), 0xFFFFFFFF);
     }
 }
 """
@@ -1331,6 +1451,14 @@ def _build_screen_network(line, shape, color):
     for an, v in ((SCRN_BRUSH_ROUGH, _SCRN_BRUSH_ROUGH_DEF),
                   (SCRN_BRUSH_WAVE,  _SCRN_BRUSH_WAVE_DEF),
                   (SCRN_BRUSH_SCALE, _SCRN_BRUSH_SCALE_DEF)):
+        if cmds.attributeQuery(an, node=shd, exists=True):
+            try: cmds.setAttr(shd + "." + an, v)
+            except Exception: pass
+    # v0.1.38: 隠れ線（DX11 HLSL のみ、OGSFX には uniform 無し＝attributeQuery で skip）。
+    for an, v in ((SCRN_HIDDEN_SHOW,  _SCRN_HIDDEN_DEF),
+                  (SCRN_HIDDEN_DASH,  _SCRN_HIDDEN_DASH_DEF),
+                  (SCRN_HIDDEN_FILL,  _SCRN_HIDDEN_FILL_DEF),
+                  (SCRN_HIDDEN_ALPHA, _SCRN_HIDDEN_ALPHA_DEF)):
         if cmds.attributeQuery(an, node=shd, exists=True):
             try: cmds.setAttr(shd + "." + an, v)
             except Exception: pass
@@ -2522,6 +2650,75 @@ def _occlusion_debug(line):
     return "src={} verts={} cam={} pos={}".format(_short(src), np, _short(cam), cpos)
 
 
+def _face_sg_map(shape, tform):
+    """v0.1.38: face index → shadingEngine 名の辞書を返す。
+    単一 SG（＝面ごとの差が無い）メッシュは {} を返す（内部でマテリアル境界が存在しない）。
+    SG がバラバラに割り当てられたメッシュのみマテリアル境界検出対象にする。"""
+    try:
+        sgs = list(set(cmds.listConnections(shape, type="shadingEngine") or []))
+    except Exception:
+        sgs = []
+    if len(sgs) <= 1:
+        return {}
+    try:
+        total = cmds.polyEvaluate(shape, face=True) or 0
+    except Exception:
+        total = 0
+    if total == 0:
+        return {}
+    short_shape = _short(shape)
+    short_tform = _short(tform)
+    face_sg = {}
+    for sg in sgs:
+        try:
+            flat = cmds.ls(cmds.sets(sg, q=True) or [], flatten=True) or []
+        except Exception:
+            flat = []
+        for m in flat:
+            if ".f[" not in m:
+                continue
+            node_part = m.split(".f[")[0]
+            short_node = _short(node_part)
+            if short_node != short_shape and short_node != short_tform:
+                continue
+            try:
+                fidx = int(m.split(".f[")[1].rstrip("]"))
+            except Exception:
+                continue
+            face_sg[fidx] = sg
+    return face_sg
+
+
+def _material_boundary_edges(shape, tform):
+    """v0.1.38: 隣接 2 面の shadingEngine が異なるエッジのコンポーネント名リストを返す
+    （"<tform>.e[i]"）。カメラ非依存・静的。単一 SG メッシュでは空リスト。"""
+    face_sg = _face_sg_map(shape, tform)
+    if not face_sg:
+        return []
+    try:
+        sl = om2.MSelectionList(); sl.add(shape)
+        dag = sl.getDagPath(0)
+        ite = om2.MItMeshEdge(dag)
+    except Exception:
+        return []
+    short = _short(tform)
+    out = []
+    while not ite.isDone():
+        idx = ite.index()
+        try:
+            if not ite.onBoundary():
+                faces = ite.getConnectedFaces()
+                if len(faces) >= 2:
+                    sg0 = face_sg.get(faces[0])
+                    sg1 = face_sg.get(faces[1])
+                    if sg0 and sg1 and sg0 != sg1:
+                        out.append("{}.e[{}]".format(short, idx))
+        except Exception:
+            pass
+        ite.next()
+    return out
+
+
 def _crease_border_edges(shape, tform, angle_deg=CREASE_ANGLE):
     """シェイプのクリース（二面角がしきい値超）＋ボーダー（開境界）エッジの
     コンポーネント名リスト（"<tform>.e[i]"）を返す。カメラ非依存・静的。"""
@@ -3298,6 +3495,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
         crow3.addWidget(self.btn_render_layer)
         lay.addLayout(crow3)
 
+        # v0.1.38: マテリアル境界ライン（面ごとの SG 違いを検出 → チューブ化）
+        crow4 = QtWidgets.QHBoxLayout()
+        self.btn_matbound = QtWidgets.QPushButton("マテリアル境界にライン")
+        self.btn_matbound.setToolTip(
+            "選択メッシュの、隣接 2 面の shadingEngine（マテリアル割り当て）が\n"
+            "違うエッジを自動検出してチューブ状のラインを生成する。\n"
+            "・単一 SG のメッシュは対象外（境界が存在しないため）\n"
+            "・カメラ非依存・DG ベース＝VP2/全レンダラー/バッチ/OpenGL 対応\n"
+            "・ライン本体は既存のエッジラインと同じ機能（太さ/曲率/プロファイル）")
+        self.btn_matbound.clicked.connect(self.create_material_boundary_lines)
+        crow4.addWidget(self.btn_matbound)
+        lay.addLayout(crow4)
+
         # v0.1.25: タイトルは短く、構造だけで「新規」「ライブ」を分離。
         # ---- 新規作成時のオプション ----
         gb_gen = QtWidgets.QGroupBox("新規作成")
@@ -3474,6 +3684,30 @@ class ToonOutlineUI(QtWidgets.QDialog):
             lambda v: _edge_set_params(intersect_threshold=float(v)))
         ix_row.addWidget(self.spn_intersect_thr)
         llay.addLayout(ix_row)
+
+        # v0.1.38: 隠れ線を破線で表示（SCRN シルエットの裏側を dashed で見せる・DX11 のみ）
+        hd_row = QtWidgets.QHBoxLayout()
+        self.chk_hidden_dash = QtWidgets.QCheckBox("隠れ線を破線で表示（SCRN・DX11）")
+        self.chk_hidden_dash.setChecked(bool(_SCRN_HIDDEN_DEF))
+        self.chk_hidden_dash.setToolTip(
+            "SCRN シルエットの『裏側に回った部分』を破線で表示する（Pencil+4 風）。\n"
+            "・手前に他物体がある部分のシルエット＝破線 / 直接見える所＝実線\n"
+            "・HLSL の 2nd pass (DepthFunc=GREATER) で実装 → DirectX11 VP2 のみ\n"
+            "・OpenGL VP2 では無効（線は可視側のみ）")
+        self.chk_hidden_dash.toggled.connect(self._on_toggle_hidden_dash)
+        hd_row.addWidget(self.chk_hidden_dash)
+        hd_row.addStretch(1)
+        hd_row.addWidget(QtWidgets.QLabel("破線長"))
+        self.spn_hidden_dash = QtWidgets.QDoubleSpinBox()
+        self.spn_hidden_dash.setRange(2.0, 80.0); self.spn_hidden_dash.setDecimals(1)
+        self.spn_hidden_dash.setSingleStep(1.0); self.spn_hidden_dash.setValue(_SCRN_HIDDEN_DASH_DEF)
+        self.spn_hidden_dash.setFixedWidth(64)
+        self.spn_hidden_dash.setToolTip(
+            "破線 1 周期の長さ（画面 px 換算）。小=細かい破線 / 大=粗い破線。")
+        self.spn_hidden_dash.valueChanged.connect(
+            lambda v: _scrn_set_hidden(dash_len=float(v)))
+        hd_row.addWidget(self.spn_hidden_dash)
+        llay.addLayout(hd_row)
 
         # v0.1.26: ライン単体表示モード（メッシュを useBackground で透明に・奥側線を隠蔽）
         self.chk_line_only = QtWidgets.QCheckBox(
@@ -4126,6 +4360,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
             try: cmds.undoInfo(closeChunk=True)
             except Exception: pass
 
+    def _on_toggle_hidden_dash(self, state):
+        """v0.1.38: 隠れ線（破線）を全 SCRN ラインに反映。OpenGL では該当 uniform が
+        shader に無いので attributeQuery 経由で安全にスキップされる。"""
+        _scrn_set_hidden(enabled=bool(state))
+        if state and _vp2_is_opengl():
+            try:
+                om2.MGlobal.displayWarning(
+                    "隠れ線（破線）は現在 DirectX11 VP2 のみ対応です。"
+                    "OpenGL VP2 では無効（可視側のみ描画）。")
+            except Exception:
+                pass
+
     def _on_dist_atten_changed(self, *args):
         """v0.1.32: 遠景減衰強度をシーンへ書き込み + 即時計算 + カメラ追従起動。"""
         gc = _ensure_global_ctrl()
@@ -4333,6 +4579,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # v0.1.26: __Creases__ はツリー表示では「クリース」に見せる。v0.1.31: __Edges__ も。
         if label == CREASES_GROUP_NAME:
             label = CREASES_GROUP_DISPLAY
+        elif label == MATBOUND_GROUP_NAME:
+            label = MATBOUND_GROUP_DISPLAY
         elif label == EDGES_GROUP_NAME:
             label = EDGES_GROUP_DISPLAY
         gi = QtWidgets.QTreeWidgetItem([label, "", ""])
@@ -5514,6 +5762,78 @@ class ToonOutlineUI(QtWidgets.QDialog):
         elif skipped:
             cmds.warning("クリース（二面角>{:.0f}°）も境界エッジも見つかりませんでした"
                          "（滑らかな閉曲面では折れ目が無いため線は出ません）。".format(crease_angle))
+
+    def create_material_boundary_lines(self, *args):
+        """v0.1.38: 選択メッシュで隣接 2 面の shadingEngine が異なるエッジを検出し、
+        そこにチューブ状のライン（マテリアル境界）を生成。カメラ非依存・全レンダラー対応。
+        単一 SG メッシュは対象外。"""
+        sel = cmds.ls(sl=True, long=True, type="transform")
+        if not sel:
+            cmds.warning("メッシュを選択してください"); return
+        def _all_edges():
+            out = set()
+            for t in cmds.ls(type="transform", long=True) or []:
+                if cmds.attributeQuery(EDGE_TAG, node=t, exists=True):
+                    out.add(t)
+            return out
+        before = _all_edges()
+        made = 0
+        skipped = 0
+        cmds.undoInfo(openChunk=True)
+        try:
+            for obj in sel:
+                shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
+                if not shps:
+                    continue
+                edges = _material_boundary_edges(shps[0], obj)
+                if not edges:
+                    skipped += 1
+                    continue
+                short = _short(obj)
+                indices = []
+                for ec in edges:
+                    try:
+                        indices.append(int(ec.split("[")[-1].rstrip("]")))
+                    except Exception:
+                        pass
+                chains = _split_edges_into_chains(shps[0], indices)
+                any_made = False
+                mesh_grp = self._ensure_mesh_group(short)
+                mb_sub = self._ensure_sub_group(mesh_grp, MATBOUND_GROUP_NAME)
+                for chain in chains:
+                    if not chain: continue
+                    comps = ["{}.e[{}]".format(short, i) for i in chain]
+                    cmds.select(comps, r=True)
+                    try:
+                        self.create_edge_line()
+                        any_made = True
+                    except Exception:
+                        pass
+                after_edges = _all_edges()
+                new_now = after_edges - before
+                before = after_edges
+                for ln in new_now:
+                    if not cmds.attributeQuery(MATBOUND_TAG, node=ln, exists=True):
+                        try: cmds.addAttr(ln, ln=MATBOUND_TAG, at="bool", dv=True)
+                        except Exception: pass
+                    try:
+                        cur_parent = cmds.listRelatives(ln, parent=True, f=True)
+                        if not cur_parent or cur_parent[0] != mb_sub:
+                            cmds.parent(ln, mb_sub)
+                    except Exception:
+                        pass
+                if any_made:
+                    made += 1
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        cmds.select(clear=True)
+        self.refresh_tree()
+        if made:
+            cmds.warning("マテリアル境界にラインを生成しました（{} メッシュ）。"
+                         "単一 SG のメッシュは対象外です。".format(made))
+        elif skipped:
+            cmds.warning("マテリアル境界が見つかりませんでした"
+                         "（全選択メッシュが単一 SG、または面ごとの shadingEngine が同じ）。")
 
     def create_edge_line(self, *args):
         """選択ポリゴンエッジに沿ってチューブ状のラインを追加（太さ調整可・元に追従）。"""
