@@ -299,6 +299,58 @@ def _add_shelf_button(icon_path: str = "") -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Startup hook (userSetup.py)
+# --------------------------------------------------------------------------- #
+# Hidden lines are drawn by a render override that the tool registers. Without
+# this hook it only exists after the tool window has been opened once in the
+# Maya session, so a playblast right after launch would miss hidden lines.
+# The block is ASCII only (userSetup.py may be read with the locale encoding),
+# skips batch mode, and is replaced in place on every install (idempotent).
+_USERSETUP_BEGIN = b"# >>> OG_Toonline_Manager startup >>>"
+_USERSETUP_END = b"# <<< OG_Toonline_Manager startup <<<"
+_USERSETUP_BODY = b"""# Added by OG_Toonline_Manager_install.py. Prepares hidden lines at Maya
+# startup (no UI). Delete the lines between these markers to disable.
+def _og_toonline_boot():
+    try:
+        import OG_Toonline_Manager
+        OG_Toonline_Manager.boot()
+    except Exception as _og_exc:
+        print("[OG_Toonline_Manager] startup skipped: %s" % _og_exc)
+try:
+    import maya.cmds as _og_cmds
+    import maya.utils as _og_utils
+    if not _og_cmds.about(batch=True):
+        _og_utils.executeDeferred(_og_toonline_boot)
+except Exception:
+    pass
+"""
+
+
+def _ensure_user_setup(user_scripts: str) -> str:
+    """Add (or refresh) the startup block in <user scripts>/userSetup.py.
+    Existing content is kept byte-for-byte. Returns the file path."""
+    path = os.path.join(user_scripts, "userSetup.py")
+    data = b""
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            data = fh.read()
+    nl = b"\r\n" if b"\r\n" in data else b"\n"
+    block = (_USERSETUP_BEGIN + b"\n" + _USERSETUP_BODY + _USERSETUP_END + b"\n").replace(b"\n", nl)
+    start = data.find(_USERSETUP_BEGIN)
+    end = data.find(_USERSETUP_END, start + 1) if start >= 0 else -1
+    if start >= 0 and end > start:
+        end = data.find(b"\n", end)
+        end = len(data) if end < 0 else end + 1
+        new = data[:start] + block + data[end:]
+    else:
+        sep = b"" if (not data or data.endswith(b"\n")) else nl
+        new = data + sep + (nl if data else b"") + block
+    if new != data:
+        _atomic_write_bytes(path, new)
+    return path
+
+
+# --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #
 
@@ -333,6 +385,11 @@ def install() -> str:
     icon_path = _fetch_icon(icons_dir, sha, use_local)
 
     _add_shelf_button(icon_path)
+    try:
+        setup_path = _ensure_user_setup(user_scripts)
+        print(f"[{_MODULE}] startup hook:      {setup_path}")
+    except Exception as exc:  # non-fatal: the tool still works when opened
+        print(f"[{_MODULE}] startup hook skipped: {exc}")
     new_version = _read_installed_version(user_scripts)
 
     print(f"[{_MODULE}] " + "=" * 55)

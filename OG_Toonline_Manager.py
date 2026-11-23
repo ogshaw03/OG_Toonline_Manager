@@ -250,7 +250,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.47"
+__version__ = "0.1.48"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -2716,15 +2716,24 @@ def _rs_switch(name):
 
 
 def _rs_line_collection(layer, line, create=False):
-    """layer 内の、このライン用コレクション（<layer>_OG_<line>）。"""
-    name = _sanitize_layer_name(layer.name() + "_OG_" + _short(line))
+    """layer 内の、このライン用コレクション（<layer>_OG_<line>）。
+    v0.1.48: 名前ではなく中身（静的選択にこのラインが入っているか）で探す。Render Setup の
+    静的選択はリネームに追従するが、コレクション名は古いままなので名前で探すと見失う。"""
+    full = (cmds.ls(line, long=True) or [line])[0]
+    prefix = layer.name() + "_OG_"
     for c in layer.getCollections():
-        if c.name() == name:
+        if not c.name().startswith(_sanitize_layer_name(prefix)):
+            continue
+        try:
+            members = c.getSelector().staticSelection.asList()
+        except Exception:
+            members = []
+        if full in members or line in members:
             return c
     if not create:
         return None
-    c = layer.createCollection(name)
-    c.getSelector().staticSelection.set([_short(line)])
+    c = layer.createCollection(_sanitize_layer_name(prefix + _short(line)))
+    c.getSelector().staticSelection.set([full])
     return c
 
 
@@ -8095,7 +8104,8 @@ float4 PS(VOUT i) : SV_Target
         return float4(g, g, g, 1.0f);
     }
 
-    float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
+    float4 sceneA = gColorTex.Sample(gSamp, i.UV);   // v0.1.48: アルファも引き継ぐ
+    float3 scene = sceneA.rgb;
 
     // v0.1.40: occlusion マスク。target が「実際に画面に見えてる」ピクセルだけ線を描く。
     // tDepth(target) と tDepthScene(全シーン) が一致 = target が最前面 = 見えてる。
@@ -8120,7 +8130,7 @@ float4 PS(VOUT i) : SV_Target
         float hi = gThreshold * 1.15f;
         e = mask * smoothstep(gThreshold, hi, rel);
     }
-    return float4(lerp(scene, gLineColor, e), 1.0f);
+    return float4(lerp(scene, gLineColor, e), max(sceneA.a, e));
 }
 
 technique11 Main { pass p0 {
@@ -8245,7 +8255,8 @@ GLSLShader PS {
             return;
         }
 
-        vec3 scene = texture2D(gColorSamp, VSUV).rgb;
+        vec4 sceneA = texture2D(gColorSamp, VSUV);   // v0.1.48: アルファも引き継ぐ
+        vec3 scene = sceneA.rgb;
 
         // v0.1.40: occlusion マスク（HLSL 版と同じ）
         float zs = texture2D(gDepthSceneSamp, VSUV).r;
@@ -8261,7 +8272,7 @@ GLSLShader PS {
             e = mask * smoothstep(gThreshold, hi, rel);
         }
 
-        colorOut = vec4(mix(scene, gLineColor, e), 1.0);
+        colorOut = vec4(mix(scene, gLineColor, e), max(sceneA.a, e));
     }
 }
 
@@ -8493,17 +8504,19 @@ def _edge_enable():
                         grad = bool(cmds.displayPref(q=True, displayGradient=True))
                     except Exception:
                         bg = [0.36, 0.36, 0.36]; top = bg; bot = bg; grad = False
+                    # v0.1.48: 背景のアルファは 0（通常の VP2 と同じ）。PNG のプレイブラストで
+                    # 背景が透明になり、線だけの素材を合成に使える。
                     try:
                         if grad:
                             c.setClearGradient(True)
-                            c.setClearColor([float(top[0]), float(top[1]), float(top[2]), 1.0])
-                            c.setClearColor2([float(bot[0]), float(bot[1]), float(bot[2]), 1.0])
+                            c.setClearColor([float(top[0]), float(top[1]), float(top[2]), 0.0])
+                            c.setClearColor2([float(bot[0]), float(bot[1]), float(bot[2]), 0.0])
                         else:
                             c.setClearGradient(False)
-                            c.setClearColor([float(bg[0]), float(bg[1]), float(bg[2]), 1.0])
+                            c.setClearColor([float(bg[0]), float(bg[1]), float(bg[2]), 0.0])
                     except Exception:
                         c.setClearGradient(False)
-                        c.setClearColor([0.36, 0.36, 0.36, 1.0])
+                        c.setClearColor([0.36, 0.36, 0.36, 0.0])
                     c.setMask(omr.MClearOperation.kClearAll)
                     return c
 
@@ -8944,6 +8957,19 @@ def show():
     _toon_win.show()
     _ensure_scene_jobs()   # v0.1.46: シーンを開き直したら隠れ線の紐づけを読み直す
     return _toon_win
+
+
+def boot():
+    """v0.1.48: Maya 起動時（インストーラが userSetup.py に書き足した行から）呼ばれる。
+    UI は出さず、シーンを開いたら隠れ線の紐づけを読み直してオーバーライドを有効にする
+    準備だけ行う（ツールを一度も開かずにレイヤー切替→プレイブラストしても隠れ線が出る）。"""
+    try:
+        if cmds.about(batch=True):
+            return
+    except Exception:
+        return
+    _ensure_scene_jobs()
+    _on_scene_changed()
 
 
 if __name__ == "__main__":
