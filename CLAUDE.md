@@ -423,6 +423,7 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   紐づけキャッシュ `_HIDDEN_GROUPS` が空でない かつ `ROOT.toonHiddenOn`（シーン保存・既定 ON）。
   直接 `_edge_enable/_edge_disable` を呼ばない。パス列は `_EdgeOverride._build_ops()` が毎フレーム組む
   （必要な機能のパスだけ）。オーバーライドは**全モデルパネル**へ適用（どのパネルでプレイブラストしても同じ絵）。
+  ただし v0.1.53 から、他のオーバーライドを使っているパネルは取らない（後から作ったパネルはフォーカス時に入れる）。
 - **シェーダファイルはファイル名に版を入れる**（`OG_EdgeOutline_v<ver>.fx` / `OG_ToonScreen_v<ver>.fx` /
   `OG_ScrnHidden_v<ver>.fx`、`_write_fx_file`）。dx11Shader・`MShaderManager.getEffectsFileShader` は
   **パス単位でコンパイル結果を使い回す**ため、同じパスで中身だけ変えても反映されない（v0.1.43 で踏んだ）。
@@ -555,6 +556,42 @@ SCRN のみ（DX11 HLSL。OGSFX は未対応＝属性はあっても効かない
   ウィンドウを開かずに開いたシーンでのキーの追従）と `gui_refw_check.py`（リファレンスしたラインの曲率変更→
   保存→開き直し、同じアセットの 2 回リファレンス）。**値を変える手順と測る手順は別のステップに分ける**
   （曲率ジョブはアイドル時、キーの追従はビューポートの評価で走る。同じ手順で測ると変わっていないように見える）。
+
+### レイヤー・オーバーライド・Undo・正投影まわり（v0.1.53）
+
+- **ライン用コレクションは名前に "_OG_" を含み、中身にラインが入っている物で探す**（`_rs_line_collection`）。
+  コレクション名は作ったときのレイヤー名（`<layer>_OG_<line>`）のまま残るので、レイヤー名の前方一致で探すと
+  レイヤーの名前を変えた後に見失い、2 つ目を作っていた。
+- ↺（`_rs_remove_override`）で上書きが 1 つも残らなくなったコレクションは消す（残すとラインがそのレイヤーに
+  入ったまま＝上書きをやめる前の状態に戻らない）。Render Setup の削除も Undo 1 回で戻る。
+- **他のオーバーライド（Arnold のビューポート描画など）を使っているパネルは取らない**（`_edge_enable` が
+  rendererOverrideName が空か自分のパネルだけに入れる）。後から作ったパネルは `ModelPanelSetFocus` の
+  scriptJob（`_on_panel_focus`）でフォーカスが来たときに入れる。
+- **隠れ線の対象一覧 `_HIDDEN_GROUPS` は Undo/Redo・名前の変更（scriptJob）で読み直す**（`_request_hidden_refresh`
+  → 次のイベントループで `_on_hidden_dirty` を 1 回だけ。名前の変更は他のスクリプトが大量に起こすこともあるので
+  イベントでは予約だけ）。描画中にパスが無くなった（親を変えた等）のを見つけたときも同じ予約をする
+  （描画中に Maya のコマンドでオーバーライドを付け外ししない）。
+- シーン単位の scriptJob は `_SCENE_JOB_FUNCS` の関数名で見分けて `_kill_scene_jobs` で消す（モジュール再読込で二重にしない）。
+- **ツリー更新（refresh_tree）は、名前変更・グループ移動・新規グループの Undo のまとまりの中で呼ぶ**。
+  ツリー更新はコントローラーの付け替え・グループ倍率のつなぎ直し・グループのコントローラー作成を行うので、
+  外で呼ぶと Ctrl+Z 1 回で戻らない。
+- **太さ計算ノード（`<ctrl>_thkA` など）はコントローラー名を元に名前で探す**ので、コントローラーの名前を変えたら
+  `_rename_ctrl_nodes` で合わせる（`rename_node`）。アウトライナーでコントローラーの名前を変えられた場合も、
+  `_ensure_thickness_chain` が `ctrl.thickness` の先の `*_thkA` を見つけて名前を合わせる（作り直すと古いノードが残る）。
+- 太さプロファイル（`_RampWidget`）は押してから離すまでを Undo 1 回（`dragStarted`/`dragFinished` →
+  `_begin_drag`/`_end_drag`）。クリックで足した点もすぐ反映する。`_begin_drag` は二重に開かない。
+- ライン詳細設定はラインを MObjectHandle で持ち、使うたびにパスを引く（`_LineOptionsDialog._lines` プロパティ）。
+- `_upgrade_scrn_shader` は**いまのビューポート（DX11/OpenGL）と合わない種類のシェーダノードには触らない**
+  （DX11 のシーンを OpenGL で開くと dx11Shader に .ogsfx を差していた）。
+- **正投影カメラ**: 深度は線形（`near + z*(far-near)`）で、相対差の基準は距離ではなく正投影の幅
+  （`gOrtho`/`gOrthoScale`、`og_scale`）。距離基準だと 1000 離れた front カメラで 2 単位以内が同じ深さ扱いになり、
+  隠れ線が出なかった。チューブの破線の px 換算も正投影では距離で割らない。Python 側は
+  `_edge_active_camera_near_far` がカメラの orthographic/orthographicWidth を控え、`_edge_set_ortho_params` で渡す。
+- 検証: `gui_rest_check.py`（レイヤー名変更・↺・他のオーバーライド・プロファイル・名前変更/移動/新規グループの
+  Undo・隠れ線一覧の追従・詳細設定の追従）、`gui_ogl_check.py`（OG_PART=save を DX11 で → open を OpenGL で）、
+  `gui_ortho_check.py`（front カメラの隠れ線）、`gui_isect_check.py`（交差線 透視/正投影）。
+- ラインがレンダーレイヤーのコレクションに入っていると、名前を変えたとき Render Setup が「静的選択を新しい名前に
+  書き換える」操作を Undo 履歴に足す（Maya の動作）。名前変更の Undo が 1 回多く要るのはそのため。
 
 ### 見た目の検証方法
 

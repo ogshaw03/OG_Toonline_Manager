@@ -262,7 +262,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.52"
+__version__ = "0.1.53"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -330,6 +330,18 @@ def _ukey(node):
 _CTRL_NODE_SUFFIXES = ("_thkA", "_thkB", "_thkMaskBoost", "_edgeDist", "_thkScale", "_radScale",
                        "_fresScale", "_fresMaxW", "_fresMaxWSens", "_scrnScale", "_scrnDist",
                        "_visCond")
+
+
+def _rename_ctrl_nodes(old_base, new_base):
+    """コントローラー名の後ろに付けて作ったノード（_thkA など）を新しいコントローラー名に合わせる。"""
+    if not old_base or old_base == new_base:
+        return
+    for s in _CTRL_NODE_SUFFIXES:
+        if cmds.objExists(old_base + s) and not cmds.objExists(new_base + s):
+            try:
+                cmds.rename(old_base + s, new_base + s)
+            except Exception:
+                pass
 
 
 def _clear_line_caches():
@@ -1080,6 +1092,9 @@ def _hidden_frame_groups():
     if not _hidden_scene_on():
         return out
     for occ, lines in _HIDDEN_GROUPS:
+        # v0.1.53: 親を変えた等でパスが変わったら、次のイベントループで一覧を読み直す
+        if any(not cmds.objExists(ln) for ln in lines):
+            _request_hidden_refresh()
         occ2 = [o for o in occ if cmds.objExists(o)]
         lines2 = [ln for ln in lines if cmds.objExists(ln) and _scrn_line_visible(ln)
                   and _hidden_line_mode(ln) != 0
@@ -1098,6 +1113,11 @@ def _upgrade_scrn_shader(line):
     try:
         cur = (cmds.getAttr(shd + ".shader") or "").replace("\\", "/")
     except Exception:
+        return False
+    # v0.1.53: いまのビューポート（DX11/OpenGL）と合わない種類のシェーダノードは触らない。
+    # 以前は DX11 で作ったシーンを OpenGL で開くと、dx11Shader に OpenGL 用(.ogsfx)のファイルを
+    # 差してしまい、そのまま保存すると DX11 で開いたときも壊れたまま（読み込みエラー）になった。
+    if (cmds.nodeType(shd) == "GLSLShader") != _vp2_is_opengl():
         return False
     path = _screen_fx_path()
     if cur == path:
@@ -1702,14 +1722,21 @@ Texture2D gOccDepth;
 Texture2D gSceneDepth;
 float gNear = 0.1f;
 float gFar  = 10000.0f;
+float gOrtho = 0.0f;           // v0.1.53: 1 = 正投影カメラ
+float gOrthoScale = 10.0f;     // 正投影のとき深さの差を比べる基準の長さ（正投影の幅）
 int   hiddenMode = 1;          // 1=破線 2=実線
 float hiddenTol  = 0.002f;     // 相対深度の許容差
 
 float og_lin(float z)
 {
+    if (gOrtho > 0.5f) return gNear + z * (gFar - gNear);   // 正投影の深度は線形
     float denom = gFar - z * (gFar - gNear);
     return (gNear * gFar) / max(denom, 1e-6f);
 }
+
+// 許容差の基準。透視はカメラからの距離、正投影は距離に意味がない（カメラが 1000 離れていると
+// 2 単位以内が同じ深さ扱いになり隠れ線が消えた）ので正投影の幅を使う。
+float og_scale(float z) { return (gOrtho > 0.5f) ? gOrthoScale : z; }
 
 float4 PShaderOcc(G2P i) : SV_Target
 {
@@ -1718,9 +1745,9 @@ float4 PShaderOcc(G2P i) : SV_Target
     if (ro >= 0.99999f) discard;                     // 紐づけ先が無い画素
     float zl = og_lin(i.HPos.z);
     float zo = og_lin(ro);
-    if (zl <= zo * (1.0f + hiddenTol)) discard;      // 線が紐づけ先より手前（通常の線が描く）
+    if (zl - zo <= og_scale(zo) * hiddenTol) discard;   // 線が紐づけ先より手前（通常の線が描く）
     float zs = og_lin(gSceneDepth.Load(px).r);
-    if (zs < zo * (1.0f - hiddenTol)) discard;       // 紐づけ先より手前に別の物がある
+    if (zo - zs > og_scale(zo) * hiddenTol) discard;    // 紐づけ先より手前に別の物がある
     brush_discard(i);
     if (hiddenMode == 1) {
         float dashPosPx = i.UV.x * i.LenPx;
@@ -1781,6 +1808,8 @@ Texture2D gOccDepth;
 Texture2D gSceneDepth;
 float gNear = 0.1f;
 float gFar  = 10000.0f;
+float gOrtho = 0.0f;           // v0.1.53: 1 = 正投影カメラ
+float gOrthoScale = 10.0f;     // 正投影のとき深さの差を比べる基準の長さ（正投影の幅）
 int   hiddenMode = 1;
 float hiddenTol  = 0.002f;
 float3 lineColor = {0.0f, 0.0f, 0.0f};
@@ -1801,15 +1830,19 @@ VOUT VS(VIN i)
     // 1 単位が何 px か。頂点ごとの深さで出すとチューブの手前側と縁で値がずれ、それが線の長さぶん
     // 積み重なって破線が「く」の字に曲がる。線の中心の深さ 1 点で決める（＝破線はワールドで等間隔）。
     float vz = max(abs(mul(float4(tubeCenter, 1.0f), gView).z), 1e-4f);
-    o.PxPerUnit = 0.5f * gScreen.y * gProj[1][1] / vz;
+    // v0.1.53: 正投影は距離で大きさが変わらない（距離で割ると 1000 離れたカメラで破線が伸びきる）
+    o.PxPerUnit = 0.5f * gScreen.y * gProj[1][1] / ((gOrtho > 0.5f) ? 1.0f : vz);
     return o;
 }
 
 float og_lin(float z)
 {
+    if (gOrtho > 0.5f) return gNear + z * (gFar - gNear);   // 正投影の深度は線形
     float denom = gFar - z * (gFar - gNear);
     return (gNear * gFar) / max(denom, 1e-6f);
 }
+
+float og_scale(float z) { return (gOrtho > 0.5f) ? gOrthoScale : z; }
 
 // 画素のワールド位置を中心線（折れ線）の一番近い区間へ投影し、線の始点からの長さを返す
 float og_axis_len(float3 p, float vFallback)
@@ -1843,9 +1876,9 @@ float4 PS(VOUT i) : SV_Target
     if (ro >= 0.99999f) discard;
     float zl = og_lin(i.HPos.z);
     float zo = og_lin(ro);
-    if (zl <= zo * (1.0f + hiddenTol)) discard;
+    if (zl - zo <= og_scale(zo) * hiddenTol) discard;
     float zs = og_lin(gSceneDepth.Load(px).r);
-    if (zs < zo * (1.0f - hiddenTol)) discard;
+    if (zo - zs > og_scale(zo) * hiddenTol) discard;
     if (hiddenMode == 1) {
         float posPx = og_axis_len(i.WPos, i.UV.y) * i.PxPerUnit;
         float phase = frac(posPx / max(hiddenDashLen, 1.0f));
@@ -3263,7 +3296,9 @@ def _rs_line_collection(layer, line, create=False):
     full = (cmds.ls(line, long=True) or [line])[0]
     prefix = layer.name() + "_OG_"
     for c in layer.getCollections():
-        if not c.name().startswith(_sanitize_layer_name(prefix)):
+        # v0.1.53: レイヤー名ではなく "_OG_" で見分ける（レイヤーの名前を変えるとコレクション名は
+        # 古いレイヤー名のまま残り、前方一致で探すと見失って 2 つ目を作っていた）
+        if "_OG_" not in c.name():
             continue
         try:
             members = c.getSelector().staticSelection.asList()
@@ -3308,7 +3343,9 @@ def _rs_set_override(layer_name, line, attr, value):
 
 
 def _rs_remove_override(layer_name, line, attr):
-    """layer での line.attr の上書きを消す（マスターと同じに戻す）。"""
+    """layer での line.attr の上書きを消す（マスターと同じに戻す）。
+    v0.1.53: 上書きが 1 つも残らなくなったコレクションも消す（残すとラインがそのレイヤーに
+    入ったままになる＝上書きをやめる前と同じ状態に戻らない）。"""
     ov = _rs_find_override(layer_name, line, attr)
     if ov is None:
         return False
@@ -3320,6 +3357,22 @@ def _rs_remove_override(layer_name, line, attr):
             cmds.delete(ov.name())
         except Exception:
             return False
+    L = _rs_get_layer(layer_name)
+    c = _rs_line_collection(L, line) if L is not None else None
+    if c is not None:
+        try:
+            left = list(c.getOverrides())
+        except Exception:
+            left = [None]
+        if not left:
+            try:
+                import maya.app.renderSetup.model.collection as collectionM
+                collectionM.delete(c)
+            except Exception:
+                try:
+                    cmds.delete(c.name())
+                except Exception:
+                    pass
     return True
 
 
@@ -3420,6 +3473,14 @@ def _ensure_thickness_chain(line):
     base = _short(ctrl)
     mA = base + "_thkA"
     mB = base + "_thkB"
+    if not cmds.objExists(mA):
+        # v0.1.53: コントローラーの名前が変わっていたら、つながっている既存のノードの名前を合わせる
+        # （以前は新しく作り直し、古いノードが残って Ctrl+Z 1 回で名前変更が戻らなかった）
+        for n in cmds.listConnections(ctrl + "." + CTRL_THICK, s=False, d=True,
+                                      type="multDoubleLinear") or []:
+            if n.endswith("_thkA"):
+                _rename_ctrl_nodes(n[:-len("_thkA")], base)
+                break
     if not cmds.objExists(mA):
         mA = cmds.createNode("multDoubleLinear", name=mA)
     if not cmds.objExists(mB):
@@ -4533,6 +4594,8 @@ class _RampWidget(QtWidgets.QWidget):
     """長手方向の太さプロファイルを編集するカーブ（ランプ）ウィジェット。
     左クリック=点の追加/ドラッグ、右クリック=点の削除。y は太さ倍率(0〜2、基準1)。"""
     valueChanged = QtCore.Signal()
+    dragStarted = QtCore.Signal()    # v0.1.53: 左ボタンを押した（ここから離すまでを Undo 1 回にまとめる）
+    dragFinished = QtCore.Signal()   # 左ボタンを離した
 
     def __init__(self, parent=None):
         super(_RampWidget, self).__init__(parent)
@@ -4540,6 +4603,7 @@ class _RampWidget(QtWidgets.QWidget):
         self.setMinimumWidth(180)
         self._pts = [[0.0, 1.0], [1.0, 1.0]]
         self._drag = -1
+        self._pressed = False
         self._m = 6
         self._ymax = 2.0
 
@@ -4613,11 +4677,21 @@ class _RampWidget(QtWidgets.QWidget):
                 del self._pts[i]
                 self.update(); self.valueChanged.emit()
             return
+        if e.button() != QtCore.Qt.LeftButton:
+            return
+        added = False
         if i < 0:
             x, y = self._to_norm(px, py)
             self._pts.append([x, y]); self._pts.sort(key=lambda q: q[0])
             i = self._hit(*self._to_px(x, y))
+            added = True
         self._drag = i
+        if not self._pressed:
+            self._pressed = True
+            self.dragStarted.emit()
+        if added:
+            # v0.1.53: クリックで足した点もすぐ反映する（以前は動かすまでシーンに入らなかった）
+            self.update(); self.valueChanged.emit()
 
     def mouseMoveEvent(self, e):
         if self._drag < 0:
@@ -4635,6 +4709,18 @@ class _RampWidget(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag = -1
+        self._finish_press()
+
+    def hideEvent(self, e):
+        # 押したまま隠れた（パネルの切り替えなど）ときも Undo のまとまりを閉じる
+        self._drag = -1
+        self._finish_press()
+        super(_RampWidget, self).hideEvent(e)
+
+    def _finish_press(self):
+        if self._pressed:
+            self._pressed = False
+            self.dragFinished.emit()
 
 
 class _OutlineTree(QtWidgets.QTreeWidget):
@@ -5190,6 +5276,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.ramp = _RampWidget()
         self.ramp.setToolTip("長手方向の太さ強弱。左クリックで点追加/移動、右クリックで削除")
         self.ramp.valueChanged.connect(self._apply_profile)
+        # v0.1.53: 押してから離すまでを Undo 1 回に（以前はマウスを動かすたびに 1 回ずつ積んでいた）
+        self.ramp.dragStarted.connect(self._begin_drag)
+        self.ramp.dragFinished.connect(self._end_drag)
         prow.addWidget(self.ramp, 1)
         b_rp = QtWidgets.QPushButton("↺"); b_rp.setFixedWidth(26)
         b_rp.setToolTip("プロファイルをリセット")
@@ -6230,10 +6319,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
     # ========== undo 制御 ==========
     def _begin_drag(self):
         """スライダー押下：ドラッグ全体を1つの undo チャンクにまとめる。"""
+        if self._dragging:
+            return      # 二重に開かない（閉じ損ねると Undo が効かなくなる）
         self._dragging = True
         cmds.undoInfo(openChunk=True)
 
     def _end_drag(self):
+        if not self._dragging:
+            return
         cmds.undoInfo(closeChunk=True)
         self._dragging = False
 
@@ -6484,14 +6577,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not lines:
             return
         s = _serialize_profile(self.ramp.points())
-        cmds.undoInfo(openChunk=True)
+        chunk = not self._dragging   # ドラッグ中は _begin/_end_drag のチャンクに含める
+        if chunk:
+            cmds.undoInfo(openChunk=True)
         try:
             for line in lines:
                 ctrl = _ensure_line_anim(line, self.spin.value())
                 self._set_ctrl_attr(ctrl, CTRL_PROFILE, s, "太さプロファイル", as_string=True)
                 _update_line_weights(line)
         finally:
-            cmds.undoInfo(closeChunk=True)
+            if chunk:
+                cmds.undoInfo(closeChunk=True)
 
     def _reset_profile(self):
         self.ramp.set_points([[0.0, 1.0], [1.0, 1.0]])
@@ -7465,20 +7561,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         cmds.undoInfo(openChunk=True)
         try:
-            # コントローラーはリネーム前に取得（message リンクで特定。名前依存しない）
-            ctrl = _ctrl_of(node)
-            newpath = cmds.rename(node, new)
-            # コントローラー名もラインに合わせて変更（アウトライナーの見た目を一致させる）
-            if ctrl and cmds.objExists(ctrl):
-                try:
-                    cmds.rename(ctrl, _short(newpath) + CTRL_SUFFIX)
-                except Exception:
-                    pass
-        except Exception:
-            cmds.warning("リネームに失敗しました: {}".format(new))
+            try:
+                # コントローラーはリネーム前に取得（message リンクで特定。名前依存しない）
+                ctrl = _ctrl_of(node)
+                newpath = cmds.rename(node, new)
+                # コントローラー名もラインに合わせて変更（アウトライナーの見た目を一致させる）
+                if ctrl and cmds.objExists(ctrl):
+                    try:
+                        old_c = _short(ctrl)
+                        new_c = cmds.rename(ctrl, _short(newpath) + CTRL_SUFFIX)
+                        _rename_ctrl_nodes(old_c, _short(new_c))
+                    except Exception:
+                        pass
+            except Exception:
+                cmds.warning("リネームに失敗しました: {}".format(new))
+            # v0.1.53: ツリー更新で張り直す接続も同じ Undo に入れる（外にあると Ctrl+Z 1 回で戻らなかった）
+            self.refresh_tree()
         finally:
             cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
         # 環境によってはスクリプトの rename がアウトライナーに即時反映されないため明示更新
         self._refresh_outliner()
 
@@ -7667,9 +7767,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.parent(ln, group)
                 except Exception:
                     pass
+            # v0.1.53: コントローラーの付け替え・グループ倍率のつなぎ直し（ツリー更新）も同じ Undo に
+            self.refresh_tree()
         finally:
             cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
 
     # ========== グループ管理 ==========
     def new_group(self):
@@ -7680,9 +7781,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         try:
             self._ensure_group(name)
+            self.refresh_tree()    # v0.1.53: グループのコントローラー作成も同じ Undo に
         finally:
             cmds.undoInfo(closeChunk=True)
-        self.refresh_tree()
         idx = self.group_combo.findText(name)
         if idx >= 0:
             self.group_combo.setCurrentIndex(idx)
@@ -7912,7 +8013,9 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.Tool)
         self.setStyleSheet(_LINEOPT_CSS)
         self._owner = owner
-        self._lines = [ln for ln in lines if cmds.objExists(ln)]
+        # v0.1.53: ラインはパスではなく実体（MObjectHandle）で持ち、使うたびに今のパスを引く
+        # （開いたまま名前を変えたりグループを移したりすると、古いパスで失敗していた）
+        self._line_handles = [h for h in (_mobj_handle(ln) for ln in lines if cmds.objExists(ln)) if h]
         self._updating = False
         self._rows = {}           # attr -> (QLabel, 戻すボタン, 見出し)
         # SCRN は属性を揃えておく（通常は作成時に済んでいる）。エッジ線は開いただけで専用シェーダへ
@@ -7942,6 +8045,17 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             w.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._reload_layers()
         self._refresh()
+
+    @property
+    def _lines(self):
+        out = []
+        for h in self._line_handles:
+            try:
+                if h.isValid():
+                    out.append(om2.MDagPath.getAPathTo(h.object()).fullPathName())
+            except Exception:
+                pass
+        return out
 
     # ---------- 構築 ----------
     def _section(self, lay, text):
@@ -8477,11 +8591,14 @@ def _on_scene_changed():
         pass
 
 
+_SCENE_JOB_FUNCS = ("_on_scene_changed", "_on_panel_focus", "_request_hidden_refresh")
+
+
 def _kill_scene_jobs():
-    """このツールが登録したシーン切替 scriptJob を消す（モジュール再読込で二重登録しない）。"""
+    """このツールが登録したシーン単位の scriptJob を消す（モジュール再読込で二重登録しない）。"""
     try:
         for j in cmds.scriptJob(listJobs=True) or []:
-            if "_on_scene_changed" in j and "Scene" in j:
+            if any(f in j for f in _SCENE_JOB_FUNCS):
                 try:
                     cmds.scriptJob(kill=int(j.split(":")[0]), force=True)
                 except Exception:
@@ -8495,6 +8612,15 @@ def _ensure_scene_jobs():
     for ev in ("SceneOpened", "NewSceneOpened"):
         try:
             cmds.scriptJob(event=[ev, _on_scene_changed], protected=False)
+        except Exception:
+            pass
+    # v0.1.53: 後から作ったパネル・Undo/Redo・名前の変更に隠れ線のオーバーライドを追従させる。
+    # 名前の変更は他のスクリプトが大量に起こすこともあるので、読み直しは次のイベントループで 1 回だけ。
+    jobs = [("ModelPanelSetFocus", _on_panel_focus)]
+    jobs += [(ev, _request_hidden_refresh) for ev in ("Undo", "Redo", "NameChanged")]
+    for ev, fn in jobs:
+        try:
+            cmds.scriptJob(event=[ev, fn], protected=False)
         except Exception:
             pass
 
@@ -8845,6 +8971,8 @@ float  gThreshold = 0.01f;              // ビュー空間深度の相対差し�
 float3 gLineColor = {0.0f, 0.0f, 0.0f};
 float  gNear      = 0.1f;
 float  gFar       = 10000.0f;
+float  gOrtho      = 0.0f;              // v0.1.53: 1 = 正投影カメラ
+float  gOrthoScale = 10.0f;             // 正投影のとき相対差の基準にする長さ（正投影の幅）
 int    gDebug     = 0;                  // 1: 線形化深度を可視化（切り分け用）
 int    gIntersectMode    = 0;           // 1: 対象と他オブジェクトの交差線モード
 int    gEdgeMode         = 0;           // 1: 対象の自己エッジ（旧・画像空間エッジ）
@@ -8855,13 +8983,17 @@ struct VOUT { float4 Pos : SV_Position; float2 UV : TEXCOORD0; };
 
 VOUT VS(VIN i) { VOUT o; o.Pos = float4(i.Pos, 1.0f); o.UV = i.UV; return o; }
 
-// DirectX の非線形深度 [0,1] → ビュー空間の線形深度
+// DirectX の深度 [0,1] → ビュー空間の線形深度
 float linearizeDepth(float z)
 {
+    if (gOrtho > 0.5f) return gNear + z * (gFar - gNear);   // 正投影の深度は線形
     // near*far / (far - z*(far-near)). z=1(遠)→far, z=0(近)→near
     float denom = gFar - z * (gFar - gNear);
     return (gNear * gFar) / max(denom, 1e-6f);
 }
+
+// 相対差の基準。透視はカメラからの距離、正投影は距離に意味がないので正投影の幅。
+float og_scale(float z) { return max((gOrtho > 0.5f) ? gOrthoScale : z, 1e-4f); }
 
 // 交差モード本体: 対象と他の 2 深度が「近接」かつ「隣接で前後が反転」した位置に線を出す。
 // near-miss（近いが交差していない）を避けるため sign flip を併用。
@@ -8878,12 +9010,12 @@ float intersectEdge(float2 uv, float2 t)
     float za_c = linearizeDepth(ra_c);
     float zb_c = linearizeDepth(rb_c);
     float zs_c = linearizeDepth(rs_c);
-    float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4f);
+    float rel_c = abs(za_c - zb_c) / og_scale(min(za_c, zb_c));
     // 中心が近接の目安を外れていればまず線にしない（範囲を少し緩めて取りこぼし防止）
     if (rel_c > gIntersectThresh * 3.0f) return 0.0f;
     bool a_front_c = (za_c <= zb_c);
     // scene の最前面が target / other どちらか（イプシロンは画面空間深度の 0.2%）
-    float eps_c = max(za_c, zb_c) * 0.002f;
+    float eps_c = og_scale(max(za_c, zb_c)) * 0.002f;
     bool saw_a_front = (abs(zs_c - za_c) < eps_c);
     bool saw_b_front = (abs(zs_c - zb_c) < eps_c);
 
@@ -8907,9 +9039,9 @@ float intersectEdge(float2 uv, float2 t)
         float zs_n = linearizeDepth(rs_n);
         bool a_front_n = (za_n <= zb_n);
         if (a_front_c != a_front_n) any_flip = true;
-        float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4f);
+        float rel_n = abs(za_n - zb_n) / og_scale(min(za_n, zb_n));
         min_rel = min(min_rel, rel_n);
-        float eps_n = max(za_n, zb_n) * 0.002f;
+        float eps_n = og_scale(max(za_n, zb_n)) * 0.002f;
         if (abs(zs_n - za_n) < eps_n) saw_a_front = true;
         if (abs(zs_n - zb_n) < eps_n) saw_b_front = true;
     }
@@ -8940,7 +9072,7 @@ float4 PS(VOUT i) : SV_Target
     // 対象外領域（zc==1.0）は線を出さない。エッジは 4 方向の差の最大値で判定
     // （ラプラシアンだと対象と背景の境界で両サイドに強く出て太る）。
     float dmax = max(max(abs(u - c), abs(d - c)), max(abs(l - c), abs(r - c)));
-    float rel  = dmax / max(c, 1e-4f);
+    float rel  = dmax / og_scale(c);
 
     if (gDebug != 0)
     {
@@ -9002,6 +9134,8 @@ uniform float gThreshold;
 uniform vec3 gLineColor;
 uniform float gNear;
 uniform float gFar;
+uniform float gOrtho;                // v0.1.53: 1 = 正投影カメラ（Python から毎フレーム入れる）
+uniform float gOrthoScale;           // 正投影のとき相対差の基準にする長さ（正投影の幅）
 uniform int gDebug;
 uniform int gIntersectMode;
 uniform int gEdgeMode;
@@ -9027,9 +9161,12 @@ GLSLShader VS {
 
 GLSLShader PS {
     float linearize(float z) {
+        if (gOrtho > 0.5) return gNear + z * (gFar - gNear);   // 正投影の深度は線形
         float denom = gFar - z * (gFar - gNear);
         return (gNear * gFar) / max(denom, 1e-6);
     }
+
+    float og_scale(float z) { return max((gOrtho > 0.5) ? gOrthoScale : z, 1e-4); }
 
     float intersectEdge(vec2 uv, vec2 t) {
         float ra_c = texture2D(gDepthSamp, uv).r;
@@ -9039,11 +9176,11 @@ GLSLShader PS {
         float za_c = linearize(ra_c);
         float zb_c = linearize(rb_c);
         float zs_c = linearize(rs_c);
-        float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4);
+        float rel_c = abs(za_c - zb_c) / og_scale(min(za_c, zb_c));
         if (rel_c > gIntersectThresh * 3.0) return 0.0;
         bool a_front_c = (za_c <= zb_c);
         // v0.1.42: scene 最前面が target / other どちらか（HLSL 版と同条件）
-        float eps_c = max(za_c, zb_c) * 0.002;
+        float eps_c = og_scale(max(za_c, zb_c)) * 0.002;
         bool saw_a_front = (abs(zs_c - za_c) < eps_c);
         bool saw_b_front = (abs(zs_c - zb_c) < eps_c);
         bool any_flip = false;
@@ -9064,9 +9201,9 @@ GLSLShader PS {
             float zs_n = linearize(rs_n);
             bool a_front_n = (za_n <= zb_n);
             if (a_front_c != a_front_n) any_flip = true;
-            float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4);
+            float rel_n = abs(za_n - zb_n) / og_scale(min(za_n, zb_n));
             min_rel = min(min_rel, rel_n);
-            float eps_n = max(za_n, zb_n) * 0.002;
+            float eps_n = og_scale(max(za_n, zb_n)) * 0.002;
             if (abs(zs_n - za_n) < eps_n) saw_a_front = true;
             if (abs(zs_n - zb_n) < eps_n) saw_b_front = true;
         }
@@ -9092,7 +9229,7 @@ GLSLShader PS {
         float r = linearize(zr);
 
         float dmax = max(max(abs(u - c), abs(d - c)), max(abs(l - c), abs(r - c)));
-        float rel = dmax / max(c, 1e-4);
+        float rel = dmax / og_scale(c);
 
         if (gDebug != 0) {
             float span = max(gFar - gNear, 1e-4);
@@ -9225,10 +9362,14 @@ def _edge_other_transforms():
     return others
 
 
+_EDGE_CAM_ORTHO = {"ortho": False, "scale": 10.0}
+
+
 def _edge_active_camera_near_far(destination=None):
     """指定パネル（無ければフォーカス→最初の modelPanel）の active camera の near/far を返す。
     複数ビューポート運用でも、shader() 実行中はその描画対象パネルのカメラを見るのが正しい。
-    取得に失敗したら現在値を維持。"""
+    取得に失敗したら現在値を維持。
+    v0.1.53: 同じカメラが正投影かどうかと正投影の幅を _EDGE_CAM_ORTHO に入れる（_edge_camera_ortho で読む）。"""
     try:
         panels = []
         if destination:
@@ -9256,10 +9397,26 @@ def _edge_active_camera_near_far(destination=None):
             n = float(cmds.getAttr(cam_shape + ".nearClipPlane"))
             f = float(cmds.getAttr(cam_shape + ".farClipPlane"))
             if n > 0.0 and f > n:
+                try:
+                    ortho = bool(cmds.getAttr(cam_shape + ".orthographic"))
+                    scale = float(cmds.getAttr(cam_shape + ".orthographicWidth")) if ortho else 10.0
+                except Exception:
+                    ortho, scale = False, 10.0
+                _EDGE_CAM_ORTHO["ortho"] = ortho
+                _EDGE_CAM_ORTHO["scale"] = max(scale, 1e-3)
                 return n, f
     except Exception:
         pass
     return _EDGE_PARAMS["near"], _EDGE_PARAMS["far"]
+
+
+def _edge_set_ortho_params(s):
+    """直前の _edge_active_camera_near_far で見たカメラの正投影の情報をシェーダへ入れる（v0.1.53）。"""
+    try:
+        s.setParameter("gOrtho", 1.0 if _EDGE_CAM_ORTHO["ortho"] else 0.0)
+        s.setParameter("gOrthoScale", float(_EDGE_CAM_ORTHO["scale"]))
+    except Exception:
+        pass
 
 
 def _edge_active():
@@ -9338,6 +9495,7 @@ def _hidden_set_shader_params(s, line, ovr):
     n, f = _edge_active_camera_near_far(ovr.destination)
     s.setParameter("gNear", float(n))
     s.setParameter("gFar", float(f))
+    _edge_set_ortho_params(s)
     s.setParameter("hiddenTol", float(HIDDEN_DEPTH_TOL))
     s.setParameter("hiddenMode", int(_hidden_line_mode(line)))
     if bool(_get(line, LN_HID_SAME, 1)):
@@ -9372,14 +9530,61 @@ def _hidden_set_shader_params(s, line, ovr):
             s.setParameter(an, float(_get(shd, an, dv)))
 
 
+def _og_override_needed():
+    need_hidden = bool(_HIDDEN_GROUPS) and _hidden_scene_on() and not _vp2_is_opengl()
+    return bool(_OVR_STATE["edge"] or _OVR_STATE["intersect"] or need_hidden)
+
+
 def _og_override_sync():
     """いま必要な機能に合わせてオーバーライドを有効/無効にする。有効なら True。"""
-    need_hidden = bool(_HIDDEN_GROUPS) and _hidden_scene_on() and not _vp2_is_opengl()
-    if _OVR_STATE["edge"] or _OVR_STATE["intersect"] or need_hidden:
+    if _og_override_needed():
         return _edge_enable()
     if _edge_override is not None:
         _edge_disable()
     return False
+
+
+def _on_panel_focus():
+    """v0.1.53: 後から作ったモデルパネル（ティアオフなど）にフォーカスが来たら、オーバーライドが
+    有効なときはそのパネルにも入れる（以前は有効にした時点のパネルにしか入らず、新しいパネルで
+    プレイブラストすると隠れ線が出なかった）。他のオーバーライドを使っているパネルは取らない。"""
+    if _edge_override is None:
+        return
+    try:
+        p = cmds.getPanel(withFocus=True)
+        if p and cmds.getPanel(typeOf=p) == "modelPanel":
+            if not cmds.modelEditor(p, q=True, rendererOverrideName=True):
+                cmds.modelEditor(p, e=True, rendererOverrideName=EDGE_OVR_NAME)
+    except Exception:
+        pass
+
+
+_HIDDEN_REFRESH_PENDING = [False]
+
+
+def _on_hidden_dirty():
+    """v0.1.53: Undo/Redo・名前の変更のあとに、隠れ線の対象一覧を読み直す。
+    以前はツールの画面を通した操作でしか読み直さず、アウトライナーで名前を変える・紐づけを Undo する
+    と、古い一覧のまま描いた（名前変更では隠れ線が消え、紐づけの Undo ではオーバーライドが残った）。"""
+    _HIDDEN_REFRESH_PENDING[0] = False
+    try:
+        _hidden_refresh_cache()
+        if _og_override_needed() != (_edge_override is not None):
+            _og_override_sync()
+    except Exception:
+        pass
+
+
+def _request_hidden_refresh():
+    """描画中から呼ぶ用: 次のイベントループで 1 回だけ読み直す（描画中に Maya のコマンドで
+    オーバーライドを付け外ししないため Qt のタイマーで後回しにする）。"""
+    if _HIDDEN_REFRESH_PENDING[0]:
+        return
+    _HIDDEN_REFRESH_PENDING[0] = True
+    try:
+        QtCore.QTimer.singleShot(0, _on_hidden_dirty)
+    except Exception:
+        _HIDDEN_REFRESH_PENDING[0] = False
 
 
 def _edge_enable():
@@ -9594,6 +9799,7 @@ def _edge_enable():
                         _EDGE_PARAMS["near"] = n; _EDGE_PARAMS["far"] = f
                         s.setParameter("gNear", float(n))
                         s.setParameter("gFar", float(f))
+                        _edge_set_ortho_params(s)
                         s.setParameter("gDebug", int(_EDGE_PARAMS["debug"]))
                         s.setParameter("gIntersectMode",
                                        int(bool(_OVR_STATE["intersect"] and _EDGE_PARAMS["intersect_mode"])))
@@ -9811,6 +10017,10 @@ def _edge_enable():
     for panel in panels:
         try:
             cur = cmds.modelEditor(panel, q=True, rendererOverrideName=True)
+            # v0.1.53: 他のオーバーライド（Arnold のビューポート描画など）を使っているパネルは取らない
+            # （以前は上書きし、外すときも空に戻すだけで元のオーバーライドが失われた）
+            if cur and cur != EDGE_OVR_NAME:
+                continue
             # 登録し直した直後は、名前が同じでもパネルへ入れ直す。シーンを開くとパネル設定が
             # 「このオーバーライドを使う」で復元されるが、その時点で未登録だと既定描画に
             # 戻ったままになり、後から登録しても反映されない（v0.1.46 で確認）。
