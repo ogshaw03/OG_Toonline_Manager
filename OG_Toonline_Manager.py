@@ -578,6 +578,38 @@ def _scrn_intersect_meshes():
     return _source_meshes_of(lines)
 
 
+def _scrn_intersect_screen_thickness():
+    """v0.1.45: 交差線の画面 px 幅を、参加中の SCRN ラインの実効太さに合わせて算出。
+    各 SCRN ラインの mB.output = ctrl.thickness × group.mult × global.mult を読み、最大値 ×
+    SCRN_SCALE を返す（SCRN 本体と同じ pixel 幅）。該当ラインが無ければ既定 3.0。"""
+    best = 0.0
+    for ln in _all_screen_lines():
+        if not _scrn_intersect_on(ln) or not _scrn_line_visible(ln):
+            continue
+        ctrl = _ctrl_of(ln)
+        if not ctrl:
+            continue
+        mB = _short(ctrl) + "_thkB"
+        if cmds.objExists(mB):
+            try:
+                v = float(cmds.getAttr(mB + ".output"))
+                if v > best:
+                    best = v
+            except Exception:
+                pass
+        else:
+            # 単純に ctrl.thickness を使う（倍率は無視）
+            try:
+                v = float(cmds.getAttr(ctrl + "." + CTRL_THICK))
+                if v > best:
+                    best = v
+            except Exception:
+                pass
+    if best <= 0.0:
+        return 3.0
+    return max(1.0, best * SCRN_SCALE)
+
+
 def _scrn_set_depth_bias(v):
     """全スクリーン輪郭ラインの重なり深度押し込み（ビュー空間）を設定。"""
     global _SCRN_ZBIAS
@@ -4491,7 +4523,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 self.chk_intersect.blockSignals(False)
                 return
             _edge_set_targets(targets)
-            _edge_set_params(threshold=0.05, thickness=1.0, color=self._color,
+            # v0.1.45: thickness は SCRN 本体と同じ pixel 幅になるように計算
+            _edge_set_params(threshold=0.05,
+                             thickness=_scrn_intersect_screen_thickness(),
+                             color=self._color,
                              intersect_mode=True,
                              intersect_threshold=float(self.spn_intersect_thr.value()))
             if not _edge_enable():
@@ -4851,6 +4886,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _refresh_intersect_targets_if_on(self):
         """v0.1.44: SCRN ラインの可視/intersectOn 変更時に交差線対象を再評価。
+        v0.1.45: 併せて交差線の画面 px 幅を SCRN 太さに合わせて再設定。
         対象が空になれば UI トグルも OFF へ戻す。"""
         try:
             if not getattr(self, "chk_intersect", None) or not self.chk_intersect.isChecked():
@@ -4858,6 +4894,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             tgt = _scrn_intersect_meshes()
             if tgt:
                 _edge_set_targets(tgt)
+                _edge_set_params(thickness=_scrn_intersect_screen_thickness())
                 try: cmds.refresh()
                 except Exception: pass
             else:
@@ -4993,6 +5030,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if chunk:
                 cmds.undoInfo(closeChunk=True)
         self._update_mult_labels()
+        self._refresh_intersect_targets_if_on()
 
     def _on_gslider(self, v):
         val = v / 100.0
@@ -5014,6 +5052,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if chunk:
                 cmds.undoInfo(closeChunk=True)
         self._update_mult_labels()
+        self._refresh_intersect_targets_if_on()
 
     def _update_mult_labels(self):
         """ツリーのグループ倍率（太さ列）を再描画（再構築せず）。"""
@@ -5120,6 +5159,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if n and cmds.attributeQuery(TAG, node=n, exists=True):
                 it.setText(1, "{:.3f}".format(val))
         self._populating = False
+        # v0.1.45: 選択に SCRN ラインが含まれてて交差線 ON なら、太さ変更を交差線にも反映
+        try:
+            if any(cmds.attributeQuery(SCRN_TAG, node=ln, exists=True) for ln in lines):
+                self._refresh_intersect_targets_if_on()
+        except Exception:
+            pass
 
     # ========== 曲率起伏（選択ラインのみ） ==========
     def _on_cslider(self, v):
