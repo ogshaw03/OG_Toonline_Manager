@@ -250,7 +250,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.46"
+__version__ = "0.1.47"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -7309,10 +7309,19 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         self._row(grid, 1, LN_COLOR, "線の色", self.btn_col,
                   "このレイヤーでの線の色。\n例: マスターは黒、プレイブラスト用レイヤーでは緑。")
 
-        self.cmb_hid = QtWidgets.QComboBox()
-        self.cmb_hid.addItems(["出さない", "破線", "実線"])
-        self.cmb_hid.currentIndexChanged.connect(lambda i: self._apply(LN_HID_MODE, int(i)))
-        self._row(grid, 2, LN_HID_MODE, "隠れ線", self.cmb_hid,
+        # v0.1.47: 破線/実線がひと目で選べるよう、プルダウンではなくラジオボタンを横並びに
+        w_hid = QtWidgets.QWidget()
+        hh = QtWidgets.QHBoxLayout(w_hid); hh.setContentsMargins(0, 0, 0, 0)
+        self.rb_hid = []
+        grp_hid = QtWidgets.QButtonGroup(w_hid)
+        for i, text in enumerate(("出さない", "破線", "実線")):
+            rb = QtWidgets.QRadioButton(text)
+            grp_hid.addButton(rb, i)
+            rb.clicked.connect(lambda checked=False, v=i: self._apply(LN_HID_MODE, v))
+            hh.addWidget(rb)
+            self.rb_hid.append(rb)
+        hh.addStretch(1)
+        self._row(grid, 2, LN_HID_MODE, "隠れ線", w_hid,
                   "紐づけた物の裏に回った部分の描き方。\n"
                   "出さない / 破線 / 実線（色や濃さは下で変えられます）。")
 
@@ -7528,7 +7537,8 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             self.chk_vis.setChecked(bool(_get(LN_SHOW_VIS, 1)))
             self.btn_col.setStyleSheet(_rgb_style(_get(LN_COLOR, [(0, 0, 0)])[0]))
             mode = int(_get(LN_HID_MODE, 1))
-            self.cmb_hid.setCurrentIndex(mode)
+            if 0 <= mode < len(self.rb_hid):
+                self.rb_hid[mode].setChecked(True)
             same = bool(_get(LN_HID_SAME, 1))
             self.chk_same.setChecked(same)
             self.btn_hcol.setEnabled(not same)
