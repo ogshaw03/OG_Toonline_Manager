@@ -593,6 +593,51 @@ SCRN のみ（DX11 HLSL。OGSFX は未対応＝属性はあっても効かない
 - ラインがレンダーレイヤーのコレクションに入っていると、名前を変えたとき Render Setup が「静的選択を新しい名前に
   書き換える」操作を Undo 履歴に足す（Maya の動作）。名前変更の Undo が 1 回多く要るのはそのため。
 
+### リファレンスの線・色トレス・設定の保存/読み込み・選択の連動（v0.1.54）
+
+- **別 ROOT（リファレンス等の `chrA:toonOutlines_grp`）の下のノードは `_is_foreign` で見分け、構造に触らない**。
+  `_ensure_line_anim`（曲率ジョブだけ張る）・`_ensure_group_ctrl`（`_ctrl_of` を返すだけ）・`_ensure_thickness_chain`
+  （何もしない）。触るとこのシーンの全体コントローラーへ太さをつなぎ替え、ROOT まで作ってしまう。
+  全体倍率は `_target_global_ctrl`（選択が別 ROOT ならそのキャラの全体コントローラー `_global_ctrl_for`、ラベルに名前）。
+  一覧は `_add_foreign_root_item` で ROOT ごとの見出し（ドラッグ/ドロップ不可）。名前変更・削除・移動は断る。
+  値の変更・キー・詳細設定はリファレンスの編集としてショットに保存される（保存→開き直しで確認済み）。
+- 個別カラーのノード名は `COL_PREFIX + _base(line)`（名前空間を `_` に）。既存の専用シェーダは名前ではなく
+  つながり（LN_COLOR → surfaceShader、または色トレスの blendColors の先）／割り当て中の SG で見つける。
+- **ラインの元メッシュは `_line_source_mesh`**。エッジ線・クリース線は deformer の入力がチューブ自身なので、
+  **`polyEdgeToCurve`**（`polyToCurve` コマンドが作るノードの型）の `inputPolymesh` から引く。
+  `inputComponents` は**辺ではなく頂点の並び**（`vtx[2]`, `vtx[3]`…）。以前はチューブ自身を元メッシュ扱いし、
+  ライン単体表示でチューブの線まで背景色に差し替えていた。
+- **色トレス**: スクリーン輪郭は頂点カラー `SCRN_CSET` の **R = 太さ倍率、GBA = 面のマテリアルの色**
+  （`_update_scrn_curv_weights` が `_scrn_trace_colors` のキャッシュから書く。頂点は最初に見つかった面の色）。
+  シェーダが `traceAmount`/`traceDark` で線の色に混ぜる（`og_trace_color` で少し鮮やかにして暗くする）。
+  ライン属性 `LN_TRACE`/`LN_TRACE_DARK` を uniform へ接続＝レイヤーごとに上書きできる。
+  エッジ線・クリース線は `_ensure_tube_trace` が DG を組む: `LN_TRACE_RAW`（隣の面で一番多いマテリアルの色）×
+  `LN_TRACE_DARK` → blendColors（color2 = LN_COLOR、blender = LN_TRACE）→ 専用 surfaceShader。
+  マテリアルの色は `_sg_base_color`（baseColor/color/…、テクスチャがつながっていれば colorAtPoint の平均）。
+  マテリアルを変えたら詳細設定の「面の色を読み直す」（`_trace_prepare(recompute=True)`）。背面法の線は対象外。
+  OpenGL 版（OGSFX）のシェーダには入れていない。
+- **設定の書き出し/読み込み**（`export_line_settings`/`import_line_settings`、⋮ メニュー）: マスターレイヤーで
+  値を読む／書く。線の対応は (元メッシュの名前, 種類, 線の名前) → 合わなければ (元メッシュの名前, 種類) の並び順。
+  名前空間は見ない。紐づけ先は線の元メッシュと同じ名前空間の同名の物を優先。キー・接続のある値は飛ばす。
+  レイヤーごとの上書きは、同名のレイヤーがあるときだけ作る。Undo 1 回で戻る。
+- **選択の連動**: UI の `SelectionChanged` ジョブ（`_on_maya_selection`、`_teardown` で消す）が、選んだメッシュ →
+  `_src_to_lines`（refresh_tree で作る）→ 一覧で選ぶ。このときは `_syncing_sel` で Maya の選択（メッシュ）を
+  コントローラーに置き換えない。右クリック「元のメッシュを選ぶ」（`select_source_meshes`）。
+- 検証: `gui_feat54_check.py`（39 件）・`gui_uigrab54_check.py`（画面の撮影・幅）。
+- **Maya の `updateRenderOverride`（新しいシーンの直後や Arnold のレンダラーメニュー更新で遅れて走る）が、
+  パネルのオーバーライドを空に戻す**ことがある（persp だけ空になり、そのパネルのプレイブラストに隠れ線が
+  出なかった）。オーバーライドが有効な間は `_PANEL_GUARD`（1 秒の QTimer、`_guard_panels`）が空のパネルにだけ
+  入れ直す（他のオーバーライドのパネルは取らない）。`_edge_disable` で止める。
+- **ツールのウィンドウを閉じるときは `_find_tool_windows` で先に集めてから `_close_and_delete`**（`show()` /
+  `_close_tool_windows` / `show_line_options`）。**`_close_and_delete` は deleteLater のあと、そのウィンドウ宛ての
+  DeferredDelete をその場で処理して破棄する**。deleteLater だけだと、新しいウィンドウを作っている最中（ツリー更新の
+  描画などでイベントが回ったとき）に古いウィンドウの破棄が走り、Maya ごと落ちた（fix52 の Esc→開き直しで毎回。
+  v0.1.54 の変更の組み合わせで起きるようになった。v0.1.53 では起きない）。
+  `_edge_enable` も、何も変えていなければ `cmds.refresh()` しない（閉じる処理などから何度も呼ばれるため）。
+- 検証で同じ名前の確認を 2 つ同時に流すときは、出力先（`-outDir`）と MAYA_APP_DIR を分ける（同じフォルダーに
+  2 つの Maya が書き込み、ログが混ざって結果が読めなくなった）。`run_suites.ps1` は RESULT が出ないまま Maya が
+  終わったら起動し直す（他の検証と並行して Maya が落ちることがある）。
+
 ### 見た目の検証方法
 
 利用者の Maya を commandPort で操作しない（重い操作で落ちたことがある）。専用 MAYA_APP_DIR の GUI Maya 2023 を

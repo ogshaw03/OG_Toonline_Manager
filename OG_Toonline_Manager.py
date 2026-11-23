@@ -31,9 +31,53 @@ import maya.api.OpenMaya as om2
 try:
     from PySide6 import QtWidgets, QtCore, QtGui
     from shiboken6 import wrapInstance
+    try:
+        from shiboken6 import isValid as _shib_is_valid
+    except ImportError:
+        _shib_is_valid = None
 except ImportError:
     from PySide2 import QtWidgets, QtCore, QtGui
     from shiboken2 import wrapInstance
+    try:
+        from shiboken2 import isValid as _shib_is_valid
+    except ImportError:
+        _shib_is_valid = None
+
+
+def _qt_valid(obj):
+    try:
+        return obj is not None and (_shib_is_valid is None or _shib_is_valid(obj))
+    except Exception:
+        return False
+
+
+def _find_tool_windows(names):
+    """このツールのウィンドウ（objectName が names のもの）を集める。
+    v0.1.54: 集めてから閉じる（閉じる処理の途中で描画が回り、一覧の後ろのウィンドウが破棄されたあとに
+    触ると Maya ごと落ちることがあった）。"""
+    out = []
+    for w in QtWidgets.QApplication.topLevelWidgets():
+        try:
+            if _qt_valid(w) and w.objectName() in names:
+                out.append(w)
+        except Exception:
+            pass
+    return out
+
+
+def _close_and_delete(widgets):
+    """閉じて、その場で破棄する。v0.1.54: deleteLater だけだと、あとで新しいウィンドウを作っている最中
+    （ツリー更新の描画などでイベントが回ったとき）に古いウィンドウの破棄が走り、Maya ごと落ちることがあった。
+    破棄はこのツールのウィンドウだけに限る（sendPostedEvents の対象をそのウィンドウにする）。"""
+    for w in widgets:
+        try:
+            if _qt_valid(w):
+                w.close()
+            if _qt_valid(w):
+                w.deleteLater()
+                QtCore.QCoreApplication.sendPostedEvents(w, QtCore.QEvent.DeferredDelete)
+        except Exception:
+            pass
 
 SHADER    = "toonOutline_SS"        # 共通（ブラック）サーフェスシェーダ
 SG        = "toonOutline_SG"        # 共通シェーディンググループ
@@ -134,6 +178,13 @@ LN_HID_ALPHA  = "toonHiddenAlpha"      # 隠れ線の濃さ 0-1
 LN_HID_DASH   = "toonHiddenDashLen"    # 破線 1 周期の長さ（画面 px）
 LN_HID_FILL   = "toonHiddenDashFill"   # 破線の塗り割合 0-1
 LN_OCCLUDERS  = "toonHiddenOccluders"  # 隠れ線を透かす物（message multi ← 物.message）。全レイヤー共通
+# v0.1.53: 色トレス（線の色を下の面のマテリアルの色から作る）。スクリーン輪郭とエッジ線・クリース線
+LN_TRACE      = "toonTraceAmount"      # 0=線の色のまま / 1=面の色から作った色 → shd.traceAmount
+LN_TRACE_DARK = "toonTraceDark"        # 面の色の明るさ 0-1（0.45 = 半分弱に暗くする）→ shd.traceDark
+LN_TRACE_RAW  = "toonTraceRaw"         # エッジ線・クリース線: 隣の面のマテリアルの色（Python が入れる）
+SCRN_TRACE    = "traceAmount"          # SCRN シェーダの uniform
+SCRN_TRACE_DARK = "traceDark"
+TRACE_DARK_DEF = 0.45
 ROOT_HIDDEN_ON = "toonHiddenOn"        # シーン全体で隠れ線を描くか（ROOT の属性、既定 ON）
 HIDDEN_DEPTH_TOL = 0.002               # 隠れ線の前後判定に使う相対深度の許容差
 # v0.1.49: ブラシ（SCRN シェーダの uniform 名と、ラインごと・レイヤーごとの属性名）
@@ -262,7 +313,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.53"
+__version__ = "0.1.54"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -350,6 +401,10 @@ def _clear_line_caches():
     _CURV_CACHE.clear()
     _TAPER_CACHE.clear()
     _CURV_SIG.clear()
+    try:
+        _TRACE_CACHE.clear()
+    except NameError:
+        pass
 
 
 def _ensure_shader(color):
@@ -786,7 +841,18 @@ def _tube_current_color(line):
 
 def _tube_own_shader(line, rgb):
     """チューブ専用の surfaceShader/SG（無ければ作って割り当てる）。個別カラーと同じ名前。"""
-    base = COL_PREFIX + _short(line)
+    # v0.1.53: 線色属性がつながっている surfaceShader があればそれを使う（リファレンスしたアセットの
+    # 'chrA:toonCol_..._SS' は名前では見つからず、ショット側に別のシェーダを作って差し替えていた）
+    if _attr_exists(line, LN_COLOR):
+        for ss0 in cmds.listConnections(line + "." + LN_COLOR, s=False, d=True,
+                                        type="surfaceShader") or []:
+            return ss0
+        bl = _tube_trace_blend(line)     # 色トレスを組んだチューブは blendColors の先
+        if bl:
+            for ss0 in cmds.listConnections(bl + ".output", s=False, d=True,
+                                            type="surfaceShader") or []:
+                return ss0
+    base = COL_PREFIX + _base(line)
     ss = base + "_SS"
     sg = base + "_SG"
     if not cmds.objExists(ss):
@@ -848,11 +914,18 @@ def _ensure_line_render_attrs(line):
                      dv=_SCRN_HIDDEN_FILL_DEF)
     if not _attr_exists(line, LN_OCCLUDERS):
         cmds.addAttr(line, ln=LN_OCCLUDERS, at="message", multi=True, indexMatters=False)
+    # v0.1.53: 色トレス（0 = 線の色のまま）
+    if not _attr_exists(line, LN_TRACE):
+        cmds.addAttr(line, ln=LN_TRACE, at="double", min=0.0, max=1.0, dv=0.0)
+    if not _attr_exists(line, LN_TRACE_DARK):
+        cmds.addAttr(line, ln=LN_TRACE_DARK, at="double", min=0.0, max=1.0, dv=TRACE_DARK_DEF)
     if is_tube:
         # 専用の surfaceShader に色を、表側の線の表示は透明度（0=見える / 1=消える）に接続
         ss = _tube_own_shader(line, cur)
-        _connect(line + "." + LN_COLOR, ss + ".outColor")
-        rev = _short(line) + "_OG_visRev"
+        # 色トレスを組んだチューブは blendColors 経由（LN_COLOR → blend.color2）なので、直接つなぎ直さない
+        if not _tube_trace_blend(line):
+            _connect(line + "." + LN_COLOR, ss + ".outColor")
+        rev = _base(line) + "_OG_visRev"
         if not cmds.objExists(rev):
             rev = cmds.createNode("reverse", name=rev)
         for ax in ("X", "Y", "Z"):
@@ -875,7 +948,8 @@ def _ensure_line_render_attrs(line):
         except Exception:
             pass
     if shd:
-        links = [(LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS)]
+        links = [(LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS),
+                 (LN_TRACE, SCRN_TRACE), (LN_TRACE_DARK, SCRN_TRACE_DARK)]
         links += [(ln_attr, sh_attr) for ln_attr, sh_attr, _dv, _lo, _hi in BRUSH_ATTRS]
         for src_attr, dst_attr in links:
             if not _attr_exists(shd, dst_attr):
@@ -915,6 +989,198 @@ def _scrn_set_color(line, rgb):
             return True
         except Exception:
             pass
+    return False
+
+
+# ---- v0.1.53: 色トレス（線の色を下の面のマテリアルの色から作る） ----
+_TRACE_CACHE = {}   # line key -> 頂点ごとの面の色 [(r,g,b), ...]（スクリーン輪郭）
+
+
+def _sg_base_color(sg):
+    """シェーディンググループの『面の色』（マテリアルの基本色。テクスチャがつながっていれば平均色）。"""
+    ss = (cmds.listConnections(sg + ".surfaceShader", s=True, d=False) or [None])[0]
+    if not ss:
+        return (0.5, 0.5, 0.5)
+    for at in ("baseColor", "color", "diffuseColor", "outColor"):
+        if not _attr_exists(ss, at):
+            continue
+        src = cmds.listConnections(ss + "." + at, s=True, d=False) or []
+        if src:
+            try:
+                vals = cmds.colorAtPoint(src[0], o="RGB", su=6, sv=6, mu=0.05, mv=0.05,
+                                         xu=0.95, xv=0.95) or []
+                n = len(vals) // 3
+                if n:
+                    return (sum(vals[0::3]) / n, sum(vals[1::3]) / n, sum(vals[2::3]) / n)
+            except Exception:
+                pass
+        try:
+            v = cmds.getAttr(ss + "." + at)[0]
+            return (float(v[0]), float(v[1]), float(v[2]))
+        except Exception:
+            pass
+    return (0.5, 0.5, 0.5)
+
+
+def _mesh_face_colors(shape):
+    """メッシュの面ごとの色（割り当てたマテリアルの色）と MFnMesh を返す。"""
+    sl = om2.MSelectionList()
+    sl.add(shape)
+    dag = sl.getDagPath(0)
+    mfn = om2.MFnMesh(dag)
+    shaders, idx = mfn.getConnectedShaders(dag.instanceNumber())
+    cols = [_sg_base_color(om2.MFnDependencyNode(shaders[k]).name()) for k in range(len(shaders))]
+    gray = (0.5, 0.5, 0.5)
+    return [cols[i] if 0 <= i < len(cols) else gray for i in idx], idx, mfn
+
+
+def _scrn_trace_colors(line):
+    """スクリーン輪郭の頂点ごとの面の色（元メッシュの面のマテリアル）。キャッシュする。
+    元メッシュとラインは同じトポロジー（複製）なので頂点番号がそのまま対応する。"""
+    key = _ukey(line)
+    n = _mesh_vertex_count(line)
+    c = _TRACE_CACHE.get(key)
+    if c is not None and len(c) == n:
+        return c
+    out = []
+    src = _line_source_mesh(line)
+    shs = cmds.listRelatives(src, shapes=True, type="mesh", ni=True, f=True) or [] if src else []
+    if shs:
+        try:
+            fcols, _idx, mfn = _mesh_face_colors(shs[0])
+            counts, verts = mfn.getVertices()
+            out = [None] * mfn.numVertices
+            k = 0
+            for f, cnt in enumerate(counts):
+                col = fcols[f]
+                for j in range(cnt):
+                    v = verts[k + j]
+                    if out[v] is None:
+                        out[v] = col
+                k += cnt
+            out = [c2 if c2 is not None else (0.5, 0.5, 0.5) for c2 in out]
+        except Exception:
+            out = []
+    if len(out) != n:
+        out = []
+    _TRACE_CACHE[key] = out
+    return out
+
+
+def _tube_trace_raw_color(line):
+    """エッジ線・クリース線の元のエッジに隣り合う面のうち、いちばん多いマテリアルの色。"""
+    src = _line_source_mesh(line)
+    shs = cmds.listRelatives(src, shapes=True, type="mesh", ni=True, f=True) or [] if src else []
+    p2c = cmds.ls(cmds.listHistory(line) or [], type="polyEdgeToCurve") or []
+    if not shs or not p2c:
+        return None
+    # inputComponents は 'vtx[2]', 'vtx[3]', ... の頂点の並び（版によっては 'e[...]'）
+    vtx, edges = [], []
+    try:
+        for comp in cmds.getAttr(p2c[0] + ".inputComponents") or []:
+            kind = comp.split("[")[0]
+            inner = comp.split("[")[-1].rstrip("]")
+            if ":" in inner:
+                a, b = inner.split(":")
+                ids = list(range(int(a), int(b) + 1))
+            elif inner.isdigit():
+                ids = [int(inner)]
+            else:
+                continue
+            (edges if kind == "e" else vtx).extend(ids)
+    except Exception:
+        return None
+    try:
+        fcols, idx, mfn = _mesh_face_colors(shs[0])
+        sl = om2.MSelectionList()
+        sl.add(shs[0])
+        dag = sl.getDagPath(0)
+        if vtx and not edges:
+            # 隣り合う頂点の組をつなぐ辺
+            itv = om2.MItMeshVertex(dag)
+            for a, b in zip(vtx[:-1], vtx[1:]):
+                itv.setIndex(a)
+                for e in itv.getConnectedEdges():
+                    ev = mfn.getEdgeVertices(e)
+                    if b in ev:
+                        edges.append(e)
+                        break
+        if not edges:
+            return None
+        ite = om2.MItMeshEdge(dag)
+        counts = {}
+        colors = {}
+        for e in edges:
+            ite.setIndex(e)
+            for f in ite.getConnectedFaces():
+                if 0 <= f < len(fcols):
+                    s = int(idx[f])
+                    counts[s] = counts.get(s, 0) + 1
+                    colors[s] = fcols[f]
+        if not counts:
+            return None
+        best = max(counts, key=lambda k: counts[k])
+        return colors[best]
+    except Exception:
+        return None
+
+
+def _tube_trace_blend(line):
+    """色トレスを組んだチューブの blendColors（LN_COLOR → color2）。無ければ None。"""
+    if not _attr_exists(line, LN_COLOR):
+        return None
+    for n in cmds.listConnections(line + "." + LN_COLOR, s=False, d=True, type="blendColors") or []:
+        return n
+    return None
+
+
+def _ensure_tube_trace(line, recompute=False):
+    """エッジ線・クリース線に色トレスの DG ネットワークを組む（レイヤーごとの上書きもそのまま効く）。
+    面の色(LN_TRACE_RAW) × 明るさ(LN_TRACE_DARK) と 線の色(LN_COLOR) を LN_TRACE で混ぜて surfaceShader へ。"""
+    if not (_attr_exists(line, EDGE_TAG) and _attr_exists(line, LN_COLOR)):
+        return False
+    if not _attr_exists(line, LN_TRACE_RAW):
+        _add_color_attr(line, LN_TRACE_RAW, (0.5, 0.5, 0.5))
+        recompute = True
+    if recompute:
+        rgb = _tube_trace_raw_color(line)
+        if rgb:
+            try:
+                cmds.setAttr(line + "." + LN_TRACE_RAW, rgb[0], rgb[1], rgb[2], type="float3")
+            except Exception:
+                pass
+    try:
+        cur = cmds.getAttr(line + "." + LN_COLOR)[0]
+    except Exception:
+        cur = (0.0, 0.0, 0.0)
+    ss = _tube_own_shader(line, cur)
+    base = _base(line)
+    mul = base + "_OG_traceMul"
+    if not cmds.objExists(mul):
+        mul = cmds.createNode("multiplyDivide", name=mul)
+    blend = _tube_trace_blend(line) or base + "_OG_traceBlend"
+    if not cmds.objExists(blend):
+        blend = cmds.createNode("blendColors", name=blend)
+    _connect(line + "." + LN_TRACE_RAW, mul + ".input1")
+    for ax in ("X", "Y", "Z"):
+        _connect(line + "." + LN_TRACE_DARK, mul + ".input2" + ax)
+    _connect(mul + ".output", blend + ".color1")
+    _connect(line + "." + LN_COLOR, blend + ".color2")
+    _connect(line + "." + LN_TRACE, blend + ".blender")
+    _connect(blend + ".output", ss + ".outColor")
+    return True
+
+
+def _trace_prepare(line, recompute=False):
+    """色トレスを使えるようにする（スクリーン輪郭は頂点カラーに面の色を書く／チューブは DG を組む）。"""
+    if _attr_exists(line, SCRN_TAG):
+        if recompute:
+            _TRACE_CACHE.pop(_ukey(line), None)
+        if recompute or not _TRACE_CACHE.get(_ukey(line)):
+            _update_scrn_curv_weights(line)    # 太さ倍率(R) と一緒に面の色(GBA) を書く
+        return True
+    if _attr_exists(line, EDGE_TAG):
+        return _ensure_tube_trace(line, recompute=recompute)
     return False
 
 
@@ -1015,6 +1281,38 @@ def _all_roots():
         return cmds.ls(ROOT, recursive=True, long=True, type="transform") or []
     except Exception:
         return [ROOT] if cmds.objExists(ROOT) else []
+
+
+def _root_of(node):
+    """ノードが属する ROOT のフルパス（このシーンの '|toonOutlines_grp' か、リファレンス等の
+    '|chrA:toonOutlines_grp'）。ROOT の下でなければ None。"""
+    try:
+        full = (cmds.ls(node, long=True) or [node])[0]
+    except Exception:
+        return None
+    parts = full.split("|")
+    if len(parts) > 1 and parts[1].split(":")[-1] == ROOT:
+        return "|" + parts[1]
+    return None
+
+
+def _is_foreign(node):
+    """v0.1.53: リファレンスしたキャラなど、このシーンの ROOT 以外（名前空間付きの ROOT）の下のノードか。
+    こういうラインはアセット側で作ってあるので、ツールは構造（コントローラーの親子・太さの計算のつなぎ）に
+    触らず、値の変更とキーだけを行う（触るとこのシーンの全体コントローラーへつなぎ替えてしまう）。"""
+    r = _root_of(node)
+    return bool(r) and r != "|" + ROOT
+
+
+def _global_ctrl_for(node):
+    """node が別 ROOT（リファレンス等）の下なら、その ROOT の全体コントローラー。それ以外は None。"""
+    r = _root_of(node) if node else None
+    if not r or r == "|" + ROOT:
+        return None
+    for c in cmds.listRelatives(r, children=True, type="transform", f=True) or []:
+        if _short(c).split(":")[-1] == GLOBAL_CTRL:
+            return c
+    return None
 
 
 def _hidden_scene_on():
@@ -1415,6 +1713,18 @@ float brushDouble <
     float UIMax = 1.0;
 > = 0.0;
 
+// v0.1.53: 色トレス。COLOR0.gba = 下の面のマテリアルの色（Python が書く）。
+float traceAmount <
+    string UIName = "Color Trace Amount";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.0;
+float traceDark <
+    string UIName = "Color Trace Brightness";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.45;
+
 struct APPDATA {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
@@ -1427,12 +1737,26 @@ struct V2G {
     float3 VSPos : TEXCOORD0;    // ビュー空間位置
     float3 VSNrm : TEXCOORD1;    // ビュー空間法線
     float  ColR  : TEXCOORD2;    // 曲率倍率(COLOR0.r)
+    float3 ColT  : TEXCOORD3;    // v0.1.53: 面の色（COLOR0.gba）
 };
 struct G2P {
     float4 HPos  : SV_Position;
     float2 UV    : TEXCOORD0;     // v0.1.14: U=長手(0-1), V=太さ方向(-1..+1)
     float  LenPx : TEXCOORD1;     // v0.1.38: この quad の長手方向のスクリーン pixel 長
+    float3 Trace : TEXCOORD2;     // v0.1.53: 面の色（色トレス）
 };
+
+// v0.1.53: 面の色から線の色を作る（少し鮮やかにして traceDark 倍に暗くする）
+float3 og_trace_color(float3 raw)
+{
+    float mx = max(raw.r, max(raw.g, raw.b));
+    float3 c = raw;
+    if (mx > 1e-4f) {
+        float3 gray = float3(mx, mx, mx);
+        c = saturate(gray + (raw - gray) * 1.35f);
+    }
+    return c * traceDark;
+}
 
 // 1D ハッシュ (iq/Hugo Elias 系)
 float hash12(float2 p)
@@ -1467,8 +1791,10 @@ V2G VShader(APPDATA i)
 #ifndef OG_NO_COLOR0
     float w = i.Color.r;
     o.ColR = (w < 0.001f) ? 1.0f : w;
+    o.ColT = i.Color.gba;
 #else
     o.ColR = 1.0f;
+    o.ColT = float3(0.0f, 0.0f, 0.0f);
 #endif
     return o;
 }
@@ -1492,7 +1818,7 @@ float facing_dot(float3 vspos, float3 vsnrm)
 // v0.1.15b: perp 計算のため補間済み VSPos と VSNrm も返す（隣接三角形と完全一致する miter joint 用）。
 void edge_crossing(V2G a, V2G b, float fa, float fb,
                    out float4 cpos, out float colR,
-                   out float3 vspos, out float3 vsnrm)
+                   out float3 vspos, out float3 vsnrm, out float3 colT)
 {
     float t = fa / (fa - fb);
     vspos = lerp(a.VSPos, b.VSPos, t);
@@ -1501,6 +1827,7 @@ void edge_crossing(V2G a, V2G b, float fa, float fb,
     cpos = mul(vp4, gProj);
     cpos.z -= depthBias * cpos.w;   // 距離不変: NDC-Z を一定量 camera 側へ
     colR = lerp(a.ColR, b.ColR, t);
+    colT = lerp(a.ColT, b.ColT, t);
 }
 
 // 頂点 VSPos を投影した NDC 座標。
@@ -1550,16 +1877,16 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     // 横断する 2 エッジ上で facing=0 となる点を 2 つ求める。VSPos/VSNrm も返す（perp 用）。
     float4 p1, p2;
     float cr1, cr2;
-    float3 vsp1, vsp2, vsn1, vsn2;
+    float3 vsp1, vsp2, vsn1, vsn2, ct1, ct2;
     if (c01 && c12) {
-        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1);
-        edge_crossing(tri[1], tri[2], f1, f2, p2, cr2, vsp2, vsn2);
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1, ct1);
+        edge_crossing(tri[1], tri[2], f1, f2, p2, cr2, vsp2, vsn2, ct2);
     } else if (c12 && c20) {
-        edge_crossing(tri[1], tri[2], f1, f2, p1, cr1, vsp1, vsn1);
-        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2);
+        edge_crossing(tri[1], tri[2], f1, f2, p1, cr1, vsp1, vsn1, ct1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2, ct2);
     } else {
-        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1);
-        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2);
+        edge_crossing(tri[0], tri[1], f0, f1, p1, cr1, vsp1, vsn1, ct1);
+        edge_crossing(tri[2], tri[0], f2, f0, p2, cr2, vsp2, vsn2, ct2);
     }
 
     // v0.1.15b: p.w の符号は保つ（abs で潰すと視点裏のクロスで quad が flip）。
@@ -1646,8 +1973,10 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
 
     // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(0 内側=silhouette..1 外側)
     G2P v; v.LenPx = lenPx;
+    v.Trace = ct1;
     v.HPos = float4(b1          * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
     v.HPos = float4((b1 + off1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
+    v.Trace = ct2;
     v.HPos = float4(b2          * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
     v.HPos = float4((b2 + off2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
 
@@ -1660,8 +1989,10 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
         float2 c2 = b2 + perp2 * g2 * px;
         float2 o1 = perp1 * (tw1 * 0.6f) * px;
         float2 o2 = perp2 * (tw2 * 0.6f) * px;
+        v.Trace = ct1;
         v.HPos = float4(c1        * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
         v.HPos = float4((c1 + o1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
+        v.Trace = ct2;
         v.HPos = float4(c2        * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
         v.HPos = float4((c2 + o2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
     }
@@ -1695,7 +2026,10 @@ float4 PShader(G2P i) : SV_Target
 {
     if (showVisible == 0) discard;
     brush_discard(i);
-    return float4(lineColor, 1.0f);
+    float3 col = lineColor;
+    if (traceAmount > 0.001f)
+        col = lerp(lineColor, og_trace_color(i.Trace), saturate(traceAmount));   // v0.1.53 色トレス
+    return float4(col, 1.0f);
 }
 
 DepthStencilState DSS_Visible { DepthEnable = TRUE; DepthFunc = LESS_EQUAL; DepthWriteMask = ALL; };
@@ -2840,6 +3174,8 @@ def _ensure_global_ctrl():
 
 def _ensure_group_ctrl(group):
     """グループコントローラー（黄緑・thicknessMult）を全体コントローラー配下に確保。"""
+    if _is_foreign(group):
+        return _ctrl_of(group)     # v0.1.53: リファレンス等のグループは作り替えない
     gctrl_parent = _ensure_global_ctrl()
     gc = _ctrl_of(group)
     if gc is None or not cmds.objExists(gc):
@@ -2882,6 +3218,12 @@ def _create_line_ctrl(line, thick):
 
 def _ensure_line_anim(line, default_thick=0.05):
     """コントローラー階層（全体>グループ>ライン）を確保し、太さ乗算チェーンと追従ジョブを張る。"""
+    if _is_foreign(line):
+        # v0.1.53: リファレンス等のラインは構造を変えない（曲率ジョブだけ張る）
+        ctrl = _ctrl_of(line)
+        if ctrl and not cmds.attributeQuery(FRES_TAG, node=line, exists=True):
+            _ensure_curv_jobs(line)
+        return ctrl
     defm = _line_deformer(line)
     ctrl = _ctrl_of(line)
     if ctrl is None:
@@ -2961,15 +3303,9 @@ def _source_mesh_transforms():
             cmds.attributeQuery(SCRN_TAG, node=t, exists=True) or
             cmds.attributeQuery(FRES_TAG, node=t, exists=True) or
             cmds.attributeQuery(EDGE_TAG, node=t, exists=True)):
-            try:
-                src_sh = _line_src_shape(t)
-            except Exception:
-                continue
-            if not src_sh or not cmds.objExists(src_sh):
-                continue
-            par = cmds.listRelatives(src_sh, parent=True, f=True) or []
-            if par:
-                srcs.add(par[0])
+            src = _line_source_mesh(t)     # v0.1.53: チューブは polyToCurve の入力メッシュ
+            if src:
+                srcs.add(src)
     return srcs
 
 
@@ -3126,20 +3462,40 @@ def _collect_lines_from_selection(nodes):
     return lines
 
 
+def _line_source_mesh(line):
+    """ラインの元メッシュ transform（フルパス）。無ければ None。
+    v0.1.53: エッジ線・クリース線（チューブ）は deformer の入力がチューブ自身の中間シェイプなので、
+    polyToCurve の入力メッシュから引く（以前はチューブ自身を返し、ライン単体表示でチューブの線まで
+    背景色に差し替えていた）。"""
+    try:
+        if _attr_exists(line, EDGE_TAG):
+            # polyToCurve コマンドが作るノードの型は polyEdgeToCurve
+            for n in cmds.ls(cmds.listHistory(line) or [], type="polyEdgeToCurve") or []:
+                for s in cmds.listConnections(n + ".inputPolymesh", s=True, d=False, sh=True) or []:
+                    if cmds.nodeType(s) == "mesh":
+                        par = cmds.listRelatives(s, parent=True, f=True) or []
+                        if par:
+                            return par[0]
+            return None
+        sh = _line_src_shape(line)
+        if not sh or not cmds.objExists(sh) or cmds.nodeType(sh) != "mesh":
+            return None
+        par = cmds.listRelatives(sh, parent=True, f=True) or []
+        if par and not cmds.attributeQuery(TAG, node=par[0], exists=True):
+            return par[0]
+    except Exception:
+        pass
+    return None
+
+
 def _source_meshes_of(lines):
     """ライン列から元メッシュ transform をユニークに返す（_source_mesh_transforms の選択版）。"""
     srcs = []
     seen = set()
     for ln in lines:
-        try:
-            sh = _line_src_shape(ln)
-        except Exception:
-            continue
-        if not sh or not cmds.objExists(sh):
-            continue
-        par = cmds.listRelatives(sh, parent=True, f=True) or []
-        if par and par[0] not in seen:
-            seen.add(par[0]); srcs.append(par[0])
+        src = _line_source_mesh(ln)
+        if src and src not in seen:
+            seen.add(src); srcs.append(src)
     return srcs
 
 
@@ -3463,6 +3819,8 @@ def _thick_target(line):
 def _ensure_thickness_chain(line):
     """太さ = lineCtrl.thickness * groupCtrl.thicknessMult * globalCtrl.thicknessMult を DG で構築。
     出力先は hull ラインなら textureDeformer.offset、エッジラインなら円プロファイル半径。"""
+    if _is_foreign(line):
+        return      # v0.1.53: リファレンス等のラインはアセット側でつないである（このシーンへつなぎ替えない）
     target = _thick_target(line)
     ctrl = _ctrl_of(line)
     if not target or not ctrl:
@@ -4367,11 +4725,16 @@ def _update_scrn_curv_weights(line):
         pass
     if n != mfn.numVertices:
         return
+    # v0.1.53: R = 太さ倍率、GBA = 面の色（色トレス用。シェーダの traceAmount が 0 なら使わない）
+    tc = _scrn_trace_colors(line)
+    if len(tc) != n:
+        tc = [(1.0, 1.0, 1.0)] * n
     cols = om2.MColorArray()
     verts = om2.MIntArray()
     for i in range(n):
         w = weights[i]
-        cols.append(om2.MColor((w, w, w, 1.0)))
+        t = tc[i]
+        cols.append(om2.MColor((w, t[0], t[1], t[2])))
         verts.append(i)
     try:
         mfn.setVertexColors(cols, verts)
@@ -4784,6 +5147,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._occ_cb_ids = []          # カメラ worldMatrix 変化コールバック id（om2）
         self._occ_scheduled = False    # 次イベントループでの再計算予約済みフラグ
         self._warned_connected = set() # 接続済みで設定不可と警告済みのプラグ（選択変更でクリア）
+        self._sel_job = None           # v0.1.53: ビューポートの選択 → 一覧の選択（SelectionChanged）
+        self._syncing_sel = False      # 一覧をビューポートの選択に合わせている最中（Maya の選択を変えない）
+        self._src_to_lines = {}        # 元メッシュ → ライン（refresh_tree で作り直す）
         self._build()
         # v0.1.30: 全スピン/スライダーでホイール値変更を抑止（UI_GUIDELINES §3）
         self._no_wheel = _NoWheelFilter(self)
@@ -4804,6 +5170,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                                             protected=False)
         except Exception:
             self._time_job = None
+        try:
+            self._sel_job = cmds.scriptJob(event=["SelectionChanged", self._on_maya_selection],
+                                           protected=False)
+        except Exception:
+            self._sel_job = None
 
     def closeEvent(self, event):
         self._teardown()
@@ -4820,12 +5191,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _teardown(self):
         """ウィンドウを閉じる/隠すときの後片付け（何度呼んでもよい）。"""
-        try:
-            if self._time_job and cmds.scriptJob(exists=self._time_job):
-                cmds.scriptJob(kill=self._time_job, force=True)
-        except Exception:
-            pass
-        self._time_job = None
+        for attr in ("_time_job", "_sel_job"):
+            jid = getattr(self, attr, None)
+            try:
+                if jid and cmds.scriptJob(exists=jid):
+                    cmds.scriptJob(kill=jid, force=True)
+            except Exception:
+                pass
+            setattr(self, attr, None)
         try:
             if self._occ_timer is not None:
                 self._occ_timer.stop()
@@ -4854,7 +5227,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                          on_slider, on_spin, on_reset, on_key=None, tip=""):
         """ラベル+スライダー+スピン+[キー]+[リセット]の1行を作り (layout, slider, spin) を返す。"""
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel(label))
+        lab = QtWidgets.QLabel(label)
+        row.addWidget(lab)
+        self._last_row_label = lab     # v0.1.54: 呼び出し側でラベルを使うとき用（itemAt は使わない）
         sld = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         sld.setRange(smin, smax); sld.setValue(sval)
         spn = QtWidgets.QDoubleSpinBox()
@@ -4908,6 +5283,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_menu.setToolTip("メニュー（バージョン選択・情報など）")
         self.btn_menu.setFixedWidth(28)
         menu = QtWidgets.QMenu(self)
+        # v0.1.53: 線の設定（太さ・曲率・色・見え方・ブラシ・紐づけ・レイヤーごとの上書き）の保存/読み込み
+        act_exp = menu.addAction("線の設定を書き出す…")
+        act_exp.setToolTip("一覧で選んだ線（選んでいなければ全部）の設定をファイルに書き出します。")
+        act_exp.triggered.connect(self.export_settings_dialog)
+        act_imp = menu.addAction("線の設定を読み込む…")
+        act_imp.setToolTip("書き出した設定を、元のメッシュの名前が同じ線に当てます"
+                           "（一覧で選んでいればその線だけ）。名前空間は無視します。")
+        act_imp.triggered.connect(self.import_settings_dialog)
+        menu.addSeparator()
         act_ver = menu.addAction("バージョン選択…")
         act_ver.setToolTip("GitHub Releases/開発ブランチ先端から任意バージョンに切替。Maya 再起動不要。")
         act_ver.triggered.connect(open_version_dialog)
@@ -4933,6 +5317,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_gsel.setToolTip("全体コントローラーを選択（タイムスライダにキーを表示）")
         b_gsel.clicked.connect(self._select_global_ctrl)
         arow.addWidget(b_gsel)
+        # v0.1.54: リファレンスしたキャラの線を選んでいるときは、そのキャラの全体倍率になる（ラベルで示す）
+        # ※ layout.itemAt(i) の戻り値を Python で持つと、ウィンドウを破棄するときに Maya ごと落ちることが
+        #   あるので、ラベルは作った時点の参照を使う
+        self.lbl_global = getattr(self, "_last_row_label", None)
         gl.addLayout(arow)
         outer.addWidget(self.w_global)
 
@@ -5240,6 +5628,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.lbl_dd = QtWidgets.QLabel("※ グループへ D&D で移動。ダブルクリックで名前変更")
         self.lbl_dd.setStyleSheet("color:#888;")
         sec_adjust.add_widget(self.lbl_dd)
+        # v0.1.53: ビューポートでメッシュを選ぶと、そのメッシュの線を一覧で選ぶ（右クリックで逆も）
+        self.chk_sel_sync = QtWidgets.QCheckBox("ビューポートで選んだメッシュの線を一覧で選ぶ")
+        self.chk_sel_sync.setChecked(True)
+        self.chk_sel_sync.setToolTip(
+            "ON: ビューポートでメッシュ（体・髪など）を選ぶと、そのメッシュから作った線を一覧で選びます。\n"
+            "逆に、一覧の線から元のメッシュを選ぶには、右クリック →『元のメッシュを選ぶ』。")
+        sec_adjust.add_widget(self.chk_sel_sync)
 
         # ライン用パネル（ライン選択時のみ表示）: 太さ / 曲率起伏 / 曲率上限
         self.w_line = QtWidgets.QWidget()
@@ -6047,7 +6442,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _ensure_line_shader(self, line):
         """ラインの個別カラー用 surfaceShader/SG を確保。"""
-        base = COL_PREFIX + _short(line)
+        # v0.1.53: いま割り当てている個別カラーのシェーダがあればそれを使う（リファレンスしたアセットの
+        # シェーダは名前空間付きで、名前では見つからない）
+        sh = self._shape_of(line)
+        for sg0 in (cmds.listConnections(sh, type="shadingEngine") or []) if sh else []:
+            for ss0 in cmds.listConnections(sg0 + ".surfaceShader") or []:
+                if _short(ss0).split(":")[-1].startswith(COL_PREFIX) and ss0.endswith("_SS"):
+                    return ss0, sg0
+        base = COL_PREFIX + _base(line)
         ss = base + "_SS"
         sg = base + "_SG"
         if not cmds.objExists(ss):
@@ -6089,6 +6491,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
         it.setFlags((it.flags() | QtCore.Qt.ItemIsUserCheckable
                      | QtCore.Qt.ItemIsDragEnabled) & ~QtCore.Qt.ItemIsDropEnabled)
+        if _is_foreign(line):
+            # v0.1.53: リファレンス等のラインは別のグループへ移せない（アセット側の構造）
+            it.setFlags(it.flags() & ~QtCore.Qt.ItemIsDragEnabled)
         vis = True
         try:
             vis = bool(cmds.getAttr(line + ".visibility"))
@@ -6102,11 +6507,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
             r, g, b = [int(max(0.0, min(1.0, x)) * 255) for x in col]
             it.setBackground(2, QtGui.QBrush(QtGui.QColor(r, g, b)))
         parent_item.addChild(it)
+        # v0.1.53: ビューポートで元メッシュを選んだときに一覧で選ぶための対応表
+        src = _line_source_mesh(line)
+        if src:
+            full = (cmds.ls(line, long=True) or [line])[0]
+            self._src_to_lines.setdefault(src, []).append(full)
         return it
 
-    def _add_group_item(self, group_node, lines, visible, parent_item=None):
+    def _add_group_item(self, group_node, lines, visible, parent_item=None, foreign=False):
         """v0.1.31: parent_item 指定でサブグループとしてネスト追加。
-        指定なし=トップレベル追加（既存動作）。"""
+        指定なし=トップレベル追加（既存動作）。
+        v0.1.53: foreign=True（リファレンス等の別 ROOT の下）はドロップ不可。"""
+        foreign = foreign or bool(group_node and _is_foreign(group_node))
         label = _short(group_node) if group_node else "(未分類)"
         # v0.1.26: __Creases__ はツリー表示では「クリース」に見せる。v0.1.31: __Edges__ も。
         if label == CREASES_GROUP_NAME:
@@ -6133,6 +6545,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         else:
             gi.setFlags((gi.flags() | QtCore.Qt.ItemIsDropEnabled)
                         & ~QtCore.Qt.ItemIsUserCheckable & ~QtCore.Qt.ItemIsDragEnabled)
+        if foreign:
+            gi.setFlags(gi.flags() & ~QtCore.Qt.ItemIsDropEnabled)
         f = gi.font(0); f.setBold(True); gi.setFont(0, f)
         gi.setBackground(0, QtGui.QBrush(QtGui.QColor(70, 78, 88)))
         if parent_item is None:
@@ -6150,9 +6564,51 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     sub_vis = bool(cmds.getAttr(sub + ".visibility"))
                 except Exception:
                     pass
-                self._add_group_item(sub, self._lines_in(sub), sub_vis, parent_item=gi)
+                self._add_group_item(sub, self._lines_in(sub), sub_vis, parent_item=gi, foreign=foreign)
         gi.setExpanded(True)
         return gi
+
+    def _add_foreign_root_item(self, root):
+        """v0.1.53: リファレンスしたキャラなど、別 ROOT（名前空間付き）の線を 1 つの見出しにまとめて表示する。
+        値の変更・キー・ライン詳細設定は使える。グループ移動・名前変更・削除はアセット側で行う。"""
+        holder = None
+        for c in cmds.listRelatives(root, children=True, type="transform", f=True) or []:
+            if _short(c).split(":")[-1] == LINE_HOLDER:
+                holder = c
+                break
+        if not holder:
+            return None
+        kids = cmds.listRelatives(holder, children=True, type="transform", f=True) or []
+        groups = [t for t in kids if cmds.attributeQuery(GROUP_TAG, node=t, exists=True)]
+        loose = [t for t in kids if cmds.attributeQuery(TAG, node=t, exists=True)]
+        if not groups and not loose:
+            return None
+        ns = _short(root).rpartition(":")[0] or _short(root)
+        try:
+            is_ref = cmds.referenceQuery(root, isNodeReferenced=True)
+        except Exception:
+            is_ref = False
+        ri = QtWidgets.QTreeWidgetItem([u"{0}（{1}）".format(ns, u"リファレンス" if is_ref else u"名前空間"), "", ""])
+        ri.setData(0, QtCore.Qt.UserRole, root)
+        ri.setFlags(ri.flags() & ~QtCore.Qt.ItemIsUserCheckable & ~QtCore.Qt.ItemIsDragEnabled
+                    & ~QtCore.Qt.ItemIsDropEnabled)
+        ri.setToolTip(0, u"{0}\nアセット側で作った線です。太さ・曲率・色・キー・ライン詳細設定は"
+                         u"ここから変えられます（このシーンに保存）。\n"
+                         u"グループの移動・名前の変更・削除はアセットのファイルで行ってください。".format(root))
+        f = ri.font(0); f.setBold(True); f.setItalic(True); ri.setFont(0, f)
+        ri.setBackground(0, QtGui.QBrush(QtGui.QColor(60, 66, 84)))
+        self.tree.addTopLevelItem(ri)
+        for g in groups:
+            gvis = True
+            try:
+                gvis = bool(cmds.getAttr(g + ".visibility"))
+            except Exception:
+                pass
+            self._add_group_item(g, self._lines_in(g), gvis, parent_item=ri, foreign=True)
+        if loose:
+            self._add_group_item(None, loose, True, parent_item=ri, foreign=True)
+        ri.setExpanded(True)
+        return ri
 
     def refresh_tree(self):
         # v0.1.46: 既存 SCRN ラインを現行シェーダ＋見え方属性へ揃え、隠れ線の紐づけを読み直す
@@ -6167,6 +6623,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             pass
         self._populating = True
         self.tree.clear()
+        self._src_to_lines = {}
         # v0.1.18: フレネル感度はシーン属性と一方向同期（起動/再取得で現在値を反映）
         try:
             self._sync_fres_sens_from_scene()
@@ -6182,6 +6639,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         loose = self._loose_lines()
         if loose:
             self._add_group_item(None, loose, True)
+        # v0.1.53: リファレンスしたキャラなど、別 ROOT の線も見出しごとに出す
+        for root in _all_roots():
+            if root != "|" + ROOT:
+                try:
+                    self._add_foreign_root_item(root)
+                except Exception:
+                    pass
         self.tree.setHeaderLabels(["名前", "太さ", "色"])
         self._stash_loose_handles()   # はみ出したハンドルを退避
         # 既存/再取得ラインにも現在の「選択不可」状態を反映
@@ -6278,7 +6742,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._update_panels()
         self._set_mult_widgets()
         # 選択ノードのコントローラーを Maya 選択（タイムスライダにキー表示）
-        ctrls = [_ctrl_of(n) for n in self._selected_nodes()]
+        # v0.1.53: ビューポートの選択に一覧を合わせている最中は、Maya の選択（選んだメッシュ）を変えない
+        ctrls = [] if self._syncing_sel else [_ctrl_of(n) for n in self._selected_nodes()]
         ctrls = [c for c in ctrls if c and cmds.objExists(c)]
         if ctrls:
             try:
@@ -6309,6 +6774,111 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._set_curv_widgets(infl, cap, cmin)
             self.ramp.set_points([list(p) for p in _profile_of_ctrl(ctrl)])
         self._update_key_colors()
+
+    # ---- v0.1.53: ビューポートの選択 ↔ 一覧の選択 ----
+    def _on_maya_selection(self):
+        """ビューポートでメッシュを選んだら、そのメッシュから作った線を一覧で選ぶ。"""
+        if self._populating or self._syncing_sel or not self.isVisible():
+            return
+        if not getattr(self, "chk_sel_sync", None) or not self.chk_sel_sync.isChecked():
+            return
+        try:
+            sel = cmds.ls(sl=True, long=True) or []
+        except Exception:
+            return
+        meshes = []
+        for s in sel:
+            if "." in s:
+                continue     # コンポーネント選択は対象外
+            if cmds.nodeType(s) == "mesh":
+                s = (cmds.listRelatives(s, parent=True, f=True) or [s])[0]
+            meshes.append(s)
+        lines = []
+        for m in meshes:
+            for ln in self._src_to_lines.get(m, []):
+                if ln not in lines:
+                    lines.append(ln)
+        if not lines:
+            return      # ツールの線・コントローラーを選んだとき（一覧から選んだ等）は何もしない
+        want = set(lines)
+        self._syncing_sel = True
+        try:
+            self.tree.blockSignals(True)
+            self.tree.clearSelection()
+            first = None
+            it = QtWidgets.QTreeWidgetItemIterator(self.tree)
+            while it.value():
+                item = it.value()
+                n = item.data(0, QtCore.Qt.UserRole)
+                if n and (cmds.ls(n, long=True) or [n])[0] in want:
+                    item.setSelected(True)
+                    if first is None:
+                        first = item
+                it += 1
+            self.tree.blockSignals(False)
+            if first is not None:
+                self.tree.scrollToItem(first)
+            self._on_tree_selection()      # パネル・数値の表示を合わせる（Maya の選択は変えない）
+        finally:
+            self.tree.blockSignals(False)
+            self._syncing_sel = False
+
+    # ---- v0.1.53: 線の設定の書き出し / 読み込み ----
+    def _settings_dir(self):
+        try:
+            sn = cmds.file(q=True, sceneName=True)
+            if sn:
+                return os.path.dirname(sn)
+            return cmds.workspace(q=True, rootDirectory=True) or ""
+        except Exception:
+            return ""
+
+    def export_settings_dialog(self):
+        lines = [(cmds.ls(n, long=True) or [n])[0] for n in self._selected_lines()] or _scene_lines()
+        if not lines:
+            cmds.warning(u"書き出す線がありません"); return
+        default = os.path.join(self._settings_dir(), "toonline_settings.json")
+        path, _flt = QtWidgets.QFileDialog.getSaveFileName(
+            self, u"線の設定を書き出す", default, "JSON (*.json)")
+        if not path:
+            return
+        try:
+            n = export_line_settings(path, lines, self)
+        except Exception as exc:
+            cmds.warning(u"書き出しに失敗しました: {0}".format(exc)); return
+        om2.MGlobal.displayInfo(u"線の設定を書き出しました（{0} 本）: {1}".format(n, path))
+
+    def import_settings_dialog(self):
+        path, _flt = QtWidgets.QFileDialog.getOpenFileName(
+            self, u"線の設定を読み込む", self._settings_dir(), "JSON (*.json)")
+        if not path:
+            return
+        targets = [(cmds.ls(n, long=True) or [n])[0] for n in self._selected_lines()] or _scene_lines()
+        try:
+            n, missing = import_line_settings(path, targets, self)
+        except Exception as exc:
+            cmds.warning(u"読み込みに失敗しました: {0}".format(exc)); return
+        self.refresh_tree()
+        msg = u"{0} 本の線に設定を当てました。".format(n)
+        if missing:
+            msg += u"\n\n見つからなかった線（元のメッシュの名前と種類が合う線がない）:\n" + \
+                   u"\n".join(missing[:20]) + (u"\n…" if len(missing) > 20 else u"")
+        QtWidgets.QMessageBox.information(self, u"線の設定を読み込む", msg)
+
+    def select_source_meshes(self, line=None):
+        """一覧で選んでいる線（または右クリックした線）の元のメッシュをビューポートで選ぶ。"""
+        lines = self._selected_lines()
+        if line and line not in lines:
+            lines = [line]
+        srcs = _source_meshes_of(lines)
+        if not srcs:
+            cmds.warning(u"元のメッシュが見つかりません")
+            return
+        self._syncing_sel = True
+        try:
+            cmds.select(srcs, r=True)
+        finally:
+            self._syncing_sel = False
 
     def _set_thickness_widgets(self, val):
         self.slider.blockSignals(True); self.spin.blockSignals(True)
@@ -6408,7 +6978,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if chunk:
             cmds.undoInfo(openChunk=True)
         try:
-            gc = _ensure_global_ctrl()
+            gc = self._target_global_ctrl(create=True)
             self._set_ctrl_attr(gc, GMULT, val, "全体倍率")
         finally:
             if chunk:
@@ -6419,25 +6989,51 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _update_mult_labels(self):
         """ツリーのグループ倍率（太さ列）を再描画（再構築せず）。"""
         self._populating = True
-        root = self.tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            gi = root.child(i)
-            node = gi.data(0, QtCore.Qt.UserRole)
-            if node and cmds.objExists(node) and cmds.attributeQuery(GROUP_TAG, node=node, exists=True):
-                grpctrl = _ctrl_of(node)
-                gm = 1.0
-                if grpctrl:
-                    try:
-                        gm = cmds.getAttr(grpctrl + "." + GMULT)
-                    except Exception:
-                        pass
-                gi.setText(1, "x{:.2f}".format(gm))
+        # v0.1.53: サブグループ・リファレンスの見出しの下のグループも更新する（以前は一番上の階層だけ）
+        stack = [self.tree.invisibleRootItem()]
+        while stack:
+            parent = stack.pop()
+            for i in range(parent.childCount()):
+                gi = parent.child(i)
+                stack.append(gi)
+                node = gi.data(0, QtCore.Qt.UserRole)
+                if node and cmds.objExists(node) and cmds.attributeQuery(GROUP_TAG, node=node, exists=True):
+                    grpctrl = _ctrl_of(node)
+                    gm = 1.0
+                    if grpctrl:
+                        try:
+                            gm = cmds.getAttr(grpctrl + "." + GMULT)
+                        except Exception:
+                            pass
+                    gi.setText(1, "x{:.2f}".format(gm))
         self._populating = False
+
+    def _target_global_ctrl(self, create=False):
+        """全体倍率の対象。リファレンス等の線（別 ROOT）を選んでいればそのキャラの全体コントローラー、
+        それ以外はこのシーンの全体コントローラー（create=True なら無ければ作る）。"""
+        for n in self._selected_nodes():
+            if _is_foreign(n):
+                gc = _global_ctrl_for(n)
+                if gc:
+                    return gc
+        return _ensure_global_ctrl() if create else _find_global_ctrl()
+
+    def _update_global_label(self):
+        lb = getattr(self, "lbl_global", None)
+        if lb is None:
+            return
+        ns = ""
+        for n in self._selected_nodes():
+            if _is_foreign(n) and _global_ctrl_for(n):
+                ns = _short(_root_of(n)).rpartition(":")[0]
+                break
+        lb.setText(u"全体倍率（{0}）".format(ns) if ns else u"全体倍率")
 
     def _set_mult_widgets(self):
         """選択に応じてグループ倍率・全体倍率スライダーを現在値へ同期。"""
         g = 1.0
-        gc = _find_global_ctrl()
+        self._update_global_label()
+        gc = self._target_global_ctrl()
         if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
             try:
                 g = cmds.getAttr(gc + "." + GMULT)
@@ -6667,7 +7263,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
     def _select_global_ctrl(self):
         """全体コントローラーを Maya 選択（タイムスライダにキーを表示）。"""
-        gc = _ensure_global_ctrl()
+        gc = self._target_global_ctrl(create=True)
         try:
             cmds.select(gc, r=True)
         except Exception:
@@ -6675,7 +7271,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._update_key_colors()
 
     def _key_gmult(self):
-        gc = _ensure_global_ctrl()
+        gc = self._target_global_ctrl(create=True)
         cmds.undoInfo(openChunk=True)
         try:
             try:
@@ -6713,7 +7309,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             st = _attr_key_state(grpctrl + "." + GMULT)
         self._style_spin(self.grpspin, st)
         # 全体倍率
-        gc = _find_global_ctrl()
+        gc = self._target_global_ctrl()
         st = "none"
         if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
             st = _attr_key_state(gc + "." + GMULT)
@@ -6833,7 +7429,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     continue
                 if sh:
                     cmds.sets(sh, e=True, forceElement=sg)
-                base = COL_PREFIX + _short(line)
+                base = COL_PREFIX + _base(line)
                 for n in (base + "_SG", base + "_SS"):
                     if cmds.objExists(n):
                         try:
@@ -7554,6 +8150,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         """ライン／グループのノードをリネームする。"""
         if not node or not cmds.objExists(node):
             return
+        if _is_foreign(node):
+            cmds.warning(u"リファレンスしたキャラの線の名前は、アセットのファイルで変えてください")
+            return
         old = _short(node)
         new, ok = QtWidgets.QInputDialog.getText(self, "リネーム", "新しい名前:", text=old)
         new = (new or "").strip()
@@ -7631,6 +8230,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         is_group = cmds.attributeQuery(GROUP_TAG, node=node, exists=True)
         is_line  = cmds.attributeQuery(TAG, node=node, exists=True)
         is_crease_group = is_group and _short(node) == CREASES_GROUP_NAME
+        foreign = _is_foreign(node)     # v0.1.53: リファレンス等は名前変更・削除を出さない
         if is_group:
             a1 = menu.addAction("全ライン 表示")
             a1.triggered.connect(lambda: self._set_group_lines_vis(node, True))
@@ -7639,11 +8239,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             menu.addSeparator()
             a3 = menu.addAction("色を揃える…")
             a3.triggered.connect(lambda: self._unify_group_color(node))
-            menu.addSeparator()
-            a5 = menu.addAction("リネーム…")
-            a5.triggered.connect(lambda: self.rename_node(node))
-            a6 = menu.addAction("削除")
-            a6.triggered.connect(lambda: self.delete_selected())
+            if not foreign:
+                menu.addSeparator()
+                a5 = menu.addAction("リネーム…")
+                a5.triggered.connect(lambda: self.rename_node(node))
+                a6 = menu.addAction("削除")
+                a6.triggered.connect(lambda: self.delete_selected())
         elif is_line:
             # v0.1.46: ライン詳細設定（隠れ線の紐づけ・レイヤーごとの色/表現）。v0.1.50: エッジ線も
             if _is_detail_line(node):
@@ -7667,10 +8268,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     "複数選択時は、このラインと同じ状態に全部切り替わる。")
                 aix.triggered.connect(lambda chk: self._toggle_scrn_intersect(node, chk))
             menu.addSeparator()
-            a3 = menu.addAction("リネーム…")
-            a3.triggered.connect(lambda: self.rename_node(node))
-            a4 = menu.addAction("削除")
-            a4.triggered.connect(lambda: self.delete_selected())
+            a_src = menu.addAction("元のメッシュを選ぶ")   # v0.1.53: ラインから元のメッシュへ
+            a_src.triggered.connect(lambda: self.select_source_meshes(node))
+            if not foreign:
+                menu.addSeparator()
+                a3 = menu.addAction("リネーム…")
+                a3.triggered.connect(lambda: self.rename_node(node))
+                a4 = menu.addAction("削除")
+                a4.triggered.connect(lambda: self.delete_selected())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
 
     def open_line_options(self, line):
@@ -7760,6 +8365,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _move_lines_to(self, lines, group):
         if not group or not cmds.objExists(group):
             return
+        # v0.1.53: リファレンス等の線・グループは移さない（アセット側の構造）
+        if _is_foreign(group) or any(_is_foreign(ln) for ln in lines):
+            cmds.warning(u"リファレンスしたキャラの線は別のグループへ移せません（アセットのファイルで行ってください）")
+            lines = [ln for ln in lines if not _is_foreign(ln)]
+            if _is_foreign(group) or not lines:
+                self.refresh_tree()
+                return
         cmds.undoInfo(openChunk=True)
         try:
             for ln in lines:
@@ -7906,6 +8518,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         nodes = self._selected_nodes()
         if not nodes:
             cmds.warning("削除する項目をツリーで選択してください"); return
+        # v0.1.53: リファレンス等の線は消せない（アセット側で消す）。見出し（ROOT）も対象外。
+        skipped = [n for n in nodes if _is_foreign(n) or _root_of(n) == n or
+                   (cmds.ls(n, long=True) or [""])[0] in _all_roots()]
+        nodes = [n for n in nodes if n not in skipped]
+        if skipped:
+            cmds.warning(u"リファレンスしたキャラの線は削除できません（アセットのファイルで行ってください）")
+        if not nodes:
+            return
         # 削除対象ライン（選択ライン＋選択グループ配下ライン）のコントローラー・乗算ノードも巻き込む
         def _gather(line):
             c = _ctrl_of(line)
@@ -7936,8 +8556,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             if g:
                 victims.add(g)
             # v0.1.50: エッジ線の専用シェーダと表示切替ノードも片付ける
-            for n2 in (COL_PREFIX + _short(line) + "_SS", COL_PREFIX + _short(line) + "_SG",
-                       _short(line) + "_OG_visRev"):
+            for n2 in (COL_PREFIX + _base(line) + "_SS", COL_PREFIX + _base(line) + "_SG",
+                       _base(line) + "_OG_visRev",
+                       _base(line) + "_OG_traceMul", _base(line) + "_OG_traceBlend"):   # v0.1.53
                 if cmds.objExists(n2):
                     victims.add(n2)
 
@@ -7987,6 +8608,288 @@ _LINEOPT_CSS = _DIALOG_BG_CSS.replace("OG_Toonline_ManagerWin", _LINEOPT_OBJ) + 
     "QLabel#OG_Toonline_LineOptNote { color: #9a9a9a; }"
 )
 _line_options_win = [None]
+
+
+# ---- v0.1.53: 線の設定の書き出し / 読み込み ----
+_EXPORT_CTRL_ATTRS = (CTRL_THICK, CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER)
+
+
+def _export_look_attrs():
+    return ([LN_SHOW_VIS, LN_HID_MODE, LN_HID_SAME, LN_HID_COLOR, LN_HID_ALPHA, LN_HID_DASH,
+             LN_HID_FILL, LN_TRACE, LN_TRACE_DARK] + [b[0] for b in BRUSH_ATTRS])
+
+
+def _scene_lines():
+    """シーン内の全ライン（TAG 付き transform のフルパス。リファレンスも含む）。"""
+    return [t for t in cmds.ls(type="transform", long=True) or []
+            if cmds.attributeQuery(TAG, node=t, exists=True)]
+
+
+def _line_kind(line):
+    for tag, kind in ((SCRN_TAG, "screen"), (FRES_TAG, "fresnel"), (CREASE_TAG, "crease"),
+                      (MATBOUND_TAG, "matbound"), (EDGE_TAG, "edge")):
+        if _attr_exists(line, tag):
+            return kind
+    return "hull"
+
+
+def _bare(name):
+    """パスと名前空間を外した名前（'|chr:grp|chr:head' → 'head'）。"""
+    return _short(name).split(":")[-1] if name else ""
+
+
+def _jsonable(v):
+    if isinstance(v, (list, tuple)):
+        if v and isinstance(v[0], (list, tuple)):
+            v = v[0]
+        return [float(x) for x in v]
+    return v
+
+
+def _plug_settable(plug):
+    try:
+        return bool(cmds.getAttr(plug, settable=True))
+    except Exception:
+        return False
+
+
+def _set_plug(plug, v):
+    """JSON から戻した値を入れる（色は float3、文字列は string）。設定できなければ False。"""
+    if not _plug_settable(plug):
+        return False
+    try:
+        if isinstance(v, (list, tuple)):
+            cmds.setAttr(plug, float(v[0]), float(v[1]), float(v[2]), type="float3")
+        elif isinstance(v, str) or (not isinstance(v, (bool, int, float)) and v is not None):
+            cmds.setAttr(plug, v, type="string")
+        else:
+            cmds.setAttr(plug, v)
+        return True
+    except Exception:
+        return False
+
+
+def _line_record(ui, line):
+    """1 本の線の設定（マスターの値＋レイヤーごとの上書き）を dict にする。"""
+    src = _line_source_mesh(line)
+    rec = {"name": _bare(line), "kind": _line_kind(line), "src": _bare(src)}
+    ctrl = _ctrl_of(line)
+    c = {}
+    if ctrl:
+        for at in _EXPORT_CTRL_ATTRS:
+            if _attr_exists(ctrl, at):
+                try:
+                    c[at] = float(cmds.getAttr(ctrl + "." + at))
+                except Exception:
+                    pass
+        if _attr_exists(ctrl, CTRL_PROFILE):
+            try:
+                c[CTRL_PROFILE] = cmds.getAttr(ctrl + "." + CTRL_PROFILE) or "0:1,1:1"
+            except Exception:
+                pass
+    rec["ctrl"] = c
+    g = _line_group(line)
+    gc = _ctrl_of(g) if g else None
+    rec["group"] = _bare(g)
+    gl = _global_ctrl_for(line) or _find_global_ctrl()
+    for key, node in (("group_mult", gc), ("global_mult", gl)):
+        if node and _attr_exists(node, GMULT):
+            try:
+                rec[key] = float(cmds.getAttr(node + "." + GMULT))
+            except Exception:
+                pass
+    try:
+        col = ui._line_color(line) if ui is not None else None
+        if col:
+            rec["color"] = [float(x) for x in col]
+    except Exception:
+        pass
+    try:
+        rec["visible"] = bool(cmds.getAttr(line + ".visibility"))
+    except Exception:
+        pass
+    look = {}
+    for at in _export_look_attrs():
+        if _attr_exists(line, at):
+            try:
+                look[at] = _jsonable(cmds.getAttr(line + "." + at))
+            except Exception:
+                pass
+    rec["look"] = look
+    rec["occluders"] = [_bare(o) for o in _line_occluders(line)]
+    if _attr_exists(line, SCRN_TAG):
+        rec["intersect"] = bool(_scrn_intersect_on(line))
+    layers = {}
+    for lname in _rs_layer_names():
+        L = _rs_get_layer(lname)
+        cl = _rs_line_collection(L, line) if L is not None else None
+        if cl is None:
+            continue
+        vals = {}
+        for ov in cl.getOverrides():
+            try:
+                vals[ov.attributeName()] = _jsonable(ov.getAttrValue())
+            except Exception:
+                pass
+        if vals:
+            layers[lname] = vals
+    rec["layers"] = layers
+    return rec
+
+
+def export_line_settings(path, lines, ui=None):
+    """lines の設定を JSON に書き出す。書き出した本数を返す。値はマスターレイヤーの値で書く。"""
+    import json
+    prev = _rs_visible_layer_name()
+    if prev:
+        _rs_switch("")
+    try:
+        recs = [_line_record(ui, ln) for ln in lines if cmds.objExists(ln)]
+    finally:
+        if prev:
+            _rs_switch(prev)
+    import io
+    data = {"tool": _PACKAGE, "version": __version__, "lines": recs}
+    text = json.dumps(data, ensure_ascii=False, indent=1)
+    if not isinstance(text, type(u"")):
+        text = text.decode("utf-8")      # Python 2
+    with io.open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return len(recs)
+
+
+def _natural_key(s):
+    import re
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
+
+
+def _match_line_records(recs, targets):
+    """書き出した線と今のシーンの線を対応付ける。(元メッシュの名前, 種類, 線の名前) が同じものを先に、
+    残りは (元メッシュの名前, 種類) ごとの並び順で。名前空間は見ない。"""
+    info = dict((t, (_bare(_line_source_mesh(t)), _line_kind(t), _bare(t))) for t in targets)
+    by_name = {}
+    t_groups = {}
+    for t in targets:
+        s, k, n = info[t]
+        by_name.setdefault((s, k, n), t)
+        t_groups.setdefault((s, k), []).append(t)
+    for v in t_groups.values():
+        v.sort(key=lambda t: _natural_key(info[t][2]))
+    pairs = []
+    used = set()
+    rest = []
+    for r in recs:
+        t = by_name.get((r.get("src", ""), r.get("kind", ""), r.get("name", "")))
+        if t and t not in used:
+            pairs.append((r, t))
+            used.add(t)
+        else:
+            rest.append(r)
+    r_groups = {}
+    for r in recs:
+        r_groups.setdefault((r.get("src", ""), r.get("kind", "")), []).append(r)
+    for v in r_groups.values():
+        v.sort(key=lambda r: _natural_key(r.get("name", "")))
+    missing = []
+    for r in rest:
+        key = (r.get("src", ""), r.get("kind", ""))
+        idx = r_groups.get(key, []).index(r)
+        cands = t_groups.get(key, [])
+        t = cands[idx] if idx < len(cands) else None
+        if t is not None and t not in used:
+            pairs.append((r, t))
+            used.add(t)
+        else:
+            missing.append(r)
+    return pairs, missing
+
+
+def _find_occluder(base, line):
+    """書き出した紐づけ先の名前から、今のシーンの物を探す（線の元メッシュと同じ名前空間を優先）。"""
+    src = _line_source_mesh(line)
+    ns = _short(src).rpartition(":")[0] if src else ""
+    cands = []
+    if ns:
+        cands = cmds.ls(ns + ":" + base, long=True, type="transform") or []
+    if not cands:
+        cands = cmds.ls(base, long=True, type="transform") or []
+    if not cands:
+        cands = cmds.ls("*:" + base, long=True, type="transform", recursive=True) or []
+    return cands[0] if len(cands) == 1 else (cands[0] if cands and ns else None)
+
+
+def import_line_settings(path, targets, ui=None):
+    """書き出した設定を targets（今のシーンの線）に当てる。(当てた本数, 見つからなかった線の名前) を返す。
+    キーを打った・つないだ値は変えない（その値は飛ばす）。Undo 1 回で戻る。"""
+    import io
+    import json
+    with io.open(path, encoding="utf-8") as f:
+        data = json.loads(f.read())
+    recs = data.get("lines", [])
+    pairs, missing = _match_line_records(recs, [t for t in targets if cmds.objExists(t)])
+    prev = _rs_visible_layer_name()
+    if prev:
+        _rs_switch("")
+    layers_now = set(_rs_layer_names())
+    cmds.undoInfo(openChunk=True)
+    try:
+        done = set()
+        for rec, line in pairs:
+            ctrl = _ctrl_of(line)
+            if ctrl:
+                for at, v in rec.get("ctrl", {}).items():
+                    if _attr_exists(ctrl, at):
+                        _set_plug(ctrl + "." + at, v)
+            g = _line_group(line)
+            gc = _ctrl_of(g) if g else None
+            if gc and "group_mult" in rec and gc not in done and _attr_exists(gc, GMULT):
+                _set_plug(gc + "." + GMULT, rec["group_mult"])
+                done.add(gc)
+            gl = _global_ctrl_for(line) or _find_global_ctrl()
+            if gl and "global_mult" in rec and gl not in done and _attr_exists(gl, GMULT):
+                _set_plug(gl + "." + GMULT, rec["global_mult"])
+                done.add(gl)
+            if "visible" in rec:
+                _set_plug(line + ".visibility", bool(rec["visible"]))
+            look = rec.get("look", {})
+            if look and _is_detail_line(line):
+                _ensure_line_render_attrs(line)
+            if "color" in rec and ui is not None:
+                try:
+                    cur = ui._line_color(line) or [0.0, 0.0, 0.0]
+                    if max(abs(float(a) - float(b)) for a, b in zip(cur, rec["color"])) > 1e-4:
+                        ui._apply_line_color(line, rec["color"])
+                except Exception:
+                    pass
+            for at, v in look.items():
+                if _attr_exists(line, at):
+                    _set_plug(line + "." + at, v)
+            if float(look.get(LN_TRACE, 0.0) or 0.0) > 0.0:
+                _trace_prepare(line)
+            occ = [o for o in (_find_occluder(b, line) for b in rec.get("occluders", [])) if o]
+            if occ:
+                _add_line_occluders(line, occ)
+            if "intersect" in rec and _attr_exists(line, SCRN_TAG):
+                try:
+                    _scrn_set_intersect_on(line, bool(rec["intersect"]))
+                except Exception:
+                    pass
+            for lname, vals in rec.get("layers", {}).items():
+                if lname not in layers_now:
+                    continue
+                for at, v in vals.items():
+                    if _attr_exists(line, at):
+                        try:
+                            _rs_set_override(lname, line, at, tuple(v) if isinstance(v, list) else v)
+                        except Exception:
+                            pass
+    finally:
+        cmds.undoInfo(closeChunk=True)
+        if prev:
+            _rs_switch(prev)
+    _hidden_refresh_cache()
+    _og_override_sync()
+    return len(pairs), [r.get("name", "") for r in missing]
 
 
 def _line_set_attr(line, attr, value):
@@ -8209,7 +9112,20 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         w_f, self.sl_fill, self.sp_fill = self._pct(5, 95, LN_HID_FILL)
         self._row(grid, 6, LN_HID_FILL, "破線の線の割合", w_f,
                   "1 区切りのうち線を描く割合。\n5 = ほぼ点 / 50 = 線とすき間が半々 / 95 = ほぼつながった線")
-        grid.setRowStretch(7, 1)
+        # v0.1.53: 色トレス（線の色を下の面のマテリアルの色から作る）
+        w_t, self.sl_trace, self.sp_trace = self._pct(0, 100, LN_TRACE)
+        self._row(grid, 7, LN_TRACE, "色トレス", w_t,
+                  "線の色を、下の面のマテリアルの色から作る割合。\n"
+                  "0 = 線の色のまま / 50 = 半々 / 100 = 面の色から作った色\n"
+                  "（肌の上は赤茶、髪の上は濃い髪色、のようになります）")
+        w_d, self.sl_tdark, self.sp_tdark = self._pct(0, 100, LN_TRACE_DARK)
+        self._row(grid, 8, LN_TRACE_DARK, "トレスの明るさ", w_d,
+                  "面の色をどれくらいの明るさで使うか。\n20 = かなり暗い / 45 = 標準 / 100 = 面の色そのまま")
+        b_tr = QtWidgets.QPushButton("面の色を読み直す")
+        b_tr.setToolTip("マテリアルの色や割り当てを変えたあとに押すと、色トレスの色を読み直します。")
+        b_tr.clicked.connect(self._reload_trace)
+        grid.addWidget(b_tr, 9, 1)
+        grid.setRowStretch(10, 1)
         self.tabs.addTab(page_look, "見え方")
 
         # ---- ブラシ（v0.1.49）----
@@ -8328,12 +9244,15 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         layer = self._layer()
         if layer != _rs_visible_layer_name():
             _rs_switch(layer)   # 表示中のレイヤーと設定先を必ず揃える
+        uses_trace = any(a in (LN_TRACE, LN_TRACE_DARK) for a, _v in pairs)
         cmds.undoInfo(openChunk=True)
         try:
             for ln in self._lines:
                 if only_scrn and not _attr_exists(ln, SCRN_TAG):
                     continue
                 _ensure_line_render_attrs(ln)
+                if uses_trace:
+                    _trace_prepare(ln)     # v0.1.53: 面の色を書く／チューブは DG を組む（初回だけ）
                 for attr, value in pairs:
                     if not _attr_exists(ln, attr):
                         continue
@@ -8387,6 +9306,21 @@ class _LineOptionsDialog(QtWidgets.QDialog):
                 self._owner.refresh_tree()
         except Exception:
             pass
+
+    def _reload_trace(self):
+        """v0.1.53: マテリアルの色・割り当てを変えたあとに、色トレスの面の色を読み直す。"""
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in self._lines:
+                _ensure_line_render_attrs(ln)
+                _trace_prepare(ln, recompute=True)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        try:
+            cmds.refresh()
+        except Exception:
+            pass
+        self.lbl_status.setText(u"面の色を読み直しました。")
 
     # ---------- 紐づけ ----------
     def _add_occ(self):
@@ -8486,6 +9420,10 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             self.sp_dash.setValue(float(_get(LN_HID_DASH, _SCRN_HIDDEN_DASH_DEF)))
             fl = int(round(float(_get(LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)) * 100))
             self.sl_fill.setValue(fl); self.sp_fill.setValue(fl)
+            tr = int(round(float(_get(LN_TRACE, 0.0)) * 100))
+            self.sl_trace.setValue(tr); self.sp_trace.setValue(tr)
+            td = int(round(float(_get(LN_TRACE_DARK, TRACE_DARK_DEF)) * 100))
+            self.sl_tdark.setValue(td); self.sp_tdark.setValue(td)
             # v0.1.49: ブラシ
             for attr, (sl, sp) in self._br_widgets.items():
                 bv = int(round(float(_get(attr, 0.0)) * 100))
@@ -8552,11 +9490,7 @@ def show_line_options(lines, owner=None):
     """ライン詳細設定ウィンドウを開く（開いていれば閉じて開き直す）。"""
     old = _line_options_win[0]
     if old is not None:
-        try:
-            old.close()
-            old.deleteLater()
-        except Exception:
-            pass
+        _close_and_delete([old])      # v0.1.54: その場で破棄（新しいウィンドウを作る前に）
     lines = [ln for ln in lines or [] if _is_detail_line(ln)]
     if not lines:
         cmds.warning("ライン詳細設定はスクリーン輪郭・エッジ線・クリース線で使えます")
@@ -8827,16 +9761,10 @@ def _close_tool_windows():
     """モジュールグローバル参照＋同名 objectName のツールウィンドウを全て閉じる（PySide）。"""
     try:
         global _toon_win
-        _toon_win.close(); _toon_win.deleteLater()
-    except Exception:
-        pass
-    try:
-        for w in QtWidgets.QApplication.topLevelWidgets():
-            try:
-                if w.objectName() in (WINDOW_OBJ, _LINEOPT_OBJ):
-                    w.close(); w.deleteLater()
-            except Exception:
-                pass
+        wins = _find_tool_windows((WINDOW_OBJ, _LINEOPT_OBJ))
+        if _qt_valid(_toon_win) and _toon_win not in wins:
+            wins.insert(0, _toon_win)
+        _close_and_delete(wins)
     except Exception:
         pass
     # v0.1.46: 更新でモジュールが入れ替わる前に、このモジュールのオーバーライドと
@@ -9544,6 +10472,52 @@ def _og_override_sync():
     return False
 
 
+_PANEL_GUARD = [None]   # QTimer: オーバーライドが有効な間、空に戻されたパネルへ入れ直す
+
+
+def _guard_panels():
+    """v0.1.54: Maya の updateRenderOverride（新しいシーンの直後や、Arnold などレンダラーのメニュー更新で
+    遅れて走る）がパネルのオーバーライドを空に戻すことがある。戻されたままだとそのパネルの
+    プレイブラストに隠れ線が出ないので、空のパネルにだけ入れ直す（他のオーバーライドのパネルは取らない）。"""
+    if _edge_override is None:
+        t = _PANEL_GUARD[0]
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        return
+    try:
+        for p in cmds.getPanel(type="modelPanel") or []:
+            if not cmds.modelEditor(p, q=True, rendererOverrideName=True):
+                cmds.modelEditor(p, e=True, rendererOverrideName=EDGE_OVR_NAME)
+    except Exception:
+        pass
+
+
+def _start_panel_guard():
+    try:
+        t = _PANEL_GUARD[0]
+        if t is None:
+            t = QtCore.QTimer()
+            t.setInterval(1000)
+            t.timeout.connect(_guard_panels)
+            _PANEL_GUARD[0] = t
+        if not t.isActive():
+            t.start()
+    except Exception:
+        pass
+
+
+def _stop_panel_guard():
+    try:
+        t = _PANEL_GUARD[0]
+        if t is not None:
+            t.stop()
+    except Exception:
+        pass
+
+
 def _on_panel_focus():
     """v0.1.53: 後から作ったモデルパネル（ティアオフなど）にフォーカスが来たら、オーバーライドが
     有効なときはそのパネルにも入れる（以前は有効にした時点のパネルにしか入らず、新しいパネルで
@@ -10014,6 +10988,7 @@ def _edge_enable():
     if not panels:
         cmds.warning("モデルパネルが見つかりません"); return False
     ok = False
+    changed = fresh
     for panel in panels:
         try:
             cur = cmds.modelEditor(panel, q=True, rendererOverrideName=True)
@@ -10028,19 +11003,25 @@ def _edge_enable():
                 cmds.modelEditor(panel, e=True, rendererOverrideName="")
             if fresh or cur != EDGE_OVR_NAME:
                 cmds.modelEditor(panel, e=True, rendererOverrideName=EDGE_OVR_NAME)
+                changed = True
             ok = True
         except Exception as exc:
             cmds.warning("画像空間エッジ検出の適用に失敗（{0}）: {1}".format(panel, exc))
-    try:
-        cmds.refresh()
-    except Exception:
-        pass
+    _start_panel_guard()    # v0.1.54: Maya が後から空に戻したパネルへ入れ直す
+    # v0.1.54: 何も変えていなければ描画を回さない（ウィンドウを閉じる処理などから何度も呼ばれ、
+    # そのたびに描画を回すと、その間に破棄されたウィンドウへ後から触って落ちることがあった）
+    if changed:
+        try:
+            cmds.refresh()
+        except Exception:
+            pass
     return ok
 
 
 def _edge_disable():
     """画像空間エッジ検出を全モデルパネルから解除し、オーバーライドを破棄。"""
     global _edge_override
+    _stop_panel_guard()
     try:
         import maya.api.OpenMayaRender as omr
     except Exception:
@@ -10071,18 +11052,12 @@ def _edge_disable():
 def show():
     """ツールウィンドウを起動。既存ウィンドウがあれば閉じてから開く（重複起動を防止）。"""
     global _toon_win
-    # モジュールグローバルの参照を後始末
-    try:
-        _toon_win.close(); _toon_win.deleteLater()
-    except Exception:
-        pass
     # スクリプト再実行で global がリセットされても残っている同名ウィンドウを全て掃除
-    for w in QtWidgets.QApplication.topLevelWidgets():
-        try:
-            if w.objectName() == WINDOW_OBJ:
-                w.close(); w.deleteLater()
-        except Exception:
-            pass
+    # （v0.1.54: 先に集めてから閉じる。モジュールグローバルの参照も同じ一覧で閉じる）
+    wins = _find_tool_windows((WINDOW_OBJ,))
+    if _qt_valid(_toon_win) and _toon_win not in wins:
+        wins.insert(0, _toon_win)
+    _close_and_delete(wins)
     _toon_win = ToonOutlineUI()
     _toon_win.show()
     _ensure_scene_jobs()   # v0.1.46: シーンを開き直したら隠れ線の紐づけを読み直す
