@@ -236,7 +236,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.41"
+__version__ = "0.1.42"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -4113,6 +4113,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         """v0.1.31: メッシュごとのトップグループ <mesh>_outlines を確保。"""
         return self._ensure_group(mesh_short + MESH_GROUP_SUFFIX)
 
+    def _batch_group_name(self, sel):
+        """v0.1.42: 複数メッシュ選択時に 1 まとめ用の共通グループ名。
+        単一ならメッシュ名で従来グループ、2 個なら 'a_b_outlines'、3+ なら 'a_b_etc_outlines'。"""
+        if not sel:
+            return None
+        shorts = [_short(o) for o in sel if o]
+        if len(shorts) <= 1:
+            return None
+        if len(shorts) == 2:
+            return shorts[0] + "_" + shorts[1] + MESH_GROUP_SUFFIX
+        return shorts[0] + "_" + shorts[1] + "_etc" + MESH_GROUP_SUFFIX
+
+    def _ensure_batch_group(self, sel):
+        """v0.1.42: 複数選択は 1 グループへまとめる。単一は None を返して per-mesh へフォールバック。"""
+        name = self._batch_group_name(sel)
+        if name is None:
+            return None
+        return self._ensure_group(name)
+
     def _ensure_sub_group(self, parent_group, sub_name):
         """v0.1.31: 指定グループ直下のサブグループを確保。"""
         for c in cmds.listRelatives(parent_group, c=True, type="transform", f=True) or []:
@@ -5625,13 +5644,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         made = []
         try:
+            # v0.1.42: 複数選択時は 1 グループへまとめる
+            batch_grp = self._ensure_batch_group(sel)
             for obj in sel:
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
                     continue
                 src = shps[0]
-                # v0.1.31: オブジェクトごとのトップグループに入れる
-                grp = self._ensure_mesh_group(_short(obj))
+                # v0.1.31→v0.1.42: 複数選択時は batch_grp、単一は per-mesh
+                grp = batch_grp or self._ensure_mesh_group(_short(obj))
 
                 # 元と同じ位置に複製 → 履歴削除で静的化
                 dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
@@ -5701,13 +5722,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         made = []
         try:
+            # v0.1.42: 複数選択時は 1 グループへまとめる（単一は per-mesh）
+            batch_grp = self._ensure_batch_group(sel)
             for obj in sel:
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
                     continue
                 src = shps[0]
                 # v0.1.31: オブジェクトごとのトップグループに入れる
-                grp = self._ensure_mesh_group(_short(obj))
+                # v0.1.42: 複数選択時は batch_grp（共通）、単一は per-mesh グループ
+                grp = batch_grp or self._ensure_mesh_group(_short(obj))
                 dup = cmds.duplicate(obj, name=_short(obj) + "_screen", rr=True)[0]
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
@@ -5819,6 +5843,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         skipped = 0
         cmds.undoInfo(openChunk=True)
         try:
+            # v0.1.42: 複数選択時は 1 共通グループ配下にクリースをまとめる
+            batch_grp = self._ensure_batch_group(sel)
             for obj in sel:
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
@@ -5838,8 +5864,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 chains = _split_edges_into_chains(shps[0], indices)
                 any_made = False
-                # v0.1.31: このメッシュのクリースサブグループを事前確保
-                mesh_grp = self._ensure_mesh_group(short)
+                # v0.1.31→v0.1.42: 複数選択時は batch_grp（共通）配下のクリースサブグループへ
+                mesh_grp = batch_grp or self._ensure_mesh_group(short)
                 crease_sub = self._ensure_sub_group(mesh_grp, CREASES_GROUP_NAME)
                 for chain in chains:
                     if not chain: continue
@@ -5895,6 +5921,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         skipped = 0
         cmds.undoInfo(openChunk=True)
         try:
+            # v0.1.42: 複数選択時は 1 共通グループ配下にマテリアル境界をまとめる
+            batch_grp = self._ensure_batch_group(sel)
             for obj in sel:
                 shps = cmds.listRelatives(obj, shapes=True, type="mesh", ni=True, f=True)
                 if not shps:
@@ -5912,7 +5940,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 chains = _split_edges_into_chains(shps[0], indices)
                 any_made = False
-                mesh_grp = self._ensure_mesh_group(short)
+                mesh_grp = batch_grp or self._ensure_mesh_group(short)
                 mb_sub = self._ensure_sub_group(mesh_grp, MATBOUND_GROUP_NAME)
                 for chain in chains:
                     if not chain: continue
@@ -6813,18 +6841,27 @@ float linearizeDepth(float z)
 
 // 交差モード本体: 対象と他の 2 深度が「近接」かつ「隣接で前後が反転」した位置に線を出す。
 // near-miss（近いが交差していない）を避けるため sign flip を併用。
+// v0.1.42: さらに「シーン上で target 最前面 と other 最前面 の両サイドが隣接する」条件を
+// 追加。target が他オブジェクトを完全に手前で隠してる領域 (奥で深度が偶然近接する) の
+// 擬似交差を排除する。
 float intersectEdge(float2 uv, float2 t)
 {
     float ra_c = gDepthTex.Sample(gSamp, uv).r;
     float rb_c = gDepthOtherTex.Sample(gSamp, uv).r;
+    float rs_c = gDepthSceneTex.Sample(gSamp, uv).r;
     // 片方でも遠クリア（対象 or 他がこのピクセルに無い）は交差ではない
     if (ra_c >= 0.9999f || rb_c >= 0.9999f) return 0.0f;
     float za_c = linearizeDepth(ra_c);
     float zb_c = linearizeDepth(rb_c);
+    float zs_c = linearizeDepth(rs_c);
     float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4f);
     // 中心が近接の目安を外れていればまず線にしない（範囲を少し緩めて取りこぼし防止）
     if (rel_c > gIntersectThresh * 3.0f) return 0.0f;
     bool a_front_c = (za_c <= zb_c);
+    // scene の最前面が target / other どちらか（イプシロンは画面空間深度の 0.2%）
+    float eps_c = max(za_c, zb_c) * 0.002f;
+    bool saw_a_front = (abs(zs_c - za_c) < eps_c);
+    bool saw_b_front = (abs(zs_c - zb_c) < eps_c);
 
     bool any_flip = false;
     float min_rel = rel_c;
@@ -6839,15 +6876,23 @@ float intersectEdge(float2 uv, float2 t)
         float2 nuv = uv + off;
         float ra_n = gDepthTex.Sample(gSamp, nuv).r;
         float rb_n = gDepthOtherTex.Sample(gSamp, nuv).r;
+        float rs_n = gDepthSceneTex.Sample(gSamp, nuv).r;
         if (ra_n >= 0.9999f || rb_n >= 0.9999f) continue;
         float za_n = linearizeDepth(ra_n);
         float zb_n = linearizeDepth(rb_n);
+        float zs_n = linearizeDepth(rs_n);
         bool a_front_n = (za_n <= zb_n);
         if (a_front_c != a_front_n) any_flip = true;
         float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4f);
         min_rel = min(min_rel, rel_n);
+        float eps_n = max(za_n, zb_n) * 0.002f;
+        if (abs(zs_n - za_n) < eps_n) saw_a_front = true;
+        if (abs(zs_n - zb_n) < eps_n) saw_b_front = true;
     }
     if (!any_flip) return 0.0f;
+    // v0.1.42: scene 上で target と other の両方が最前面になる領域が近傍に存在しなければ
+    // 「見えている交差」ではない（奥に隠れた擬似交差を排除）。
+    if (!(saw_a_front && saw_b_front)) return 0.0f;
     // 強度: 近接ほど強い。min_rel（周辺で一番近い点）で smoothstep
     float hi = gIntersectThresh * 1.5f;
     return 1.0f - smoothstep(gIntersectThresh * 0.5f, hi, min_rel);
@@ -6896,10 +6941,12 @@ float4 PS(VOUT i) : SV_Target
     float e  = mask * smoothstep(gThreshold, hi, rel);
 
     // v0.1.36: 交差線モードを合成（既存エッジより優先して表示）
-    // v0.1.40: こちらも visible マスクで「見えてる target 上」だけに制限。
+    // v0.1.42: 交差線は intersectEdge 自身が「scene 最前面の target/other 両サイドが隣接」で
+    // 可視性を判定するので、ここでは visible マスクを掛けない（掛けると、other 側の最前面
+    // ピクセルで交差線が消えてしまう）。
     if (gIntersectMode != 0)
     {
-        float ei = intersectEdge(i.UV, t) * visible;
+        float ei = intersectEdge(i.UV, t);
         e = max(e, ei);
     }
     return float4(lerp(scene, gLineColor, e), 1.0f);
@@ -6959,12 +7006,18 @@ GLSLShader PS {
     float intersectEdge(vec2 uv, vec2 t) {
         float ra_c = texture2D(gDepthSamp, uv).r;
         float rb_c = texture2D(gDepthOtherSamp, uv).r;
+        float rs_c = texture2D(gDepthSceneSamp, uv).r;
         if (ra_c >= 0.9999 || rb_c >= 0.9999) return 0.0;
         float za_c = linearize(ra_c);
         float zb_c = linearize(rb_c);
+        float zs_c = linearize(rs_c);
         float rel_c = abs(za_c - zb_c) / max(min(za_c, zb_c), 1e-4);
         if (rel_c > gIntersectThresh * 3.0) return 0.0;
         bool a_front_c = (za_c <= zb_c);
+        // v0.1.42: scene 最前面が target / other どちらか（HLSL 版と同条件）
+        float eps_c = max(za_c, zb_c) * 0.002;
+        bool saw_a_front = (abs(zs_c - za_c) < eps_c);
+        bool saw_b_front = (abs(zs_c - zb_c) < eps_c);
         bool any_flip = false;
         float min_rel = rel_c;
         for (int k = 0; k < 4; ++k) {
@@ -6976,15 +7029,22 @@ GLSLShader PS {
             vec2 nuv = uv + off;
             float ra_n = texture2D(gDepthSamp, nuv).r;
             float rb_n = texture2D(gDepthOtherSamp, nuv).r;
+            float rs_n = texture2D(gDepthSceneSamp, nuv).r;
             if (ra_n >= 0.9999 || rb_n >= 0.9999) continue;
             float za_n = linearize(ra_n);
             float zb_n = linearize(rb_n);
+            float zs_n = linearize(rs_n);
             bool a_front_n = (za_n <= zb_n);
             if (a_front_c != a_front_n) any_flip = true;
             float rel_n = abs(za_n - zb_n) / max(min(za_n, zb_n), 1e-4);
             min_rel = min(min_rel, rel_n);
+            float eps_n = max(za_n, zb_n) * 0.002;
+            if (abs(zs_n - za_n) < eps_n) saw_a_front = true;
+            if (abs(zs_n - zb_n) < eps_n) saw_b_front = true;
         }
         if (!any_flip) return 0.0;
+        // v0.1.42: 奥に隠れた擬似交差を排除
+        if (!(saw_a_front && saw_b_front)) return 0.0;
         float hi = gIntersectThresh * 1.5;
         return 1.0 - smoothstep(gIntersectThresh * 0.5, hi, min_rel);
     }
@@ -7024,7 +7084,8 @@ GLSLShader PS {
         float e = mask * smoothstep(gThreshold, hi, rel);
 
         if (gIntersectMode != 0) {
-            float ei = intersectEdge(VSUV, t) * visible;
+            // v0.1.42: intersectEdge 内部で可視性を判定するので visible マスクは掛けない
+            float ei = intersectEdge(VSUV, t);
             e = max(e, ei);
         }
 
