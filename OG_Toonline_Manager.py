@@ -136,6 +136,18 @@ LN_HID_FILL   = "toonHiddenDashFill"   # 破線の塗り割合 0-1
 LN_OCCLUDERS  = "toonHiddenOccluders"  # 隠れ線を透かす物（message multi ← 物.message）。全レイヤー共通
 ROOT_HIDDEN_ON = "toonHiddenOn"        # シーン全体で隠れ線を描くか（ROOT の属性、既定 ON）
 HIDDEN_DEPTH_TOL = 0.002               # 隠れ線の前後判定に使う相対深度の許容差
+# v0.1.49: ブラシ（SCRN シェーダの uniform 名と、ラインごと・レイヤーごとの属性名）
+SCRN_BRUSH_TAPER  = "brushTaper"       # 入り抜き（輪郭の端ほど細く）0-1
+SCRN_BRUSH_DRY    = "brushDry"         # かすれ 0-1
+SCRN_BRUSH_WOBBLE = "brushWobble"      # よれ（線を外側へ滑らかにずらす）0-1
+SCRN_BRUSH_DOUBLE = "brushDouble"      # 二重線 0-1
+LN_BR_ROUGH  = "toonBrushRough"        # → brushRoughness（カサつき）
+LN_BR_WAVE   = "toonBrushWave"         # → brushWaviness（太さのゆらぎ）
+LN_BR_SCALE  = "toonBrushScale"        # → brushNoiseScale（ゆらぎの細かさ）
+LN_BR_TAPER  = "toonBrushTaper"
+LN_BR_DRY    = "toonBrushDry"
+LN_BR_WOBBLE = "toonBrushWobble"
+LN_BR_DOUBLE = "toonBrushDouble"
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -250,7 +262,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.48"
+__version__ = "0.1.49"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -654,6 +666,41 @@ def _add_color_attr(node, ln, rgb):
     cmds.setAttr(node + "." + ln, rgb[0], rgb[1], rgb[2], type="float3")
 
 
+# v0.1.49: ブラシ属性（ライン属性, シェーダ uniform, 既定値, 最小, 最大）
+BRUSH_ATTRS = (
+    (LN_BR_ROUGH,  SCRN_BRUSH_ROUGH,  0.0, 0.0, 1.0),
+    (LN_BR_WAVE,   SCRN_BRUSH_WAVE,   0.0, 0.0, 1.0),
+    (LN_BR_SCALE,  SCRN_BRUSH_SCALE, 20.0, 1.0, 100.0),
+    (LN_BR_TAPER,  SCRN_BRUSH_TAPER,  0.0, 0.0, 1.0),
+    (LN_BR_DRY,    SCRN_BRUSH_DRY,    0.0, 0.0, 1.0),
+    (LN_BR_WOBBLE, SCRN_BRUSH_WOBBLE, 0.0, 0.0, 1.0),
+    (LN_BR_DOUBLE, SCRN_BRUSH_DOUBLE, 0.0, 0.0, 1.0),
+)
+
+# v0.1.49: ブラシのプリセット（書いていない項目は既定値＝効果なし）
+BRUSH_PRESETS = (
+    ("ペン（くっきり）", {LN_BR_TAPER: 0.25}),
+    ("筆", {LN_BR_TAPER: 0.85, LN_BR_WAVE: 0.3, LN_BR_ROUGH: 0.1, LN_BR_DRY: 0.1,
+            LN_BR_SCALE: 25.0}),
+    ("鉛筆", {LN_BR_ROUGH: 0.45, LN_BR_WAVE: 0.15, LN_BR_DRY: 0.35, LN_BR_TAPER: 0.3,
+              LN_BR_WOBBLE: 0.15, LN_BR_SCALE: 14.0}),
+    ("マーカー", {LN_BR_ROUGH: 0.05, LN_BR_WAVE: 0.05, LN_BR_DRY: 0.3, LN_BR_SCALE: 40.0}),
+    ("スケッチ", {LN_BR_ROUGH: 0.25, LN_BR_WAVE: 0.2, LN_BR_DRY: 0.1, LN_BR_WOBBLE: 0.5,
+                  LN_BR_DOUBLE: 0.5, LN_BR_TAPER: 0.3, LN_BR_SCALE: 25.0}),
+    ("ブラシ効果なし", {}),
+)
+
+
+def _brush_preset_values(name):
+    """プリセット名 → [(ライン属性, 値), ...]（全ブラシ属性ぶん）。"""
+    vals = {}
+    for pname, d in BRUSH_PRESETS:
+        if pname == name:
+            vals = d
+            break
+    return [(ln, float(vals.get(ln, dv))) for ln, _sh, dv, _lo, _hi in BRUSH_ATTRS]
+
+
 def _ensure_line_render_attrs(line):
     """SCRN ラインに見え方属性を用意し、線色/表側表示をシェーダへ接続する（冪等）。"""
     if not _attr_exists(line, SCRN_TAG):
@@ -687,8 +734,25 @@ def _ensure_line_render_attrs(line):
                      dv=_SCRN_HIDDEN_FILL_DEF)
     if not _attr_exists(line, LN_OCCLUDERS):
         cmds.addAttr(line, ln=LN_OCCLUDERS, at="message", multi=True, indexMatters=False)
+    # v0.1.49: ブラシ（初期値はいまのシェーダの値＝メイン画面で一括設定していた値を引き継ぐ）
+    for ln_attr, sh_attr, dv, lo, hi in BRUSH_ATTRS:
+        if _attr_exists(line, ln_attr):
+            continue
+        cur_v = dv
+        if shd and _attr_exists(shd, sh_attr) and not _plug_source(shd + "." + sh_attr):
+            try:
+                cur_v = float(cmds.getAttr(shd + "." + sh_attr))
+            except Exception:
+                pass
+        cmds.addAttr(line, ln=ln_attr, at="double", min=lo, max=hi, dv=dv)
+        try:
+            cmds.setAttr(line + "." + ln_attr, max(lo, min(hi, cur_v)))
+        except Exception:
+            pass
     if shd:
-        for src_attr, dst_attr in ((LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS)):
+        links = [(LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS)]
+        links += [(ln_attr, sh_attr) for ln_attr, sh_attr, _dv, _lo, _hi in BRUSH_ATTRS]
+        for src_attr, dst_attr in links:
             if not _attr_exists(shd, dst_attr):
                 continue
             src = line + "." + src_attr
@@ -993,16 +1057,32 @@ def _scrn_set_brush(rough=None, wave=None, scale=None):
     if scale is not None:
         try: _SCRN_BRUSH_SCALE_DEF = float(scale)
         except Exception: pass
-    pairs = ((SCRN_BRUSH_ROUGH, _SCRN_BRUSH_ROUGH_DEF),
-             (SCRN_BRUSH_WAVE,  _SCRN_BRUSH_WAVE_DEF),
-             (SCRN_BRUSH_SCALE, _SCRN_BRUSH_SCALE_DEF))
-    for line in _all_screen_lines():
-        shd = _fresnel_shader(line)
-        if not shd: continue
-        for an, v in pairs:
-            if cmds.attributeQuery(an, node=shd, exists=True):
-                try: cmds.setAttr(shd + "." + an, v)
-                except Exception: pass
+    # v0.1.49: 渡された項目だけを、全ラインのマスター値（ライン属性）へ書く。
+    # 1 つ変えただけで他の項目まで上書きすると、ライン詳細設定で変えた値が消えるため。
+    pairs = []
+    if rough is not None:
+        pairs.append((LN_BR_ROUGH, SCRN_BRUSH_ROUGH, _SCRN_BRUSH_ROUGH_DEF))
+    if wave is not None:
+        pairs.append((LN_BR_WAVE, SCRN_BRUSH_WAVE, _SCRN_BRUSH_WAVE_DEF))
+    if scale is not None:
+        pairs.append((LN_BR_SCALE, SCRN_BRUSH_SCALE, _SCRN_BRUSH_SCALE_DEF))
+    cmds.undoInfo(openChunk=True)
+    try:
+        for line in _all_screen_lines():
+            shd = _fresnel_shader(line)
+            for ln_attr, sh_attr, v in pairs:
+                if _attr_exists(line, ln_attr):
+                    try:
+                        cmds.setAttr(line + "." + ln_attr, v)
+                    except Exception:
+                        pass   # レンダーレイヤーで上書き中
+                elif shd and _attr_exists(shd, sh_attr) and not _plug_source(shd + "." + sh_attr):
+                    try:
+                        cmds.setAttr(shd + "." + sh_attr, v)
+                    except Exception:
+                        pass
+    finally:
+        cmds.undoInfo(closeChunk=True)
     try: cmds.refresh()
     except Exception: pass
 
@@ -1140,6 +1220,28 @@ int showVisible <
     int UIMax = 1;
 > = 1;
 
+// v0.1.49: ブラシのバリエーション（すべて 0 = 効果なし）
+float brushTaper <
+    string UIName = "Brush Taper (line ends thinner)";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.0;
+float brushDry <
+    string UIName = "Brush Dry (broken stroke)";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.0;
+float brushWobble <
+    string UIName = "Brush Wobble (sideways drift)";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.0;
+float brushDouble <
+    string UIName = "Brush Double Stroke";
+    float UIMin = 0.0;
+    float UIMax = 1.0;
+> = 0.0;
+
 struct APPDATA {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
@@ -1165,6 +1267,19 @@ float hash12(float2 p)
     float3 p3 = frac(float3(p.xyx) * 0.1031f);
     p3 += dot(p3, p3.yzx + 33.33f);
     return frac((p3.x + p3.y) * p3.z);
+}
+
+// v0.1.49: なめらかな値ノイズ（0..1）。隣り合う点で値が連続するので、線の継ぎ目で途切れない。
+float vnoise(float2 p)
+{
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float a = hash12(i);
+    float b = hash12(i + float2(1.0f, 0.0f));
+    float c = hash12(i + float2(0.0f, 1.0f));
+    float d = hash12(i + float2(1.0f, 1.0f));
+    float2 u = f * f * (3.0f - 2.0f * f);
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
 }
 
 V2G VShader(APPDATA i)
@@ -1238,7 +1353,7 @@ float2 perp_from_normal(float3 vspos, float3 vsnrm)
     return d / l;
 }
 
-[maxvertexcount(4)]
+[maxvertexcount(8)]
 void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
 {
     float f0 = facing_dot(tri[0].VSPos, tri[0].VSNrm);
@@ -1297,34 +1412,89 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     float wav1 = 1.0f + brushWaviness * (phase1 - 0.5f) * 2.0f;
     float wav2 = 1.0f + brushWaviness * (phase2 - 0.5f) * 2.0f;
 
+    // v0.1.49 入り抜き: 輪郭の端（輪郭が視線の方向に沿って縮む所）ほど細くする。
+    // 輪郭の途切れる点では輪郭線が視線と平行になる（なす角の sin → 0）性質を使う局所判定。
+    float taperK = 1.0f;
+    if (brushTaper > 0.001f) {
+        float3 seg = vsp2 - vsp1;
+        float segLen2 = dot(seg, seg);
+        if (segLen2 > 1e-12f) {
+            float3 vdir = normalize(vsp1 + vsp2);
+            float along = dot(seg, vdir);
+            float s = sqrt(saturate(1.0f - along * along / segLen2));
+            // 強さに応じた累乗で、端に向かって長めに細る（100 で s^4: s=0.9→0.66, 0.7→0.24）
+            taperK = pow(max(s, 1e-4f), 4.0f * saturate(brushTaper));
+        }
+    }
+
     // v0.1.15: 背面法 (inverted hull) と等価な均一太さ。
     //   - 距離 attenuation なし（頂点ごとの w で太さがばらつく主因だった）
     //   - 完全に外向きの quad（内側 0、外側 thickness）: 1 本の線＝ thickness ピクセル
-    //   - 線幅 = thickness * cr * wav ピクセル（cr=曲率、wav=ブラシゆらぎ）
+    //   - 線幅 = thickness * cr * wav * taper ピクセル（cr=曲率、wav=ブラシゆらぎ）
     // perp は NDC 単位ベクトル、px = 2/screen。off を w 乗算後に除算すると
     // ピクセル距離が perp * thickness とちょうど一致する（長さ厳密に = thickness px）。
-    float2 off1 = perp1 * (thickness * cr1 * wav1) * px;
-    float2 off2 = perp2 * (thickness * cr2 * wav2) * px;
+    float tw1 = thickness * cr1 * wav1 * taperK;
+    float tw2 = thickness * cr2 * wav2 * taperK;
+    float2 off1 = perp1 * tw1 * px;
+    float2 off2 = perp2 * tw2 * px;
+
+    // v0.1.49 よれ: 線全体を外側へなめらかにずらす。ノイズは交点の画面位置で決まるので、
+    // 隣の三角形と共有する交点では同じずれ量になり、継ぎ目で切れない。
+    float2 sp1 = ndc1 * gScreen * 0.5f;
+    float2 sp2 = ndc2 * gScreen * 0.5f;
+    float cell = 400.0f / max(brushNoiseScale, 1.0f);    // 細かさ 20 → 20px 周期
+    float wb1 = 0.0f;
+    float wb2 = 0.0f;
+    if (brushWobble > 0.001f) {
+        wb1 = brushWobble * thickness * 1.5f * vnoise(sp1 / cell);
+        wb2 = brushWobble * thickness * 1.5f * vnoise(sp2 / cell);
+    }
+    float2 b1 = ndc1 + perp1 * wb1 * px;
+    float2 b2 = ndc2 + perp2 * wb2 * px;
 
     // v0.1.38: 隠れ線の破線用に quad の長手ピクセル長を算出し全頂点に乗せる
     float lenPx = length((ndc2 - ndc1) * gScreen * 0.5f);
 
     // triangle strip で quad を出力。UV: U=長手(0..1), V=太さ方向(0 内側=silhouette..1 外側)
     G2P v; v.LenPx = lenPx;
-    v.HPos = float4(ndc1         * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
-    v.HPos = float4((ndc1 + off1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
-    v.HPos = float4(ndc2         * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
-    v.HPos = float4((ndc2 + off2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
+    v.HPos = float4(b1          * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
+    v.HPos = float4((b1 + off1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
+    v.HPos = float4(b2          * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
+    v.HPos = float4((b2 + off2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
+
+    // v0.1.49 二重線: 少し外側に細い 2 本目を引く（スケッチ風）
+    if (brushDouble > 0.001f) {
+        stream.RestartStrip();
+        float g1 = tw1 * (0.8f + 1.5f * brushDouble) + thickness * 0.8f * brushDouble * vnoise(sp1 / cell + 7.31f);
+        float g2 = tw2 * (0.8f + 1.5f * brushDouble) + thickness * 0.8f * brushDouble * vnoise(sp2 / cell + 7.31f);
+        float2 c1 = b1 + perp1 * g1 * px;
+        float2 c2 = b2 + perp2 * g2 * px;
+        float2 o1 = perp1 * (tw1 * 0.6f) * px;
+        float2 o2 = perp2 * (tw2 * 0.6f) * px;
+        v.HPos = float4(c1        * w1, p1.z, w1); v.UV = float2(0.0f, 0.0f); stream.Append(v);
+        v.HPos = float4((c1 + o1) * w1, p1.z, w1); v.UV = float2(0.0f, 1.0f); stream.Append(v);
+        v.HPos = float4(c2        * w2, p2.z, w2); v.UV = float2(1.0f, 0.0f); stream.Append(v);
+        v.HPos = float4((c2 + o2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
+    }
 }
 
-// ペンシル風縁のカサつき。UV.y: 0 = シルエット側(内), 1 = 外側。両端ほどランダム discard。
+// ブラシの画素側。UV.y: 0 = シルエット側(内), 1 = 外側。
 void brush_discard(G2P i)
 {
+    // ペンシル風縁のカサつき（縁ほどランダムに欠ける）
     if (brushRoughness > 0.001f) {
         float edge = abs(i.UV.y - 0.5f) * 2.0f;  // 0=中心, 1=縁
         float rough = brushRoughness * edge * edge;
         float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
         if (h < rough) discard;
+    }
+    // v0.1.49 かすれ: なめらかなノイズで線の中が途切れる（縁ほど欠けやすい）
+    if (brushDry > 0.001f) {
+        float cellD = 160.0f / max(brushNoiseScale, 1.0f);
+        float n = 0.65f * vnoise(i.HPos.xy / cellD) + 0.35f * vnoise(i.HPos.xy / (cellD * 0.35f) + 11.7f);
+        float edgeD = abs(i.UV.y - 0.5f) * 2.0f;
+        // 100 でも線の形が残る強さ（中心は 3 割、縁は 6 割強まで欠ける）
+        if (n < saturate(brushDry) * (0.3f + 0.35f * edgeD)) discard;
     }
 }
 """
@@ -4300,33 +4470,35 @@ class ToonOutlineUI(QtWidgets.QDialog):
         srow.addStretch(1)
         sec_feel.add_layout(srow)
 
-        # ブラシ質感
+        # ブラシ質感（v0.1.49: 全ラインのマスター値へ一括で入れる。ラインごと・レイヤーごとの
+        # 入り抜き/かすれ/よれ/二重線/プリセットはライン詳細設定の『ブラシ』タブで）
         brow = QtWidgets.QHBoxLayout()
         brow.addWidget(QtWidgets.QLabel("ブラシ:カサつき"))
         self.spn_brush_rough = QtWidgets.QDoubleSpinBox()
         self.spn_brush_rough.setRange(0.0, 1.0); self.spn_brush_rough.setDecimals(2)
         self.spn_brush_rough.setSingleStep(0.05); self.spn_brush_rough.setValue(_SCRN_BRUSH_ROUGH_DEF)
         self.spn_brush_rough.setToolTip(
-            "SCRN ラインの縁をランダムに欠けさせてペンシル風の毛羽立ちを出す。\n"
-            "0=クリーン、1=強いカサつき。線の中心は残るので視認性は保たれる。")
-        self.spn_brush_rough.valueChanged.connect(self._on_brush_changed)
+            "全ラインに一括で入れる: 線の縁をランダムに欠けさせてペンシル風の毛羽立ちを出す。\n"
+            "0=クリーン、1=強いカサつき。線の中心は残るので視認性は保たれる。\n"
+            "ラインごとに変えるときは右クリック →『ライン詳細設定』の『ブラシ』。")
+        self.spn_brush_rough.valueChanged.connect(lambda v: _scrn_set_brush(rough=v))
         brow.addWidget(self.spn_brush_rough)
         brow.addWidget(QtWidgets.QLabel("ゆらぎ"))
         self.spn_brush_wave = QtWidgets.QDoubleSpinBox()
         self.spn_brush_wave.setRange(0.0, 1.0); self.spn_brush_wave.setDecimals(2)
         self.spn_brush_wave.setSingleStep(0.05); self.spn_brush_wave.setValue(_SCRN_BRUSH_WAVE_DEF)
         self.spn_brush_wave.setToolTip(
-            "SCRN ラインの太さをノイズで長手方向に揺らす（鉛筆の筆圧ゆらぎ風）。\n"
+            "全ラインに一括で入れる: 線の太さをノイズで長手方向に揺らす（鉛筆の筆圧ゆらぎ風）。\n"
             "0=均一、1=大きなゆらぎ。")
-        self.spn_brush_wave.valueChanged.connect(self._on_brush_changed)
+        self.spn_brush_wave.valueChanged.connect(lambda v: _scrn_set_brush(wave=v))
         brow.addWidget(self.spn_brush_wave)
         brow.addWidget(QtWidgets.QLabel("周期"))
         self.spn_brush_scale = QtWidgets.QDoubleSpinBox()
         self.spn_brush_scale.setRange(1.0, 100.0); self.spn_brush_scale.setDecimals(1)
         self.spn_brush_scale.setSingleStep(1.0); self.spn_brush_scale.setValue(_SCRN_BRUSH_SCALE_DEF)
         self.spn_brush_scale.setToolTip(
-            "ノイズの周期（画面 px 換算）。大きいほど細かくザラッ、小さいほど大きなうねり。")
-        self.spn_brush_scale.valueChanged.connect(self._on_brush_changed)
+            "全ラインに一括で入れる: ノイズの細かさ。大きいほど細かくザラッ、小さいほど大きなうねり。")
+        self.spn_brush_scale.valueChanged.connect(lambda v: _scrn_set_brush(scale=v))
         brow.addWidget(self.spn_brush_scale)
         brow.addStretch(1)
         sec_feel.add_layout(brow)
@@ -5044,12 +5216,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_scrn_bias(self, *args):
         """スクリーン輪郭の重なり深度押し込み（ビュー空間）を全ラインへ反映。"""
         _scrn_set_depth_bias(self.spn_scrn_bias.value())
-
-    def _on_brush_changed(self, *args):
-        """v0.1.14: ブラシ質感（カサつき/ゆらぎ/周期）を全 SCRN ラインへ反映。"""
-        _scrn_set_brush(rough=self.spn_brush_rough.value(),
-                        wave=self.spn_brush_wave.value(),
-                        scale=self.spn_brush_scale.value())
 
     def _on_toggle_intersect(self, state):
         """v0.1.36 → v0.1.41: 交差線（画像空間、対象 vs 他メッシュ）の ON/OFF。
@@ -7303,7 +7469,11 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         lay.addLayout(lrow)
         self._note(lay, u"● が付いた項目は、このレイヤーだけ変えています（↺ でマスターと同じに戻す）。")
 
-        grid = QtWidgets.QGridLayout()
+        # v0.1.49: 『見え方』と『ブラシ』をタブに分ける（縦に伸びすぎないように）
+        self.tabs = QtWidgets.QTabWidget()
+        page_look = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(page_look)
+        grid.setContentsMargins(6, 6, 6, 6)
         grid.setColumnStretch(1, 1)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(4)
@@ -7360,7 +7530,62 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         w_f, self.sl_fill, self.sp_fill = self._pct(5, 95, LN_HID_FILL)
         self._row(grid, 6, LN_HID_FILL, "破線の線の割合", w_f,
                   "1 区切りのうち線を描く割合。\n5 = ほぼ点 / 50 = 線とすき間が半々 / 95 = ほぼつながった線")
-        lay.addLayout(grid)
+        grid.setRowStretch(7, 1)
+        self.tabs.addTab(page_look, "見え方")
+
+        # ---- ブラシ（v0.1.49）----
+        page_br = QtWidgets.QWidget()
+        bgrid = QtWidgets.QGridLayout(page_br)
+        bgrid.setContentsMargins(6, 6, 6, 6)
+        bgrid.setColumnStretch(1, 1)
+        bgrid.setHorizontalSpacing(6)
+        bgrid.setVerticalSpacing(4)
+        prow = QtWidgets.QHBoxLayout()
+        prow.addWidget(QtWidgets.QLabel("プリセット"))
+        self.cmb_preset = QtWidgets.QComboBox()
+        self.cmb_preset.addItem("選ぶと下の項目をまとめて変更…")
+        for pname, _d in BRUSH_PRESETS:
+            self.cmb_preset.addItem(pname)
+        self.cmb_preset.setToolTip(
+            "線の質感をまとめて切り替えます（このレイヤーの値として入ります）。\n"
+            "ペン=くっきり / 筆=入り抜き強め / 鉛筆=かすれ+カサつき / マーカー=かすれ /\n"
+            "スケッチ=よれ+二重線 / ブラシ効果なし=全部 0。選んだ後に下で微調整できます。")
+        self.cmb_preset.activated.connect(self._on_preset)
+        prow.addWidget(self.cmb_preset, 1)
+        bgrid.addLayout(prow, 0, 0, 1, 3)
+        self._br_widgets = {}
+        brush_rows = (
+            (LN_BR_TAPER, "入り抜き",
+             "線の端（輪郭が途切れる所）ほど細くする。\n0 = 端まで同じ太さ / 50 = ほどよく細る / 100 = 端で消えるほど細る"),
+            (LN_BR_DRY, "かすれ",
+             "線の中がところどころ途切れる（ドライブラシ）。縁ほど欠けやすい。\n0 = かすれない / 50 = ほどよく / 100 = 大きく途切れる"),
+            (LN_BR_WOBBLE, "よれ",
+             "線全体が外側へなめらかにずれる（手描きのよれ）。\n0 = ずれない / 50 = 太さの半分強 / 100 = 太さの 1.5 倍までずれる"),
+            (LN_BR_DOUBLE, "二重線",
+             "少し外側に細い 2 本目を引く（スケッチ風）。\n0 = 1 本 / 50 = 少し離れた 2 本目 / 100 = 大きく離れた 2 本目"),
+            (LN_BR_ROUGH, "カサつき",
+             "線の縁がランダムに欠ける（鉛筆の毛羽立ち）。\n0 = きれい / 50 = ほどよく / 100 = 強くカサつく"),
+            (LN_BR_WAVE, "太さのゆらぎ",
+             "線の太さが長さ方向に揺れる（筆圧のゆらぎ）。\n0 = 均一 / 50 = ほどよく / 100 = 大きく揺れる"),
+        )
+        r = 1
+        for attr, title, tip in brush_rows:
+            w, sl, sp = self._pct(0, 100, attr)
+            self._row(bgrid, r, attr, title, w, tip)
+            self._br_widgets[attr] = (sl, sp)
+            r += 1
+        self.sp_bscale = QtWidgets.QSpinBox()
+        self.sp_bscale.setRange(1, 100)
+        self.sp_bscale.valueChanged.connect(lambda v: self._apply(LN_BR_SCALE, float(v)))
+        self._row(bgrid, r, LN_BR_SCALE, "ゆらぎの細かさ", self.sp_bscale,
+                  "かすれ・よれ・ゆらぎ・カサつきの模様の細かさ。\n1 = 大きなうねり / 20 = 標準 / 100 = 細かくザラザラ")
+        bgrid.setRowStretch(r + 1, 1)
+        self.lbl_brush_note = QtWidgets.QLabel("")
+        self.lbl_brush_note.setObjectName("OG_Toonline_LineOptNote")
+        self.lbl_brush_note.setWordWrap(True)
+        bgrid.addWidget(self.lbl_brush_note, r + 2, 0, 1, 3)
+        self.tabs.addTab(page_br, "ブラシ")
+        lay.addWidget(self.tabs)
 
         # ---- 書き出し用 ----
         self._section(lay, "書き出し用レイヤー")
@@ -7404,6 +7629,21 @@ class _LineOptionsDialog(QtWidgets.QDialog):
 
     # ---------- 値の反映 ----------
     def _apply(self, attr, value):
+        self._apply_many([(attr, value)])
+
+    def _on_preset(self, idx):
+        """プリセットを選んだら、ブラシの全項目をまとめて入れる（Ctrl+Z 1 回で戻る）。"""
+        if idx <= 0:
+            return
+        name = self.cmb_preset.itemText(idx)
+        self.cmb_preset.blockSignals(True)
+        self.cmb_preset.setCurrentIndex(0)
+        self.cmb_preset.blockSignals(False)
+        self._apply_many(_brush_preset_values(name), only_scrn=True)
+        self.lbl_status.setText(u"ブラシ「{0}」を入れました。".format(name))
+
+    def _apply_many(self, pairs, only_scrn=False):
+        """[(属性, 値), ...] を、選択中のレイヤー（マスターなら属性値）へまとめて入れる。"""
         if self._updating or not self._lines:
             return
         layer = self._layer()
@@ -7412,11 +7652,16 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         cmds.undoInfo(openChunk=True)
         try:
             for ln in self._lines:
+                if only_scrn and not _attr_exists(ln, SCRN_TAG):
+                    continue
                 _ensure_line_render_attrs(ln)
-                if layer:
-                    _rs_set_override(layer, ln, attr, value)
-                else:
-                    _line_set_attr(ln, attr, value)
+                for attr, value in pairs:
+                    if not _attr_exists(ln, attr):
+                        continue
+                    if layer:
+                        _rs_set_override(layer, ln, attr, value)
+                    else:
+                        _line_set_attr(ln, attr, value)
         except Exception as exc:
             cmds.warning("ライン詳細設定の変更に失敗: {0}".format(exc))
         finally:
@@ -7558,6 +7803,11 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             self.sp_dash.setValue(float(_get(LN_HID_DASH, _SCRN_HIDDEN_DASH_DEF)))
             fl = int(round(float(_get(LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)) * 100))
             self.sl_fill.setValue(fl); self.sp_fill.setValue(fl)
+            # v0.1.49: ブラシ
+            for attr, (sl, sp) in self._br_widgets.items():
+                bv = int(round(float(_get(attr, 0.0)) * 100))
+                sl.setValue(bv); sp.setValue(bv)
+            self.sp_bscale.setValue(int(round(float(_get(LN_BR_SCALE, 20.0)))))
             # 隠れ線を出さないときは関連項目を薄く、破線の項目は破線のときだけ
             for w in (self.chk_same, self.btn_hcol, self.sl_alpha, self.sp_alpha):
                 w.setEnabled(mode != 0 and (w is not self.btn_hcol or not same))
@@ -8450,8 +8700,9 @@ def _hidden_set_shader_params(s, line, ovr):
     s.setParameter("hiddenDashFill", float(_get(line, LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)))
     shd = _fresnel_shader(line)
     if shd:
-        for an, dv in ((SCRN_THICK, 3.0), (SCRN_DEPTH_BIAS, 0.0), ("stability", 0.0),
-                       (SCRN_BRUSH_ROUGH, 0.0), (SCRN_BRUSH_WAVE, 0.0), (SCRN_BRUSH_SCALE, 20.0)):
+        params = [(SCRN_THICK, 3.0), (SCRN_DEPTH_BIAS, 0.0), ("stability", 0.0)]
+        params += [(sh_attr, dv) for _ln, sh_attr, dv, _lo, _hi in BRUSH_ATTRS]
+        for an, dv in params:
             s.setParameter(an, float(_get(shd, an, dv)))
 
 
