@@ -236,7 +236,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.42"
+__version__ = "0.1.43"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -7104,7 +7104,10 @@ technique Main {
 
 def _edge_fx_path():
     """現 drawAPI に応じて HLSL(.fx) か GLSL(.ogsfx) のパスを返して書き出す。
-    v0.1.36: OpenGL VP2 でも動くように GLSL 版を追加。"""
+    v0.1.36: OpenGL VP2 でも動くように GLSL 版を追加。
+    v0.1.42: MShaderManager.getEffectsFileShader が path でキャッシュするため、バージョン
+    番号をファイル名に埋め込んでキャッシュバスティング（新版リリース毎に新しいパスで
+    load される→新 HLSL/GLSL が反映）。"""
     is_gl = _vp2_is_opengl()
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
@@ -7112,11 +7115,12 @@ def _edge_fx_path():
             os.makedirs(d)
     except Exception:
         d = cmds.internalVar(userTmpDir=True)
+    ver_tag = __version__.replace(".", "_")
     if is_gl:
-        p = os.path.join(d, "OG_EdgeOutline.ogsfx").replace("\\", "/")
+        p = os.path.join(d, "OG_EdgeOutline_v" + ver_tag + ".ogsfx").replace("\\", "/")
         src = _EDGE_OGSFX
     else:
-        p = os.path.join(d, "OG_EdgeOutline.fx").replace("\\", "/")
+        p = os.path.join(d, "OG_EdgeOutline_v" + ver_tag + ".fx").replace("\\", "/")
         src = _EDGE_FX
     try:
         with open(p, "w", encoding="utf-8") as f:
