@@ -262,7 +262,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.51"
+__version__ = "0.1.52"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -273,9 +273,12 @@ _INSTALLER_FILE = "OG_Toonline_Manager_install.py"   # 更新時に再取得す�
 _GITHUB_API      = "https://api.github.com/repos/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
 _GITHUB_RAW_BASE = "https://raw.githubusercontent.com/{0}/{1}".format(_GITHUB_OWNER, _GITHUB_REPO)
 
-_CURV_CACHE = {}   # line名 -> 正規化曲率リスト（scriptJob 用・モジュールレベル）
-_CURV_JOBS  = {}   # line名 -> [scriptJob id, ...]
-_TAPER_CACHE = {}  # line名 -> 各頂点の長手方向パラメータ t(0..1)（エッジライン用）
+# v0.1.52: キャッシュ・ジョブはノードの UUID で引く（名前で引くと、リネームや短い名前/フルパスの
+# 違いで同じラインが別物扱いになり、曲率ジョブが二重に張られたり古いキャッシュを使ったりした）。
+_CURV_CACHE = {}   # line UUID -> 正規化曲率リスト
+_CURV_JOBS  = {}   # line UUID -> ([scriptJob id, ...], コントローラーの MObjectHandle)
+_CURV_SIG   = {}   # line UUID -> 最後に重みを書いたときの曲率まわりの値（同じなら再計算しない）
+_TAPER_CACHE = {}  # line UUID -> 各頂点の長手方向パラメータ t(0..1)（エッジライン用）
 _OCC_ENABLED = False  # 隠蔽検知ハル（カメラ依存）の有効フラグ（UIチェックで切替・モジュール共有）
 
 
@@ -285,6 +288,56 @@ def _maya_main():
 
 def _short(name):
     return name.split("|")[-1] if name else name
+
+
+def _base(name):
+    """新しく作るノードの名前の元にする名前。DAG パスを外し、ネームスペースは '_' でつなぐ
+    （v0.1.52: リファレンスしたメッシュ 'chr:head' から作る線を 'chr:' の中に置かないため。
+    'chr_head_outline' のように元の名前空間は名前に残して区別できるようにする）。"""
+    s = _short(name)
+    if not s:
+        return s
+    return s.lstrip(":").replace(":", "_")
+
+
+def _shapes_out_of_ns(tr):
+    """複製した transform の shape は元の名前（'chr:headShape1' など）のまま名前空間に残るので、
+    名前空間の外の名前に付け直す（v0.1.52）。"""
+    for s in cmds.listRelatives(tr, shapes=True, f=True) or []:
+        if ":" in _short(s):
+            try:
+                cmds.rename(s, _base(tr) + "Shape")
+            except Exception:
+                pass
+
+
+def _ukey(node):
+    """キャッシュ・ジョブのキー（ノードの UUID＋名前空間。取れなければフルパス）。
+    同じファイルを 2 回リファレンスすると両方のノードが同じ UUID になるので、名前空間も付けて区別する
+    （名前の変更では変わらない）。"""
+    full = (cmds.ls(node, long=True) or [node])[0]
+    try:
+        u = cmds.ls(node, uuid=True) or []
+        if u:
+            ns = _short(full).rpartition(":")[0]
+            return u[0] + "@" + ns if ns else u[0]
+    except Exception:
+        pass
+    return full
+
+
+# _ensure_thickness_chain がラインのコントローラー名の後ろに付けて作るノード（削除時に一緒に消す）
+_CTRL_NODE_SUFFIXES = ("_thkA", "_thkB", "_thkMaskBoost", "_edgeDist", "_thkScale", "_radScale",
+                       "_fresScale", "_fresMaxW", "_fresMaxWSens", "_scrnScale", "_scrnDist",
+                       "_visCond")
+
+
+def _clear_line_caches():
+    """シーンが変わったら曲率・長手方向のキャッシュを捨てる（同じ UUID の物を
+    リファレンスし直したときなどに古い値を使わないため）。"""
+    _CURV_CACHE.clear()
+    _TAPER_CACHE.clear()
+    _CURV_SIG.clear()
 
 
 def _ensure_shader(color):
@@ -544,13 +597,12 @@ def _build_fresnel_network(line, shape, color):
 
 
 def _all_screen_lines():
-    """シーン内の全スクリーン輪郭ライン（SCRN_TAG）を返す。"""
+    """シーン内の全スクリーン輪郭ライン（SCRN_TAG）を返す（リファレンスしたアセットの線も含む）。"""
     out = []
-    if not cmds.objExists(ROOT):
-        return out
-    for t in cmds.listRelatives(ROOT, allDescendents=True, type="transform", f=True) or []:
-        if cmds.attributeQuery(SCRN_TAG, node=t, exists=True):
-            out.append(t)
+    for root in _all_roots():
+        for t in cmds.listRelatives(root, allDescendents=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(SCRN_TAG, node=t, exists=True) and t not in out:
+                out.append(t)
     return out
 
 
@@ -943,13 +995,34 @@ def _remove_line_occluders(line, nodes):
 _HIDDEN_ON_FALLBACK = [True]   # ROOT が無いときの「隠れ線を描く」既定
 
 
+def _all_roots():
+    """シーン内の全 ROOT（このシーンのもの＋リファレンスしたアセットの 'chr:toonOutlines_grp' など）。
+    v0.1.52: 以前は名前空間なしの ROOT しか見ず、輪郭入りのキャラをリファレンスすると
+    隠れ線が出なかった。"""
+    try:
+        return cmds.ls(ROOT, recursive=True, long=True, type="transform") or []
+    except Exception:
+        return [ROOT] if cmds.objExists(ROOT) else []
+
+
 def _hidden_scene_on():
-    """シーン全体で隠れ線を描くか（ROOT.toonHiddenOn、既定 ON）。"""
+    """シーン全体で隠れ線を描くか（ROOT.toonHiddenOn、既定 ON）。
+    このシーンの ROOT にあればそれに従う。無ければリファレンスしたアセットの ROOT
+    （どれかが ON なら ON）。"""
     if _attr_exists(ROOT, ROOT_HIDDEN_ON):
         try:
             return bool(cmds.getAttr(ROOT + "." + ROOT_HIDDEN_ON))
         except Exception:
             pass
+    vals = []
+    for r in _all_roots():
+        if _attr_exists(r, ROOT_HIDDEN_ON):
+            try:
+                vals.append(bool(cmds.getAttr(r + "." + ROOT_HIDDEN_ON)))
+            except Exception:
+                pass
+    if vals:
+        return any(vals)
     return _HIDDEN_ON_FALLBACK[0]
 
 
@@ -970,11 +1043,10 @@ _HIDDEN_GROUPS = []   # [(紐づけ先メッシュ transform のタプル, [ラ�
 def _all_detail_lines():
     """ライン詳細設定・隠れ線の対象になる全ライン（スクリーン輪郭＋エッジ線・クリース線）。"""
     out = []
-    if not cmds.objExists(ROOT):
-        return out
-    for t in cmds.listRelatives(ROOT, allDescendents=True, type="transform", f=True) or []:
-        if _is_detail_line(t):
-            out.append(t)
+    for root in _all_roots():
+        for t in cmds.listRelatives(root, allDescendents=True, type="transform", f=True) or []:
+            if _is_detail_line(t) and t not in out:
+                out.append(t)
     return out
 
 
@@ -2452,15 +2524,26 @@ def _line_src_shape(line):
     return sh[0] if sh else None
 
 
+def _mesh_vertex_count(node):
+    try:
+        return int(cmds.polyEvaluate(node, vertex=True))
+    except Exception:
+        return -1
+
+
 def _line_curvature(line):
-    curv = _CURV_CACHE.get(line)
+    key = _ukey(line)
+    curv = _CURV_CACHE.get(key)
+    # v0.1.52: 頂点数が変わっていたら（メッシュを作り直した等）計算し直す
+    if curv is not None and len(curv) != _mesh_vertex_count(line):
+        curv = None
     if curv is None:
         src = _line_src_shape(line)
         try:
             curv = _compute_curvature(src) if src else []
         except Exception:
             curv = []
-        _CURV_CACHE[line] = curv
+        _CURV_CACHE[key] = curv
     return curv
 
 
@@ -2481,8 +2564,9 @@ def _line_circle_node(line):
 
 def _taper_factors(line):
     """各頂点のライン長手方向パラメータ t(0..1) をキャッシュして返す（カーブ最近接で算出）。"""
-    f = _TAPER_CACHE.get(line)
-    if f is not None:
+    key = _ukey(line)
+    f = _TAPER_CACHE.get(key)
+    if f is not None and len(f) == _mesh_vertex_count(line):
         return f
     crv = _line_curve(line)
     sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True) or []
@@ -2505,7 +2589,7 @@ def _taper_factors(line):
                 ts.append(max(0.0, min(1.0, (param - tmin) / span)))
         except Exception:
             ts = []
-    _TAPER_CACHE[line] = ts
+    _TAPER_CACHE[key] = ts
     return ts
 
 
@@ -2877,10 +2961,72 @@ def _current_mesh_sg(mesh_shape):
     return sgs[0] if sgs else None
 
 
+def _mesh_sg_assignments(mesh_shape):
+    """メッシュのマテリアル割り当てを [[SG, None], [SG, ["f[0:2]", ...]], ...] で返す
+    （None=オブジェクト全体、リスト=面ごと。面はシェイプ名を除いた形で持つ）。
+    v0.1.52: 以前は最初の SG だけを覚えていたため、面ごとに分けたマテリアルが
+    「ライン単体表示」を ON→OFF すると 1 つにまとまって消えていた。"""
+    full = (cmds.ls(mesh_shape, long=True) or [mesh_shape])[0]
+    tr = (cmds.listRelatives(full, parent=True, f=True) or [None])[0]
+    out = []
+    seen = set()
+    for sg in cmds.listConnections(full, type="shadingEngine") or []:
+        if sg in seen:
+            continue
+        seen.add(sg)
+        whole = False
+        comps = []
+        for m in cmds.ls(cmds.sets(sg, q=True) or [], long=True) or []:
+            node, _, comp = m.partition(".")
+            if node != full and node != tr:
+                continue
+            if comp:
+                comps.append(comp)
+            else:
+                whole = True
+        if whole:
+            out.append([sg, None])
+        elif comps:
+            out.append([sg, comps])
+    return out
+
+
+def _parse_sg_assignments(text):
+    """_mesh_sg_assignments を保存した文字列を戻す（旧形式＝SG 名だけ、にも対応）。"""
+    import json
+    text = (text or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+            return [[d[0], d[1]] for d in data if d and d[0]]
+        except Exception:
+            return []
+    return [[text, None]]
+
+
+def _restore_sg_assignments(mesh_shape, data):
+    """保存しておいた割り当てを戻す（全体の割り当てを先に、面ごとを後に）。"""
+    for sg, comps in data:
+        if comps is None and cmds.objExists(sg):
+            try:
+                cmds.sets(mesh_shape, e=True, forceElement=sg)
+            except Exception:
+                pass
+    for sg, comps in data:
+        if comps and cmds.objExists(sg):
+            try:
+                cmds.sets([mesh_shape + "." + c for c in comps], e=True, forceElement=sg)
+            except Exception:
+                pass
+
+
 def _set_line_only_mode(on):
     """v0.1.26: 全アウトライン対象メッシュを useBackground に差し替え（holdout）/ 復帰。
     ON: 現在の SG をメッシュ transform の `_toonPrevSG` attr に退避 → holdout SG を割当
     OFF: _toonPrevSG から元の SG を取り出して復帰（attr が無い/SG が無い場合はスキップ）"""
+    import json
     srcs = _source_mesh_transforms()
     if on:
         sg = _ensure_holdout_sg()
@@ -2888,15 +3034,16 @@ def _set_line_only_mode(on):
             shs = cmds.listRelatives(mesh_tr, shapes=True, type="mesh", ni=True, f=True) or []
             if not shs:
                 continue
-            cur = _current_mesh_sg(shs[0])
-            if cur and cur != sg:
+            cur = [a for a in _mesh_sg_assignments(shs[0]) if a[0] != sg]
+            # すでにホールドアウトだけ（ON を 2 回）のときは、覚えている元の割り当てを残す
+            if cur:
                 if not cmds.attributeQuery(MESH_PREV_SG_ATTR, node=mesh_tr, exists=True):
                     try:
                         cmds.addAttr(mesh_tr, ln=MESH_PREV_SG_ATTR, dt="string")
                     except Exception:
                         pass
                 try:
-                    cmds.setAttr(mesh_tr + "." + MESH_PREV_SG_ATTR, cur, type="string")
+                    cmds.setAttr(mesh_tr + "." + MESH_PREV_SG_ATTR, json.dumps(cur), type="string")
                 except Exception:
                     pass
             try:
@@ -2908,17 +3055,14 @@ def _set_line_only_mode(on):
             shs = cmds.listRelatives(mesh_tr, shapes=True, type="mesh", ni=True, f=True) or []
             if not shs:
                 continue
-            prev = None
+            prev = []
             if cmds.attributeQuery(MESH_PREV_SG_ATTR, node=mesh_tr, exists=True):
                 try:
-                    prev = cmds.getAttr(mesh_tr + "." + MESH_PREV_SG_ATTR) or None
+                    prev = _parse_sg_assignments(cmds.getAttr(mesh_tr + "." + MESH_PREV_SG_ATTR))
                 except Exception:
-                    prev = None
-            if prev and cmds.objExists(prev):
-                try:
-                    cmds.sets(shs[0], e=True, forceElement=prev)
-                except Exception:
-                    pass
+                    prev = []
+            if prev:
+                _restore_sg_assignments(shs[0], prev)
             # 復帰後は attr を消してよい（次回 ON 時に再記録）
             try:
                 if cmds.attributeQuery(MESH_PREV_SG_ATTR, node=mesh_tr, exists=True):
@@ -3688,20 +3832,20 @@ def _face_sg_map(shape, tform):
         total = 0
     if total == 0:
         return {}
-    short_shape = _short(shape)
-    short_tform = _short(tform)
+    # v0.1.52: フルパスで比べる（短い名前だと charA|box と charB|box の面を取り違える）
+    full_shape = (cmds.ls(shape, long=True) or [shape])[0]
+    full_tform = (cmds.ls(tform, long=True) or [tform])[0]
     face_sg = {}
     for sg in sgs:
         try:
-            flat = cmds.ls(cmds.sets(sg, q=True) or [], flatten=True) or []
+            flat = cmds.ls(cmds.sets(sg, q=True) or [], flatten=True, long=True) or []
         except Exception:
             flat = []
         for m in flat:
             if ".f[" not in m:
                 continue
             node_part = m.split(".f[")[0]
-            short_node = _short(node_part)
-            if short_node != short_shape and short_node != short_tform:
+            if node_part != full_shape and node_part != full_tform:
                 continue
             try:
                 fidx = int(m.split(".f[")[1].rstrip("]"))
@@ -3975,10 +4119,7 @@ def _update_gapfill_weights(b):
             wt = GAPFILL_TUCK              # 深い背面＝裏へ沈めて隠す
         w[i] = wt
     w = _smooth_vertex_values(dag, w, GAPFILL_SMOOTH_ITERS)
-    try:
-        cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *w)
-    except Exception:
-        pass
+    _write_deformer_weights(defm, w)
 
 
 def _line_weights(line):
@@ -4031,6 +4172,63 @@ def _line_weights(line):
     return weights
 
 
+def _write_deformer_weights(defm, weights):
+    """deformer の weightList[0].weights[0..n-1] へ一括で書き込む（v0.1.52）。
+    以前は cmds.setAttr に全頂点ぶんの値を渡していたが、4 万頂点で約 6〜8 秒かかり、
+    さらに scriptJob から呼ぶと Undo 履歴に積まれて「チャンネルボックスで曲率を変えて
+    Ctrl+Z 1 回」で戻らなかった。om2 で書くと速く（4 万頂点で 0.02 秒程度）Undo 履歴にも
+    積まれない。重みは曲率などの属性から毎回計算し直す値なので、属性を Undo すれば
+    scriptJob が走って重みも元に戻る。"""
+    n = len(weights)
+    if n == 0 or not defm:
+        return False
+    try:
+        sl = om2.MSelectionList()
+        sl.add(defm)
+        fn = om2.MFnDependencyNode(sl.getDependNode(0))
+        wp = fn.findPlug("weightList", False).elementByLogicalIndex(0).child(0)
+    except Exception:
+        return False
+    try:
+        h = wp.asMDataHandle()
+        ah = om2.MArrayDataHandle(h)
+        b = ah.builder()
+        for i in range(n):
+            b.addElement(i).setFloat(float(weights[i]))
+        ah.set(b)
+        wp.setMDataHandle(h)
+        try:
+            wp.destructHandle(h)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        pass
+    # 予備: 1 要素ずつ（こちらも Undo 履歴には積まれない。4 万頂点で 0.15 秒程度）
+    try:
+        for i in range(n):
+            wp.elementByLogicalIndex(i).setFloat(float(weights[i]))
+        return True
+    except Exception:
+        return False
+
+
+def _curv_sig(line):
+    """曲率の重みを決める値の組。scriptJob が同じ値で何度も呼ばれたとき再計算を省くのに使う
+    （UI の変更は直接計算したうえで属性ごとのジョブも走るため、省かないと 3〜4 回計算していた）。"""
+    ctrl = _ctrl_of(line)
+    if not ctrl:
+        return None
+    vals = []
+    for at in (CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER, CTRL_PROFILE):
+        try:
+            vals.append(cmds.getAttr(ctrl + "." + at))
+        except Exception:
+            vals.append(None)
+    vals.append(_mesh_vertex_count(line))
+    return tuple(vals)
+
+
 def _update_line_weights(line):
     """ライン種別に応じて曲率ウェイトの書き込み先を振り分ける（scriptJob のディスパッチャ）。"""
     if cmds.objExists(line) and cmds.attributeQuery(SCRN_TAG, node=line, exists=True):
@@ -4046,6 +4244,7 @@ def _update_curv_weights(line):
     defm = _line_deformer(line)
     if not defm:
         return
+    sig = _curv_sig(line)
     weights = _line_weights(line)
     n = len(weights)
     if n == 0:
@@ -4058,10 +4257,8 @@ def _update_curv_weights(line):
         occ = _occlusion_factors(line)
         if len(occ) == n:
             weights = [weights[i] * occ[i] for i in range(n)]
-    try:
-        cmds.setAttr(defm + ".weightList[0].weights[0:{}]".format(n - 1), *weights)
-    except Exception:
-        pass
+    if _write_deformer_weights(defm, weights):
+        _CURV_SIG[_ukey(line)] = sig
 
 
 def _init_scrn_color_set(shape):
@@ -4090,6 +4287,7 @@ def _update_scrn_curv_weights(line):
     if not shps:
         return
     shape = shps[0]
+    sig = _curv_sig(line)
     weights = _line_weights(line)
     n = len(weights)
     if n == 0:
@@ -4116,8 +4314,60 @@ def _update_scrn_curv_weights(line):
         verts.append(i)
     try:
         mfn.setVertexColors(cols, verts)
+        _CURV_SIG[_ukey(line)] = sig
     except Exception:
         pass
+
+
+_CURV_JOB_MARK = "_og_curv_job_cb"   # scriptJob 一覧でこのツールの曲率ジョブを見分ける関数名
+
+
+def _mobj_handle(node):
+    try:
+        sl = om2.MSelectionList()
+        sl.add(node)
+        return om2.MObjectHandle(sl.getDependNode(0))
+    except Exception:
+        return None
+
+
+def _curv_job_callback(line):
+    """曲率ジョブの呼び出し先。ラインは MObjectHandle で持ち、呼ばれた時点のパスを引く
+    （v0.1.52: 以前は作成時の名前を持っていたため、リネーム後は何もしなかった）。"""
+    handle = _mobj_handle(line)
+
+    def _og_curv_job_cb():
+        if handle is None or not handle.isValid():
+            return
+        try:
+            path = om2.MDagPath.getAPathTo(handle.object()).fullPathName()
+        except Exception:
+            return
+        sig = _curv_sig(path)
+        if sig is not None and _CURV_SIG.get(_ukey(path)) == sig:
+            return      # 同じ値で計算済み（UI からの直接計算・同じ変更で走る他の属性のジョブ）
+        _update_line_weights(path)
+    return _og_curv_job_cb
+
+
+def _kill_curv_jobs_everywhere():
+    """このツール（古い版のモジュールも含む）が張った曲率ジョブをすべて消す。
+    モジュールを読み込み直す・GitHub から更新すると、古いモジュールのジョブが残って
+    同じ変更で何度も計算していた（v0.1.52）。"""
+    killed = 0
+    try:
+        for j in cmds.scriptJob(listJobs=True) or []:
+            # v0.1.51 以前は _ensure_curv_jobs 内の lambda
+            if _CURV_JOB_MARK in j or "_ensure_curv_jobs" in j:
+                try:
+                    cmds.scriptJob(kill=int(j.split(":")[0]), force=True)
+                    killed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _CURV_JOBS.clear()
+    return killed
 
 
 def _ensure_curv_jobs(line):
@@ -4126,30 +4376,68 @@ def _ensure_curv_jobs(line):
     ctrl = _ctrl_of(line)
     if not ctrl:
         return
-    old = _CURV_JOBS.get(line)
+    key = _ukey(line)
+    ch = _mobj_handle(ctrl)
+    old = _CURV_JOBS.get(key)
     if old:
+        jobs, oh = old
+        # 同じ UUID でも別の実体（同じファイルを開き直した・リファレンスを読み直した）なら張り直す。
+        # 消えたノードのジョブは一覧に残り続けるので、exists だけでは判定できない。
         try:
-            if all(cmds.scriptJob(exists=j) for j in old):
+            same = (oh is not None and ch is not None and oh.isValid()
+                    and oh.hashCode() == ch.hashCode())
+            if same and all(cmds.scriptJob(exists=j) for j in jobs):
                 return
         except Exception:
             pass
-        for j in old:
-            try:
-                if cmds.scriptJob(exists=j):
-                    cmds.scriptJob(kill=j, force=True)
-            except Exception:
-                pass
+        _kill_job_ids(jobs)
+    cb = _curv_job_callback(line)
     jobs = []
-    for at in (CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER):
+    # プロファイル（文字列）も見る: 重みは Undo 履歴に積まないので、プロファイルの変更を
+    # Undo したときに重みを戻すのはこのジョブの役目（v0.1.52）
+    for at in (CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER, CTRL_PROFILE):
         if not cmds.attributeQuery(at, node=ctrl, exists=True):
             continue
         try:
-            jid = cmds.scriptJob(attributeChange=[ctrl + "." + at,
-                                                  lambda ln=line: _update_line_weights(ln)])
+            jid = cmds.scriptJob(attributeChange=[ctrl + "." + at, cb])
             jobs.append(jid)
         except Exception:
             pass
-    _CURV_JOBS[line] = jobs
+    _CURV_JOBS[key] = (jobs, ch)
+
+
+def _kill_job_ids(jobs):
+    for j in jobs or []:
+        try:
+            if cmds.scriptJob(exists=j):
+                cmds.scriptJob(kill=j, force=True)
+        except Exception:
+            pass
+
+
+def _prune_curv_jobs():
+    """もう無いライン（コントローラー）のジョブを片付ける。cmds.file(new=True) ではシーン切替の
+    イベントが届かず（Maya 2024 で確認）、前のシーンのジョブが残るため。
+    削除しても Undo で戻せる物（isAlive）は残す（消すと、削除を Undo したラインの曲率が効かなくなる）。"""
+    for key, val in list(_CURV_JOBS.items()):
+        jobs, h = val
+        if h is None or not h.isAlive():
+            _kill_job_ids(jobs)
+            _CURV_JOBS.pop(key, None)
+
+
+def _ensure_all_curv_jobs():
+    """シーン内の全ライン（フレネル以外）に曲率ジョブを張る。シーンを開いた直後や
+    モジュールを読み込み直した後に、ツールのウィンドウを開かなくても曲率のキーが効くように。"""
+    _prune_curv_jobs()
+    for t in cmds.ls(type="transform", long=True) or []:
+        try:
+            if (cmds.attributeQuery(TAG, node=t, exists=True)
+                    and not cmds.attributeQuery(FRES_TAG, node=t, exists=True)
+                    and _ctrl_of(t)):
+                _ensure_curv_jobs(t)
+        except Exception:
+            pass
 
 
 # v0.1.25: 種別ドットアイコン（カラー別にキャッシュ）
@@ -4418,6 +4706,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             w.setFocusPolicy(QtCore.Qt.StrongFocus)
         for w in self.findChildren(QtWidgets.QSlider):
             w.installEventFilter(self._no_wheel)
+        # v0.1.52: グループ選択のコンボもホイールで勝手に変わらないように（詳細設定ウィンドウと同じ）
+        for w in self.findChildren(QtWidgets.QComboBox):
+            w.installEventFilter(self._no_wheel)
+            w.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.refresh_tree()
         self._update_panels()      # 初期は選択無し → ライン/グループパネル非表示
         self._set_mult_widgets()
@@ -4428,11 +4720,26 @@ class ToonOutlineUI(QtWidgets.QDialog):
             self._time_job = None
 
     def closeEvent(self, event):
+        self._teardown()
+        # v0.1.39: importlib.reload 後は ToonOutlineUI シンボルが別クラスに差し
+        # 変わって古いインスタンスが super(ToonOutlineUI, self) を解決できず
+        # TypeError になる。QDialog へ直接呼んで回避。
+        QtWidgets.QDialog.closeEvent(self, event)
+
+    def reject(self):
+        # v0.1.52: Esc（QDialog の既定動作）は reject() でウィンドウを隠すだけで closeEvent が
+        # 呼ばれず、フレーム変更の監視などが残っていた。閉じるときと同じ後片付けをする。
+        self._teardown()
+        QtWidgets.QDialog.reject(self)
+
+    def _teardown(self):
+        """ウィンドウを閉じる/隠すときの後片付け（何度呼んでもよい）。"""
         try:
             if self._time_job and cmds.scriptJob(exists=self._time_job):
                 cmds.scriptJob(kill=self._time_job, force=True)
         except Exception:
             pass
+        self._time_job = None
         try:
             if self._occ_timer is not None:
                 self._occ_timer.stop()
@@ -4455,10 +4762,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 _line_options_win[0].close()
         except Exception:
             pass
-        # v0.1.39: importlib.reload 後は ToonOutlineUI シンボルが別クラスに差し
-        # 変わって古いインスタンスが super(ToonOutlineUI, self) を解決できず
-        # TypeError になる。QDialog へ直接呼んで回避。
-        QtWidgets.QDialog.closeEvent(self, event)
 
     # ========== UI 構築 ==========
     def _slider_spin_row(self, label, smin, smax, sval, dec, rmin, rmax, step, rval,
@@ -5112,7 +5415,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         単一ならメッシュ名で従来グループ、2 個なら 'a_b_outlines'、3+ なら 'a_b_etc_outlines'。"""
         if not sel:
             return None
-        shorts = [_short(o) for o in sel if o]
+        shorts = [_base(o) for o in sel if o]
         if len(shorts) <= 1:
             return None
         if len(shorts) == 2:
@@ -5769,6 +6072,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             _hidden_refresh_cache()
         except Exception:
             pass
+        try:
+            _prune_curv_jobs()      # v0.1.52: もう無い（Undo でも戻らない）ラインの曲率ジョブを片付ける
+        except Exception:
+            pass
         self._populating = True
         self.tree.clear()
         # v0.1.18: フレネル感度はシーン属性と一方向同期（起動/再取得で現在値を反映）
@@ -6132,29 +6439,29 @@ class ToonOutlineUI(QtWidgets.QDialog):
     def _on_cslider(self, v):
         val = v / 100.0
         self.cspin.blockSignals(True); self.cspin.setValue(val); self.cspin.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CURV)
 
     def _on_cspin(self, val):
         self.cslider.blockSignals(True); self.cslider.setValue(int(val * 100)); self.cslider.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CURV)
 
     def _on_cap_slider(self, v):
         val = v / 100.0
         self.cap_spin.blockSignals(True); self.cap_spin.setValue(val); self.cap_spin.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CAP)
 
     def _on_cap_spin(self, val):
         self.cap_slider.blockSignals(True); self.cap_slider.setValue(int(val * 100)); self.cap_slider.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CAP)
 
     def _on_cmin_slider(self, v):
         val = v / 100.0
         self.cmin_spin.blockSignals(True); self.cmin_spin.setValue(val); self.cmin_spin.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CMIN)
 
     def _on_cmin_spin(self, val):
         self.cmin_slider.blockSignals(True); self.cmin_slider.setValue(int(val * 100)); self.cmin_slider.blockSignals(False)
-        self._apply_curvature()
+        self._apply_curvature(CTRL_CMIN)
 
     def _set_curv_widgets(self, infl, cap=None, cmin=None):
         self.cslider.blockSignals(True); self.cspin.blockSignals(True)
@@ -6182,7 +6489,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             for line in lines:
                 ctrl = _ensure_line_anim(line, self.spin.value())
                 self._set_ctrl_attr(ctrl, CTRL_PROFILE, s, "太さプロファイル", as_string=True)
-                _update_curv_weights(line)
+                _update_line_weights(line)
         finally:
             cmds.undoInfo(closeChunk=True)
 
@@ -6190,25 +6497,29 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.ramp.set_points([[0.0, 1.0], [1.0, 1.0]])
         self._apply_profile()
 
-    def _apply_curvature(self):
+    def _apply_curvature(self, which=None):
+        """which = 動かした項目（CTRL_CURV / CTRL_CAP / CTRL_CMIN）。v0.1.52: 複数ラインを選んで
+        1 項目を動かしたとき、動かしていない項目まで UI の値で上書きしないよう、その項目だけ入れる
+        （None のときは 3 項目とも入れる）。"""
         lines = self._selected_lines()
         if not lines:
             return
-        influence = self.cspin.value()
-        cap = self.cap_spin.value()
-        cmin = self.cmin_spin.value()
+        vals = ((CTRL_CURV, self.cspin.value(), "曲率起伏"),
+                (CTRL_CAP, self.cap_spin.value(), "曲率上限"),
+                (CTRL_CMIN, self.cmin_spin.value(), "曲率下限"))
         chunk = not self._dragging   # ドラッグ中は _begin/_end_drag のチャンクに含める
         if chunk:
             cmds.undoInfo(openChunk=True)
         try:
             for line in lines:
                 # コントローラー属性 curvature / curvatureCap / curvatureMin を設定 → scriptJob
-                #   で頂点ウェイトが再計算されるが、即時反映のため明示的にも更新する。
+                #   で頂点ウェイトが再計算されるが、即時反映のため明示的にも更新する
+                #   （ジョブは同じ値なら計算を省く）。
                 ctrl = _ensure_line_anim(line, self.spin.value())
-                self._set_ctrl_attr(ctrl, CTRL_CURV, influence, "曲率起伏")
-                self._set_ctrl_attr(ctrl, CTRL_CAP, cap, "曲率上限")
-                self._set_ctrl_attr(ctrl, CTRL_CMIN, cmin, "曲率下限")
-                _update_curv_weights(line)
+                for at, v, label in vals:
+                    if which is None or at == which:
+                        self._set_ctrl_attr(ctrl, at, v, label)
+                _update_line_weights(line)
         finally:
             if chunk:
                 cmds.undoInfo(closeChunk=True)
@@ -6474,7 +6785,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not par:
             return False
         srcT = par[0]
-        b = cmds.duplicate(srcT, name=_short(srcT) + "_gapfill", rr=True)[0]
+        b = cmds.duplicate(srcT, name=_base(srcT) + "_gapfill", rr=True)[0]
+        _shapes_out_of_ns(b)
         for k in cmds.listRelatives(b, children=True, type="transform", f=True) or []:
             cmds.delete(k)
         bsh = cmds.listRelatives(b, shapes=True, type="mesh", ni=True, f=True)
@@ -6590,7 +6902,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
                 # 複製は元と同じ位置（同じ親・同じ TRS）に出る。トランスフォームは動かさない。
                 # → 元と同じ変換空間に留まるので原点に飛ばない。
-                dup = cmds.duplicate(obj, name=_short(obj) + "_outline", rr=True)[0]
+                # v0.1.52: リファレンスしたメッシュ（chr:head）でも線は名前空間の外に作る
+                dup = cmds.duplicate(obj, name=_base(obj) + "_outline", rr=True)[0]
+                _shapes_out_of_ns(dup)
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
@@ -6699,10 +7013,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     continue
                 src = shps[0]
                 # v0.1.31→v0.1.42: 複数選択時は batch_grp、単一は per-mesh
-                grp = batch_grp or self._ensure_mesh_group(_short(obj))
+                grp = batch_grp or self._ensure_mesh_group(_base(obj))
 
                 # 元と同じ位置に複製 → 履歴削除で静的化
-                dup = cmds.duplicate(obj, name=_short(obj) + "_fresnel", rr=True)[0]
+                dup = cmds.duplicate(obj, name=_base(obj) + "_fresnel", rr=True)[0]
+                _shapes_out_of_ns(dup)
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
@@ -6778,8 +7093,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 src = shps[0]
                 # v0.1.31: オブジェクトごとのトップグループに入れる
                 # v0.1.42: 複数選択時は batch_grp（共通）、単一は per-mesh グループ
-                grp = batch_grp or self._ensure_mesh_group(_short(obj))
-                dup = cmds.duplicate(obj, name=_short(obj) + "_screen", rr=True)[0]
+                grp = batch_grp or self._ensure_mesh_group(_base(obj))
+                dup = cmds.duplicate(obj, name=_base(obj) + "_screen", rr=True)[0]
+                _shapes_out_of_ns(dup)
                 for k in cmds.listRelatives(dup, children=True, type="transform", f=True) or []:
                     cmds.delete(k)
                 dshape = cmds.listRelatives(dup, shapes=True, type="mesh", ni=True, f=True)[0]
@@ -6903,7 +7219,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     continue
                 # polyToCurve は非分岐連続パスしか受け付けないので、
                 # 連結成分＋分岐で chain に分けて chain ごとにライン化する。
-                short = _short(obj)
                 indices = []
                 for ec in edges:
                     try:
@@ -6913,11 +7228,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 chains = _split_edges_into_chains(shps[0], indices)
                 any_made = False
                 # v0.1.31→v0.1.42: 複数選択時は batch_grp（共通）配下のクリースサブグループへ
-                mesh_grp = batch_grp or self._ensure_mesh_group(short)
+                mesh_grp = batch_grp or self._ensure_mesh_group(_base(obj))
                 crease_sub = self._ensure_sub_group(mesh_grp, CREASES_GROUP_NAME)
                 for chain in chains:
                     if not chain: continue
-                    comps = ["{}.e[{}]".format(short, i) for i in chain]
+                    # v0.1.52: フルパスで選ぶ（短い名前が同じメッシュが他にあると選択に失敗し、
+                    # 1 本も作られないまま何も言わずに終わっていた）
+                    comps = ["{}.e[{}]".format(obj, i) for i in chain]
                     cmds.select(comps, r=True)
                     try:
                         self.create_edge_line()
@@ -6979,7 +7296,6 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 if not edges:
                     skipped += 1
                     continue
-                short = _short(obj)
                 indices = []
                 for ec in edges:
                     try:
@@ -6988,11 +7304,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         pass
                 chains = _split_edges_into_chains(shps[0], indices)
                 any_made = False
-                mesh_grp = batch_grp or self._ensure_mesh_group(short)
+                mesh_grp = batch_grp or self._ensure_mesh_group(_base(obj))
                 mb_sub = self._ensure_sub_group(mesh_grp, MATBOUND_GROUP_NAME)
                 for chain in chains:
                     if not chain: continue
-                    comps = ["{}.e[{}]".format(short, i) for i in chain]
+                    comps = ["{}.e[{}]".format(obj, i) for i in chain]   # v0.1.52: フルパス
                     cmds.select(comps, r=True)
                     try:
                         self.create_edge_line()
@@ -7040,14 +7356,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
             # edges[0] = "pCube1.e[3]" → mesh transform name
             mesh_sh_path = edges[0].split(".")[0]
             # path may be short or full; get the mesh shape → parent transform short name
-            shp = cmds.ls(mesh_sh_path, type="transform") or cmds.ls(mesh_sh_path, type="mesh") or []
+            shp = (cmds.ls(mesh_sh_path, type="transform", long=True)
+                   or cmds.ls(mesh_sh_path, type="mesh", long=True) or [])
             if shp:
                 node = shp[0]
+                # v0.1.52: グループ名はパス・ネームスペースを外した名前で作る
+                # （'charA|box' や 'chr:box' のままだと名前として作れない/名前空間に入る）
                 if cmds.objectType(node) == "mesh":
-                    par = cmds.listRelatives(node, parent=True) or []
-                    if par: mesh_short = par[0]
+                    par = cmds.listRelatives(node, parent=True, f=True) or []
+                    if par: mesh_short = _base(par[0])
                 else:
-                    mesh_short = node
+                    mesh_short = _base(node)
         except Exception:
             mesh_short = None
         if mesh_short:
@@ -7404,7 +7723,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         cmds.setAttr(ctrl + "." + CTRL_PROFILE, "0:1,1:1", type="string")
                     except Exception:
                         pass
-                _update_curv_weights(line)
+                _update_line_weights(line)
             for g in groups:
                 gc = _ctrl_of(g)
                 if gc and cmds.attributeQuery(GMULT, node=gc, exists=True):
@@ -7491,10 +7810,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
             c = _ctrl_of(line)
             if c:
                 victims.add(c)
-                for s in ("_thkA", "_thkB", "_thkMaskBoost"):
+                # v0.1.52: _ensure_thickness_chain が作る乗算・条件ノードをすべて片付ける
+                # （以前は _thkA/_thkB/_thkMaskBoost だけで、スクリーン輪郭やエッジ線の
+                #   ノードが消すたびにシーンに残っていた）
+                for s in _CTRL_NODE_SUFFIXES:
                     n2 = _short(c) + s
                     if cmds.objExists(n2):
                         victims.add(n2)
+            # v0.1.52: スクリーン輪郭・フレネルの専用シェーダと SG も片付ける
+            shd = _fresnel_shader(line)
+            if shd:
+                victims.add(shd)
+                for sg in cmds.listConnections(shd, type="shadingEngine") or []:
+                    victims.add(sg)
             # 重なりマスク本体（別ホルダー）と膨らみ乗算ノードもラインと一緒に削除する
             m = _mask_of(line)
             if m:
@@ -8127,9 +8455,19 @@ def show_line_options(lines, owner=None):
 
 # ---- シーンを開き直したら隠れ線の紐づけを読み直す（ツールのウィンドウが閉じていても） ----
 def _on_scene_changed():
+    _clear_line_caches()
     try:
         _hidden_refresh_cache()
         _og_override_sync()
+    except Exception:
+        pass
+    # v0.1.52: ウィンドウを開かなくても、曲率のキー・チャンネルボックスの変更が効くように。
+    # もう無いラインのジョブだけ片付け、足りないジョブを張る（全部消して張り直すと、このイベントが
+    # 遅れて届いたとき＝Maya が忙しいと数秒遅れる、その間の変更で呼ばれるはずのジョブまで消える）。
+    # ※ om2 で書いた重み・頂点カラーはリファレンスしたラインでも保存されて開き直すと残る
+    #   （Maya 2024 で確認）ので、開いたときに計算し直す必要はない。
+    try:
+        _ensure_all_curv_jobs()
     except Exception:
         pass
     try:
@@ -8422,7 +8760,12 @@ def _run_update(sha_override=None, tag_label=""):
 
     ns = {"__name__": "install", "__file__": "<github>"}
     try:
-        exec(compile(source, _INSTALLER_FILE + " (from GitHub)", "exec"), ns)
+        try:
+            exec(compile(source, _INSTALLER_FILE + " (from GitHub)", "exec"), ns)
+        finally:
+            # v0.1.52: インストーラは exec の中で読み終えるので、ここで消す。残すと同じ Maya で
+            # もう一度「GitHub から更新」したとき、新しい版ではなく前回と同じ版を入れていた。
+            os.environ.pop("OG_TOONLINE_MANAGER_REF", None)
     except Exception as exc:
         traceback.print_exc()
         try:
@@ -9547,6 +9890,15 @@ def boot():
         return
     _ensure_scene_jobs()
     _on_scene_changed()
+
+
+# v0.1.52: モジュールを読み込み直したとき、古いモジュールが張った曲率ジョブを消して
+# このモジュールのジョブに張り替える（残すと同じ変更で古い方も計算し、回数が増えていく）。
+try:
+    if _kill_curv_jobs_everywhere():
+        _ensure_all_curv_jobs()
+except Exception:
+    pass
 
 
 if __name__ == "__main__":
