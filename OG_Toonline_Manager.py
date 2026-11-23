@@ -236,7 +236,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.44"
+__version__ = "0.1.45"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -548,9 +548,33 @@ def _scrn_set_intersect_on(line, enabled):
         pass
 
 
+def _scrn_line_visible(line):
+    """v0.1.44: SCRN ライン transform の visibility（親グループの可視も合わせる）。
+    どちらかの階層で 0 なら全体として非表示扱い。"""
+    try:
+        node = line
+        for _ in range(8):
+            if not node or not cmds.objExists(node):
+                return True
+            try:
+                if int(cmds.getAttr(node + ".visibility")) == 0:
+                    return False
+            except Exception:
+                pass
+            par = cmds.listRelatives(node, parent=True, f=True)
+            if not par:
+                return True
+            node = par[0]
+    except Exception:
+        pass
+    return True
+
+
 def _scrn_intersect_meshes():
-    """v0.1.41: 交差線対象の元メッシュ transform リスト（SCRN ラインで intersectOn=True のもの）。"""
-    lines = [ln for ln in _all_screen_lines() if _scrn_intersect_on(ln)]
+    """v0.1.41: 交差線対象の元メッシュ transform リスト（SCRN ラインで intersectOn=True のもの）。
+    v0.1.44: 非表示 SCRN ラインは対象から外す（UI で非表示にしたら交差線も出ないように）。"""
+    lines = [ln for ln in _all_screen_lines()
+             if _scrn_intersect_on(ln) and _scrn_line_visible(ln)]
     return _source_meshes_of(lines)
 
 
@@ -4823,6 +4847,24 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 cmds.setAttr(node + ".visibility", vis)
             except Exception:
                 cmds.warning("{} の表示属性を変更できません（接続/ロック）".format(_short(node)))
+            self._refresh_intersect_targets_if_on()
+
+    def _refresh_intersect_targets_if_on(self):
+        """v0.1.44: SCRN ラインの可視/intersectOn 変更時に交差線対象を再評価。
+        対象が空になれば UI トグルも OFF へ戻す。"""
+        try:
+            if not getattr(self, "chk_intersect", None) or not self.chk_intersect.isChecked():
+                return
+            tgt = _scrn_intersect_meshes()
+            if tgt:
+                _edge_set_targets(tgt)
+                try: cmds.refresh()
+                except Exception: pass
+            else:
+                # 全 SCRN が非表示 or intersectOn=False → 交差線自体 OFF
+                self.chk_intersect.setChecked(False)
+        except Exception:
+            pass
 
     # ---- 選択変更 → 太さUIを同期 ----
     def _update_panels(self):
@@ -6216,19 +6258,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 _scrn_set_intersect_on(ln, enabled)
         finally:
             cmds.undoInfo(closeChunk=True)
-        # 交差線が今 ON なら対象メッシュを更新（OFF なら何もしない）
-        try:
-            if self.chk_intersect.isChecked():
-                targets = _scrn_intersect_meshes()
-                if targets:
-                    _edge_set_targets(targets)
-                    try: cmds.refresh()
-                    except Exception: pass
-                else:
-                    # 全部 OFF になった → 交差線自体を OFF に
-                    self.chk_intersect.setChecked(False)
-        except Exception:
-            pass
+        self._refresh_intersect_targets_if_on()
         self.refresh_tree()
 
     def _set_group_lines_vis(self, group, show):
@@ -6241,6 +6271,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 except Exception: pass
         finally:
             cmds.undoInfo(closeChunk=True)
+        self._refresh_intersect_targets_if_on()
         self.refresh_tree()
 
     def _toggle_line_vis(self, line):
@@ -6251,6 +6282,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             cur = True
         try: cmds.setAttr(line + ".visibility", 0 if cur else 1)
         except Exception: pass
+        self._refresh_intersect_targets_if_on()
         self.refresh_tree()
 
     def _unify_group_color(self, group):
