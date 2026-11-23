@@ -235,7 +235,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.38"
+__version__ = "0.1.40"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -3165,6 +3165,62 @@ class _NoWheelFilter(QtCore.QObject):
         return False
 
 
+# v0.1.39: 折りたたみセクション（アコーディオン）。
+# UI_GUIDELINES §1「縦に長くなるのは構わない。ただし折りたためるセクションに分け、
+# よく使うものを上にする」に従い、全機能を 4 セクションに整理する元部品。
+# 見出しは ▼/▶ の三角 + タイトル。チェッカブルな QToolButton で開閉。
+_COLLAPSIBLE_CSS = (
+    "QToolButton#OG_Toonline_SectionHead {"
+    " text-align: left; padding: 6px 8px; margin: 0;"
+    " background: #333333; color: #e5c76b;"
+    " border: 1px solid #2a2a2a; border-radius: 3px;"
+    " font-weight: bold;"
+    "}"
+    "QToolButton#OG_Toonline_SectionHead:hover { background: #3a3a3a; }"
+    "QToolButton#OG_Toonline_SectionHead:checked { background: #3a3220; }"
+)
+
+
+class _CollapsibleBox(QtWidgets.QWidget):
+    """▼/▶ で開閉できる 1 セクション。中身は addLayout / addWidget で足す。"""
+    def __init__(self, title, parent=None, expanded=True):
+        super(_CollapsibleBox, self).__init__(parent)
+        self._head = QtWidgets.QToolButton()
+        self._head.setObjectName("OG_Toonline_SectionHead")
+        self._head.setCheckable(True)
+        self._head.setChecked(bool(expanded))
+        self._head.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self._head.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        self._head.setText(title)
+        self._head.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                 QtWidgets.QSizePolicy.Fixed)
+        self._head.clicked.connect(self._on_toggle)
+        self._head.setStyleSheet(_COLLAPSIBLE_CSS)
+        self._body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(self._body)
+        self._body_lay.setContentsMargins(6, 4, 2, 6)
+        self._body_lay.setSpacing(4)
+        self._body.setVisible(bool(expanded))
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._head)
+        outer.addWidget(self._body)
+
+    def _on_toggle(self, checked):
+        self._body.setVisible(bool(checked))
+        self._head.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+
+    def add_layout(self, lay):
+        self._body_lay.addLayout(lay)
+
+    def add_widget(self, w):
+        self._body_lay.addWidget(w)
+
+    def body_layout(self):
+        return self._body_lay
+
+
 class _RampWidget(QtWidgets.QWidget):
     """長手方向の太さプロファイルを編集するカーブ（ランプ）ウィジェット。
     左クリック=点の追加/ドラッグ、右クリック=点の削除。y は太さ倍率(0〜2、基準1)。"""
@@ -3321,9 +3377,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             pass
         self.setMinimumWidth(340)   # v0.1.30: UI_GUIDELINES §1 - ドッキング幅 ~330px
-        # 最小でもリスト(min120)＋固定パネル(200)＋下部コントロールが収まる高さ。
-        # リストが余白を吸収するので下に余分な余白は出ない。
-        self.setMinimumHeight(820)   # v0.1.29: 下部プロファイルが見える高さを確保
+        # v0.1.39: アコーディオン + QScrollArea 化。縮めてもセクション見出しと
+        # ヘッダー＋全体倍率さえ見えれば可（中身はスクロール）。
+        self.setMinimumHeight(360)
         self._color = [0.0, 0.0, 0.0]
         self._populating = False       # ツリー再構築中のシグナル抑止フラグ
         self._dragging = False         # スライダードラッグ中（undoチャンク制御）
@@ -3370,7 +3426,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             _edge_disable()          # 画像空間エッジ検出のオーバーライドを後始末
         except Exception:
             pass
-        super(ToonOutlineUI, self).closeEvent(event)
+        # v0.1.39: importlib.reload 後は ToonOutlineUI シンボルが別クラスに差し
+        # 変わって古いインスタンスが super(ToonOutlineUI, self) を解決できず
+        # TypeError になる。QDialog へ直接呼んで回避。
+        QtWidgets.QDialog.closeEvent(self, event)
 
     # ========== UI 構築 ==========
     def _slider_spin_row(self, label, smin, smax, sval, dec, rmin, rmax, step, rval,
@@ -3403,7 +3462,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return row, sld, spn
 
     def _build(self):
-        lay = QtWidgets.QVBoxLayout(self)
+        # v0.1.39: 4 セクションのアコーディオン化。
+        #   固定上部: ヘッダー + 全体倍率
+        #   QScrollArea 内: ▼作る / ▶風合い・特殊 / ▼調整 / ▶カラー・管理
+        # ウィンドウを縮めても潰れず、下にスクロールする。
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(4)
 
         # v0.1.21: ヘッダー: 左にタイトル+バージョン小、右に ⋮ メニュー（SIMFLOW 風）。
         hrow = QtWidgets.QHBoxLayout()
@@ -3436,9 +3501,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
         act_about.triggered.connect(self._show_about)
         self.btn_menu.setMenu(menu)
         hrow.addWidget(self.btn_menu)
-        lay.addLayout(hrow)
+        outer.addLayout(hrow)
 
-        # 全体倍率（常に最上部）
+        # 全体倍率（常に最上部・スクロール外）。全ライン太さの大元なのでいつでも触れる位置に。
         self.w_global = QtWidgets.QWidget()
         gl = QtWidgets.QVBoxLayout(self.w_global); gl.setContentsMargins(0, 0, 0, 0)
         arow, self.gslider, self.gspin = self._slider_spin_row(
@@ -3451,7 +3516,20 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_gsel.clicked.connect(self._select_global_ctrl)
         arow.addWidget(b_gsel)
         gl.addLayout(arow)
-        lay.addWidget(self.w_global)
+        outer.addWidget(self.w_global)
+
+        # ---- スクロール可能な本体。4 セクションのアコーディオン ----
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        body = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        # ================ セクション 1: 作る ================
+        sec_make = _CollapsibleBox("作る", expanded=True)
 
         # 生成 / 新規グループ / 再取得（上部）
         # ★v0.1.10: UI 整理。SCRN(スクリーン輪郭)をメインに据え、hull/エッジ/GAPFILL は
@@ -3466,7 +3544,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.btn_create.clicked.connect(self.create_screen_outline)
         self.btn_create.setStyleSheet(_PRIMARY_BTN_CSS)
         crow.addWidget(self.btn_create, 1)
-        lay.addLayout(crow)
+        sec_make.add_layout(crow)
         # v0.1.30: 補助ボタンは 2 段目に（UI_GUIDELINES §1 - 1 行は 2〜3 項目まで）。
         crow2 = QtWidgets.QHBoxLayout()
         b_edge = QtWidgets.QPushButton("選んだエッジに線")
@@ -3483,19 +3561,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_ref.setToolTip("ツリーの内容をシーンから再読み込みする。")
         b_ref.clicked.connect(self.refresh_tree)
         crow2.addWidget(b_ref)
-        lay.addLayout(crow2)
-
-        # v0.1.35: 選択からレンダーレイヤー作成
-        crow3 = QtWidgets.QHBoxLayout()
-        self.btn_render_layer = QtWidgets.QPushButton("選択からレンダーレイヤー")
-        self.btn_render_layer.setToolTip(
-            "ツリーで選んだライン（グループを選ぶと配下の全ライン）だけが見える\n"
-            "Render Setup レイヤーを作る。元メッシュは useBackground で透明化し\n"
-            "線は Outline グループから include。Hardware 2.0 プレイブラスト用。\n"
-            "作成時にレイヤー名を入力。既存名と被れば自動連番。")
-        self.btn_render_layer.clicked.connect(self.create_render_layer_from_selection)
-        crow3.addWidget(self.btn_render_layer)
-        lay.addLayout(crow3)
+        sec_make.add_layout(crow2)
 
         # v0.1.38: マテリアル境界ライン（面ごとの SG 違いを検出 → チューブ化）
         crow4 = QtWidgets.QHBoxLayout()
@@ -3508,20 +3574,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "・ライン本体は既存のエッジラインと同じ機能（太さ/曲率/プロファイル）")
         self.btn_matbound.clicked.connect(self.create_material_boundary_lines)
         crow4.addWidget(self.btn_matbound)
-        lay.addLayout(crow4)
+        sec_make.add_layout(crow4)
 
-        # v0.1.25: タイトルは短く、構造だけで「新規」「ライブ」を分離。
-        # ---- 新規作成時のオプション ----
-        gb_gen = QtWidgets.QGroupBox("新規作成")
-        gb_gen.setObjectName("OG_Toonline_GenBox")
-        gb_gen.setMinimumHeight(80)   # v0.1.28: ランプ撤去で checkbox 2 行のみ
-        glay = QtWidgets.QVBoxLayout(gb_gen)
-        glay.setContentsMargins(8, 10, 8, 6); glay.setSpacing(4)
+        # v0.1.39: 旧 QGroupBox「新規作成」の中身はセクション「作る」直下へ。
+        # 区切り線で "生成" と "新規作成オプション" の境を見せる。
+        _sep1 = QtWidgets.QFrame()
+        _sep1.setFrameShape(QtWidgets.QFrame.HLine)
+        _sep1.setStyleSheet("color:#4a4a4a;")
+        sec_make.add_widget(_sep1)
 
         # フレネル生成チェック
         self.chk_scrn_fresnel = QtWidgets.QCheckBox("谷の線も出す（フレネル・滑らかな凹み用）")
         self.chk_scrn_fresnel.setChecked(False)   # v0.1.30: 既定 OFF（必要なときだけ）
-        glay.addWidget(self.chk_scrn_fresnel)
+        sec_make.add_widget(self.chk_scrn_fresnel)
 
         # ---- クリース関連（QFrame ネスト撤去して layout を直に）----
         crease_row = QtWidgets.QHBoxLayout()
@@ -3538,7 +3603,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_crease_angle.setFixedWidth(70)
         crease_row.addWidget(self.spn_crease_angle)
         crease_row.addStretch(1)
-        glay.addLayout(crease_row)
+        sec_make.add_layout(crease_row)
 
         # v0.1.28: 生成時設定は最小限に。作成後に下のパネルで調整が自然な workflow。
         # クリース生成テンプレのランプは撤去（下の「太さプロファイル」パネルで複数選択→
@@ -3548,13 +3613,25 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.chk_scrn_crease.toggled.connect(_crease_enabled)
         _crease_enabled(self.chk_scrn_crease.isChecked())
 
-        lay.addWidget(gb_gen)
+        # 新しく作る線の入れ先グループ（複数グループがある時のみ意味がある）
+        gcrow = QtWidgets.QHBoxLayout()
+        gcrow.addWidget(QtWidgets.QLabel("新しい線の入れ先"))
+        self.group_combo = QtWidgets.QComboBox()
+        self.group_combo.setMinimumWidth(110)
+        self.group_combo.setToolTip(
+            "次に作る線をどのグループに入れるかを選ぶ。\n"
+            "グループが 1 つだけならいじらなくてよい（既定で OK）。\n"
+            "※ クリース線は常に専用の『クリース』グループに入ります。")
+        self.group_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.group_combo.setMinimumContentsLength(6)
+        gcrow.addWidget(self.group_combo, 1)
+        sec_make.add_layout(gcrow)
 
-        # ---- 作成済みラインに常時反映される設定 ----
-        gb_live = QtWidgets.QGroupBox("ライブ調整")
-        gb_live.setObjectName("OG_Toonline_LiveBox")
-        llay = QtWidgets.QVBoxLayout(gb_live)
-        llay.setContentsMargins(8, 10, 8, 6); llay.setSpacing(4)
+        lay.addWidget(sec_make)
+
+        # ================ セクション 2: 風合い・特殊 ================
+        sec_feel = _CollapsibleBox("風合い・特殊", expanded=False)
 
         # フレネル感度（既存全フレネル線に live で乗算）
         fs_row = QtWidgets.QHBoxLayout()
@@ -3573,7 +3650,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_fres_sens.valueChanged.connect(self._on_fres_sens)
         fs_row.addWidget(self.spn_fres_sens)
         fs_row.addStretch(1)
-        llay.addLayout(fs_row)
+        sec_feel.add_layout(fs_row)
 
         # 重なり線の強さ（元 SCRN の depthBias）
         srow = QtWidgets.QHBoxLayout()
@@ -3589,7 +3666,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_scrn_bias.valueChanged.connect(self._on_scrn_bias)
         srow.addWidget(self.spn_scrn_bias)
         srow.addStretch(1)
-        llay.addLayout(srow)
+        sec_feel.add_layout(srow)
 
         # ブラシ質感
         brow = QtWidgets.QHBoxLayout()
@@ -3620,7 +3697,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_brush_scale.valueChanged.connect(self._on_brush_changed)
         brow.addWidget(self.spn_brush_scale)
         brow.addStretch(1)
-        llay.addLayout(brow)
+        sec_feel.add_layout(brow)
 
         # v0.1.33: チラつき抑制（時間的安定性）
         stab_row = QtWidgets.QHBoxLayout()
@@ -3639,7 +3716,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             lambda v: _scrn_set_stability(v))
         stab_row.addWidget(self.spn_stability)
         stab_row.addStretch(1)
-        llay.addLayout(stab_row)
+        sec_feel.add_layout(stab_row)
 
         # v0.1.32: 遠景で細くする（距離減衰・SCRN のみ）
         dist_row = QtWidgets.QHBoxLayout()
@@ -3657,7 +3734,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_dist_atten.valueChanged.connect(self._on_dist_atten_changed)
         dist_row.addWidget(self.spn_dist_atten)
         dist_row.addStretch(1)
-        llay.addLayout(dist_row)
+        sec_feel.add_layout(dist_row)
 
         # v0.1.36: 交差線（他オブジェクトとの重なりに線）
         ix_row = QtWidgets.QHBoxLayout()
@@ -3685,7 +3762,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_intersect_thr.valueChanged.connect(
             lambda v: _edge_set_params(intersect_threshold=float(v)))
         ix_row.addWidget(self.spn_intersect_thr)
-        llay.addLayout(ix_row)
+        sec_feel.add_layout(ix_row)
 
         # v0.1.38: 隠れ線を破線で表示（SCRN シルエットの裏側を dashed で見せる・DX11 のみ）
         hd_row = QtWidgets.QHBoxLayout()
@@ -3709,7 +3786,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self.spn_hidden_dash.valueChanged.connect(
             lambda v: _scrn_set_hidden(dash_len=float(v)))
         hd_row.addWidget(self.spn_hidden_dash)
-        llay.addLayout(hd_row)
+        sec_feel.add_layout(hd_row)
 
         # v0.1.26: ライン単体表示モード（メッシュを useBackground で透明に・奥側線を隠蔽）
         self.chk_line_only = QtWidgets.QCheckBox(
@@ -3721,24 +3798,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             "正しく隠蔽される（メッシュを単純に非表示にすると奥側まで見えてしまう）。\n"
             "OFF: 元のシェーダに復帰。")
         self.chk_line_only.toggled.connect(self._on_toggle_line_only)
-        llay.addWidget(self.chk_line_only)
+        sec_feel.add_widget(self.chk_line_only)
 
-        lay.addWidget(gb_live)
+        lay.addWidget(sec_feel)
 
-        # v0.1.30: 新しく作る線の入れ先グループ（複数グループがある時のみ意味がある）
-        gcrow = QtWidgets.QHBoxLayout()
-        gcrow.addWidget(QtWidgets.QLabel("新しい線の入れ先"))
-        self.group_combo = QtWidgets.QComboBox()
-        self.group_combo.setMinimumWidth(110)
-        self.group_combo.setToolTip(
-            "次に作る線をどのグループに入れるかを選ぶ。\n"
-            "グループが 1 つだけならいじらなくてよい（既定で OK）。\n"
-            "※ クリース線は常に専用の『クリース』グループに入ります。")
-        self.group_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.group_combo.setMinimumContentsLength(6)
-        gcrow.addWidget(self.group_combo, 1)
-        lay.addLayout(gcrow)
+        # ================ セクション 3: 調整 ================
+        sec_adjust = _CollapsibleBox("調整", expanded=True)
 
         # ライン／グループ ツリー（チェック=表示、色列=個別カラー、D&Dでグループ移動）
         self.tree = _OutlineTree(self)
@@ -3758,13 +3823,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # v0.1.25: 右クリックメニュー
         self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
-        # リストは余白(ウィンドウの伸縮分)を吸収して広がる。スライダーパネル側を
-        # 固定高さにすることで、選択でパネルが切り替わってもリストの大きさは一定。
-        self.tree.setMinimumHeight(120)
-        lay.addWidget(self.tree, 1)
-        self.lbl_dd = QtWidgets.QLabel("※ ラインをグループへドラッグ&ドロップで移動。ダブルクリックで名前変更")
+        # v0.1.39: スクロール内にツリー。最小高さはそこそこ確保（200px）、
+        # スクロール内で自然にサイズされ、ウィンドウを縮めれば本体ごとスクロール。
+        self.tree.setMinimumHeight(200)
+        sec_adjust.add_widget(self.tree)
+        self.lbl_dd = QtWidgets.QLabel("※ グループへ D&D で移動。ダブルクリックで名前変更")
         self.lbl_dd.setStyleSheet("color:#888;")
-        lay.addWidget(self.lbl_dd)
+        sec_adjust.add_widget(self.lbl_dd)
 
         # ライン用パネル（ライン選択時のみ表示）: 太さ / 曲率起伏 / 曲率上限
         self.w_line = QtWidgets.QWidget()
@@ -3817,27 +3882,31 @@ class ToonOutlineUI(QtWidgets.QDialog):
             on_key=self._key_grpmult, tip="選択グループの太さ倍率")
         gvl.addLayout(grow)
 
-        # ライン用/グループ用パネルを固定高さの領域に収める。どちらを表示しても
-        # 領域の高さは一定なので、リスト(上)の大きさが選択で変化しない。
+        # v0.1.39: ライン用/グループ用パネルは選択に応じて片方だけが可視になる。
+        # 固定高さを撤廃し、中身のサイズに応じて自然に伸縮する（ライン時 ≈ 230px、
+        # グループ時 ≈ 40px、未選択時 ≈ 0px）。
         self.w_panels = QtWidgets.QWidget()
         pvl = QtWidgets.QVBoxLayout(self.w_panels); pvl.setContentsMargins(0, 0, 0, 0)
         pvl.setSpacing(0)
         pvl.addWidget(self.w_line)
         pvl.addWidget(self.w_group)
-        pvl.addStretch(1)
-        self.w_panels.setFixedHeight(340)   # v0.1.29: プロファイルランプ(90)含めて収まる高さ
-        lay.addWidget(self.w_panels)
+        sec_adjust.add_widget(self.w_panels)
 
         self.lbl_hint = QtWidgets.QLabel("※ 値はツリーで選択したライン/グループに適用されます")
         self.lbl_hint.setStyleSheet("color:#888;")
-        lay.addWidget(self.lbl_hint)
+        sec_adjust.add_widget(self.lbl_hint)
 
-        # 選択物のすべての値を初期値に戻す（実行前に確認ダイアログ）
+        # 選択物のすべての値を初期値に戻す（実行前に確認ダイアログ）→ 調整の末尾にそのまま置く
         self.btn_reset_all = QtWidgets.QPushButton("選択をすべてリセット")
         self.btn_reset_all.setToolTip("選択したライン/グループの全パラメータを初期値に戻します（確認あり）")
         self.btn_reset_all.clicked.connect(self.reset_selected)
         self.btn_reset_all.setStyleSheet(_PRIMARY_BTN_CSS)
-        lay.addWidget(self.btn_reset_all)
+        sec_adjust.add_widget(self.btn_reset_all)
+
+        lay.addWidget(sec_adjust)
+
+        # ================ セクション 4: カラー・管理 ================
+        sec_admin = _CollapsibleBox("カラー・管理", expanded=False)
 
         # カラー
         clrow = QtWidgets.QHBoxLayout()
@@ -3854,7 +3923,17 @@ class ToonOutlineUI(QtWidgets.QDialog):
         b_scol.clicked.connect(self.reset_to_shared_color)
         clrow.addWidget(b_icol)
         clrow.addWidget(b_scol)
-        lay.addLayout(clrow)
+        sec_admin.add_layout(clrow)
+
+        # v0.1.35: 選択からレンダーレイヤー作成 (管理系なのでここに移動)
+        self.btn_render_layer = QtWidgets.QPushButton("選択からレンダーレイヤー")
+        self.btn_render_layer.setToolTip(
+            "ツリーで選んだライン（グループを選ぶと配下の全ライン）だけが見える\n"
+            "Render Setup レイヤーを作る。元メッシュは useBackground で透明化し\n"
+            "線は Outline グループから include。Hardware 2.0 プレイブラスト用。\n"
+            "作成時にレイヤー名を入力。既存名と被れば自動連番。")
+        self.btn_render_layer.clicked.connect(self.create_render_layer_from_selection)
+        sec_admin.add_widget(self.btn_render_layer)
 
         # ★v0.1.10 以降 UI 整理: hull/GAPFILL/画像空間エッジ関連のオプション群は
         #  ToonOutlineUI から非表示(コード・関数自体は残置、_edge_*/_on_toggle_edge/
@@ -3880,7 +3959,13 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
         self.lbl_del = QtWidgets.QLabel("※ ライン/グループの削除は Delete キー")
         self.lbl_del.setStyleSheet("color:#888;")
-        lay.addWidget(self.lbl_del)
+        sec_admin.add_widget(self.lbl_del)
+
+        lay.addWidget(sec_admin)
+        lay.addStretch(1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
         # v0.1.21: フッターのバージョン表示/選択ボタンは ⋮ ヘッダーメニューへ移動済み。
 
@@ -6631,6 +6716,7 @@ _EDGE_FX = """// OG Toonline Manager - object-scoped screen-space depth-edge out
 Texture2D gColorTex;      // 全シーンの色
 Texture2D gDepthTex;      // 対象メッシュだけを描いた深度（対象なしなら 1.0=遠クリア）
 Texture2D gDepthOtherTex; // 対象を除いた他メッシュだけの深度（対象を含まない部分）
+Texture2D gDepthSceneTex; // v0.1.40: 全シーン深度（occlusion マスク用）
 
 SamplerState gSamp { Filter = MIN_MAG_MIP_POINT; AddressU = Clamp; AddressV = Clamp; };
 
@@ -6728,15 +6814,23 @@ float4 PS(VOUT i) : SV_Target
 
     float3 scene = gColorTex.Sample(gSamp, i.UV).rgb;
 
+    // v0.1.40: occlusion マスク。target が「実際に画面に見えてる」ピクセルだけ線を描く。
+    // tDepth(target) と tDepthScene(全シーン) が一致 = target が最前面 = 見えてる。
+    // 一致しない = target は他メッシュに隠されてる → そのピクセルに線を描かない
+    // （以前は target_depth を根拠に、手前の別メッシュの上に線が出るバグがあった）。
+    float zs = gDepthSceneTex.Sample(gSamp, i.UV).r;
+    float visible = (zc < 0.9999f && abs(zc - zs) < 0.001f) ? 1.0f : 0.0f;
+
     // 既存のシルエット/自己段差エッジ
-    float mask = (zc >= 0.9999f) ? 0.0f : 1.0f;
+    float mask = visible;
     float hi = gThreshold * 1.15f;
     float e  = mask * smoothstep(gThreshold, hi, rel);
 
     // v0.1.36: 交差線モードを合成（既存エッジより優先して表示）
+    // v0.1.40: こちらも visible マスクで「見えてる target 上」だけに制限。
     if (gIntersectMode != 0)
     {
-        float ei = intersectEdge(i.UV, t);
+        float ei = intersectEdge(i.UV, t) * visible;
         e = max(e, ei);
     }
     return float4(lerp(scene, gLineColor, e), 1.0f);
@@ -6757,6 +6851,8 @@ uniform texture2D gDepthTex;
 uniform sampler2D gDepthSamp = sampler_state { texture = <gDepthTex>; };
 uniform texture2D gDepthOtherTex;
 uniform sampler2D gDepthOtherSamp = sampler_state { texture = <gDepthOtherTex>; };
+uniform texture2D gDepthSceneTex;
+uniform sampler2D gDepthSceneSamp = sampler_state { texture = <gDepthSceneTex>; };
 
 uniform vec2 gTexel;
 uniform float gThreshold;
@@ -6849,12 +6945,17 @@ GLSLShader PS {
         }
 
         vec3 scene = texture2D(gColorSamp, VSUV).rgb;
-        float mask = (zc >= 0.9999) ? 0.0 : 1.0;
+
+        // v0.1.40: occlusion マスク（HLSL 版と同じ）
+        float zs = texture2D(gDepthSceneSamp, VSUV).r;
+        float visible = (zc < 0.9999 && abs(zc - zs) < 0.001) ? 1.0 : 0.0;
+
+        float mask = visible;
         float hi = gThreshold * 1.15;
         float e = mask * smoothstep(gThreshold, hi, rel);
 
         if (gIntersectMode != 0) {
-            float ei = intersectEdge(VSUV, t);
+            float ei = intersectEdge(VSUV, t) * visible;
             e = max(e, ei);
         }
 
@@ -7115,6 +7216,7 @@ def _edge_enable():
                         s.setParameter("gColorTex", self.ovr.tColor)
                         s.setParameter("gDepthTex", self.ovr.tDepth)
                         s.setParameter("gDepthOtherTex", self.ovr.tDepthOther)
+                        s.setParameter("gDepthSceneTex", self.ovr.tDepthScene)
                         w = max(1, self.ovr.w); h = max(1, self.ovr.h)
                         th = max(0.0, _EDGE_PARAMS["thickness"])
                         s.setParameter("gTexel", (th / float(w), th / float(h)))
