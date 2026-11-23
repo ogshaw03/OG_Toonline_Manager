@@ -236,7 +236,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.43"
+__version__ = "0.1.44"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -6935,19 +6935,20 @@ float4 PS(VOUT i) : SV_Target
     float zs = gDepthSceneTex.Sample(gSamp, i.UV).r;
     float visible = (zc < 0.9999f && abs(zc - zs) < 0.001f) ? 1.0f : 0.0f;
 
-    // 既存のシルエット/自己段差エッジ
-    float mask = visible;
-    float hi = gThreshold * 1.15f;
-    float e  = mask * smoothstep(gThreshold, hi, rel);
-
-    // v0.1.36: 交差線モードを合成（既存エッジより優先して表示）
-    // v0.1.42: 交差線は intersectEdge 自身が「scene 最前面の target/other 両サイドが隣接」で
-    // 可視性を判定するので、ここでは visible マスクを掛けない（掛けると、other 側の最前面
-    // ピクセルで交差線が消えてしまう）。
+    // v0.1.44: 交差線モードは intersect 線「だけ」を描く。
+    // （以前は self-silhouette と合成していたため、交差線 ON にすると cup 自身の
+    // 円筒 tangential silhouette が余計に overlay されて「cup 中に縦線がある」ように
+    // 見えていた。）
+    float e;
     if (gIntersectMode != 0)
     {
-        float ei = intersectEdge(i.UV, t);
-        e = max(e, ei);
+        e = intersectEdge(i.UV, t);
+    }
+    else
+    {
+        float mask = visible;
+        float hi = gThreshold * 1.15f;
+        e = mask * smoothstep(gThreshold, hi, rel);
     }
     return float4(lerp(scene, gLineColor, e), 1.0f);
 }
@@ -7079,14 +7080,14 @@ GLSLShader PS {
         float zs = texture2D(gDepthSceneSamp, VSUV).r;
         float visible = (zc < 0.9999 && abs(zc - zs) < 0.001) ? 1.0 : 0.0;
 
-        float mask = visible;
-        float hi = gThreshold * 1.15;
-        float e = mask * smoothstep(gThreshold, hi, rel);
-
+        // v0.1.44: 交差線モード時は intersect だけ描く（self-silhouette と合成しない）
+        float e;
         if (gIntersectMode != 0) {
-            // v0.1.42: intersectEdge 内部で可視性を判定するので visible マスクは掛けない
-            float ei = intersectEdge(VSUV, t);
-            e = max(e, ei);
+            e = intersectEdge(VSUV, t);
+        } else {
+            float mask = visible;
+            float hi = gThreshold * 1.15;
+            e = mask * smoothstep(gThreshold, hi, rel);
         }
 
         colorOut = vec4(mix(scene, gLineColor, e), 1.0);
