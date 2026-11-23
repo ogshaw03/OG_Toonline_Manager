@@ -122,6 +122,20 @@ _SCRN_HIDDEN_DASH_DEF = 10.0
 _SCRN_HIDDEN_FILL_DEF = 0.55
 _SCRN_HIDDEN_ALPHA_DEF = 0.6
 SCRN_INTERSECT_ON = "toonIntersectOn"  # v0.1.41 SCRN ライン個別の「交差線に含める」フラグ(bool, 既定 True)
+# v0.1.46: ライン詳細設定。見え方の属性はライン transform に持たせ、Render Setup の
+# 絶対オーバーライドでレイヤーごとに上書きする（マスター=ビューポート、各レイヤー=書き出し）。
+SCRN_SHOW_VIS = "showVisible"          # SCRN シェーダ: 表側の線を描くか（int 0/1）
+LN_SHOW_VIS   = "toonShowVisible"      # 表側の線を描く → shd.showVisible へ接続
+LN_COLOR      = "toonLineColor"        # 線の色 → shd.lineColor へ接続
+LN_HID_MODE   = "toonHiddenMode"       # 隠れ線 0=出さない 1=破線 2=実線
+LN_HID_SAME   = "toonHiddenColorSame"  # 隠れ線の色を線の色と同じにする
+LN_HID_COLOR  = "toonHiddenColor"      # 隠れ線の色（LN_HID_SAME=0 のとき）
+LN_HID_ALPHA  = "toonHiddenAlpha"      # 隠れ線の濃さ 0-1
+LN_HID_DASH   = "toonHiddenDashLen"    # 破線 1 周期の長さ（画面 px）
+LN_HID_FILL   = "toonHiddenDashFill"   # 破線の塗り割合 0-1
+LN_OCCLUDERS  = "toonHiddenOccluders"  # 隠れ線を透かす物（message multi ← 物.message）。全レイヤー共通
+ROOT_HIDDEN_ON = "toonHiddenOn"        # シーン全体で隠れ線を描くか（ROOT の属性、既定 ON）
+HIDDEN_DEPTH_TOL = 0.002               # 隠れ線の前後判定に使う相対深度の許容差
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -236,7 +250,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.45"
+__version__ = "0.1.46"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -610,6 +624,323 @@ def _scrn_intersect_screen_thickness():
     return max(1.0, best * SCRN_SCALE)
 
 
+# --------------------------------------------------------------------------- #
+# v0.1.46 ライン詳細設定: ラインごとの見え方（レンダーレイヤーで上書き可）と隠れ線の紐づけ
+#   ・見え方の属性はライン transform に置く（LN_*）。線色/表側表示はシェーダへ接続。
+#   ・マスター（ビューポート）の値＝属性値。各レンダーレイヤーでは Render Setup の
+#     絶対オーバーライドで上書きする（プレイブラストはレイヤーを切り替えて行う運用）。
+#   ・隠れ線は「紐づけた物」の裏に回った所だけ描く（紐づけ無し＝描かない）。
+# --------------------------------------------------------------------------- #
+def _attr_exists(node, attr):
+    try:
+        return bool(node) and cmds.objExists(node) and cmds.attributeQuery(attr, node=node, exists=True)
+    except Exception:
+        return False
+
+
+def _plug_source(plug):
+    """plug に入力接続があればその接続元 plug、無ければ None。"""
+    try:
+        c = cmds.listConnections(plug, s=True, d=False, p=True) or []
+        return c[0] if c else None
+    except Exception:
+        return None
+
+
+def _add_color_attr(node, ln, rgb):
+    cmds.addAttr(node, ln=ln, at="float3", usedAsColor=True)
+    for ch in ("R", "G", "B"):
+        cmds.addAttr(node, ln=ln + ch, at="float", parent=ln)
+    cmds.setAttr(node + "." + ln, rgb[0], rgb[1], rgb[2], type="float3")
+
+
+def _ensure_line_render_attrs(line):
+    """SCRN ラインに見え方属性を用意し、線色/表側表示をシェーダへ接続する（冪等）。"""
+    if not _attr_exists(line, SCRN_TAG):
+        return False
+    shd = _fresnel_shader(line)
+    cur = [0.0, 0.0, 0.0]
+    if shd and _attr_exists(shd, FRES_COLOR):
+        try:
+            v = cmds.getAttr(shd + "." + FRES_COLOR)[0]
+            cur = [float(v[0]), float(v[1]), float(v[2])]
+        except Exception:
+            pass
+    if not _attr_exists(line, LN_SHOW_VIS):
+        cmds.addAttr(line, ln=LN_SHOW_VIS, at="bool", dv=True)
+    if not _attr_exists(line, LN_COLOR):
+        _add_color_attr(line, LN_COLOR, cur)
+    if not _attr_exists(line, LN_HID_MODE):
+        cmds.addAttr(line, ln=LN_HID_MODE, at="enum", en="off:dashed:solid", dv=1)
+    if not _attr_exists(line, LN_HID_SAME):
+        cmds.addAttr(line, ln=LN_HID_SAME, at="bool", dv=True)
+    if not _attr_exists(line, LN_HID_COLOR):
+        _add_color_attr(line, LN_HID_COLOR, cur)
+    if not _attr_exists(line, LN_HID_ALPHA):
+        cmds.addAttr(line, ln=LN_HID_ALPHA, at="double", min=0.0, max=1.0,
+                     dv=_SCRN_HIDDEN_ALPHA_DEF)
+    if not _attr_exists(line, LN_HID_DASH):
+        cmds.addAttr(line, ln=LN_HID_DASH, at="double", min=1.0, max=500.0,
+                     dv=_SCRN_HIDDEN_DASH_DEF)
+    if not _attr_exists(line, LN_HID_FILL):
+        cmds.addAttr(line, ln=LN_HID_FILL, at="double", min=0.05, max=0.95,
+                     dv=_SCRN_HIDDEN_FILL_DEF)
+    if not _attr_exists(line, LN_OCCLUDERS):
+        cmds.addAttr(line, ln=LN_OCCLUDERS, at="message", multi=True, indexMatters=False)
+    if shd:
+        for src_attr, dst_attr in ((LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS)):
+            if not _attr_exists(shd, dst_attr):
+                continue
+            src = line + "." + src_attr
+            dst = shd + "." + dst_attr
+            try:
+                if not cmds.isConnected(src, dst):
+                    cmds.connectAttr(src, dst, f=True)
+            except Exception:
+                pass
+        # 旧版の「何の裏でも透ける隠れ線」は使わない（値が違うときだけ書く＝Undo 履歴を汚さない）
+        if _attr_exists(shd, SCRN_HIDDEN_SHOW) and not _plug_source(shd + "." + SCRN_HIDDEN_SHOW):
+            try:
+                if int(cmds.getAttr(shd + "." + SCRN_HIDDEN_SHOW)) != 0:
+                    cmds.setAttr(shd + "." + SCRN_HIDDEN_SHOW, 0)
+            except Exception:
+                pass
+    return True
+
+
+def _scrn_set_color(line, rgb):
+    """SCRN/フレネルの線色（マスター値）を設定。レイヤーで上書き中なら警告して False。"""
+    if _attr_exists(line, LN_COLOR):
+        try:
+            cmds.setAttr(line + "." + LN_COLOR, rgb[0], rgb[1], rgb[2], type="float3")
+            return True
+        except Exception:
+            cmds.warning("{0}: 線の色はいまのレンダーレイヤーで上書きされているため変更できません"
+                         "（マスターレイヤーに切り替えるか、ライン詳細設定で変更してください）"
+                         .format(_short(line)))
+            return False
+    shd = _fresnel_shader(line)
+    if shd and _attr_exists(shd, FRES_COLOR) and not _plug_source(shd + "." + FRES_COLOR):
+        try:
+            cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _line_occluders(line):
+    """隠れ線を透かす物（transform のロング名）。"""
+    if not _attr_exists(line, LN_OCCLUDERS):
+        return []
+    out = []
+    for n in cmds.listConnections(line + "." + LN_OCCLUDERS, s=True, d=False) or []:
+        full = cmds.ls(n, long=True) or []
+        if full and full[0] not in out:
+            out.append(full[0])
+    return out
+
+
+def _mesh_transforms_under(nodes):
+    """transform 群の配下（自身を含む）にあるメッシュの transform。toon ラインは除く。"""
+    out = []
+    seen = set()
+    for t in nodes or []:
+        if not cmds.objExists(t):
+            continue
+        for s in cmds.listRelatives(t, ad=True, type="mesh", f=True, ni=True) or []:
+            par = cmds.listRelatives(s, parent=True, f=True) or []
+            if not par or par[0] in seen or _is_toon_node(par[0]):
+                continue
+            seen.add(par[0])
+            out.append(par[0])
+    return out
+
+
+def _occluder_candidates(nodes):
+    """選択などから紐づけ先にできる transform（メッシュを含み、toon ラインではない物）。"""
+    out = []
+    for n in cmds.ls(nodes or [], objectsOnly=True, long=True) or []:
+        t = n
+        if not cmds.objectType(n, isAType="transform"):
+            par = cmds.listRelatives(n, parent=True, f=True) or []
+            if not par:
+                continue
+            t = par[0]
+        if t in out or _is_toon_node(t) or not _mesh_transforms_under([t]):
+            continue
+        out.append(t)
+    return out
+
+
+def _add_line_occluders(line, nodes):
+    """ラインの隠れ線を透かす物を追加。追加した数を返す。"""
+    _ensure_line_render_attrs(line)
+    if not _attr_exists(line, LN_OCCLUDERS):
+        return 0
+    cur = set(_line_occluders(line))
+    added = 0
+    for t in _occluder_candidates(nodes):
+        if t in cur:
+            continue
+        try:
+            cmds.connectAttr(t + ".message", line + "." + LN_OCCLUDERS, na=True)
+            cur.add(t)
+            added += 1
+        except Exception:
+            pass
+    return added
+
+
+def _remove_line_occluders(line, nodes):
+    """ラインの隠れ線の紐づけから物を外す。外した数を返す。"""
+    if not _attr_exists(line, LN_OCCLUDERS):
+        return 0
+    targets = set()
+    for n in nodes or []:
+        if cmds.objExists(n):
+            targets.add((cmds.ls(n, long=True) or [n])[0])
+    conns = cmds.listConnections(line + "." + LN_OCCLUDERS, s=True, d=False, c=True, p=True) or []
+    removed = 0
+    for i in range(0, len(conns) - 1, 2):
+        dst, src = conns[i], conns[i + 1]
+        node = src.split(".")[0]
+        node = (cmds.ls(node, long=True) or [node])[0]
+        if node in targets:
+            try:
+                cmds.disconnectAttr(src, dst)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+_HIDDEN_ON_FALLBACK = [True]   # ROOT が無いときの「隠れ線を描く」既定
+
+
+def _hidden_scene_on():
+    """シーン全体で隠れ線を描くか（ROOT.toonHiddenOn、既定 ON）。"""
+    if _attr_exists(ROOT, ROOT_HIDDEN_ON):
+        try:
+            return bool(cmds.getAttr(ROOT + "." + ROOT_HIDDEN_ON))
+        except Exception:
+            pass
+    return _HIDDEN_ON_FALLBACK[0]
+
+
+def _set_hidden_scene_on(on):
+    _HIDDEN_ON_FALLBACK[0] = bool(on)
+    if cmds.objExists(ROOT):
+        if not _attr_exists(ROOT, ROOT_HIDDEN_ON):
+            cmds.addAttr(ROOT, ln=ROOT_HIDDEN_ON, at="bool", dv=True)
+        try:
+            cmds.setAttr(ROOT + "." + ROOT_HIDDEN_ON, bool(on))
+        except Exception:
+            pass
+
+
+_HIDDEN_GROUPS = []   # [(紐づけ先メッシュ transform のタプル, [ライン, ...]), ...]
+
+
+def _hidden_refresh_cache():
+    """紐づけ先ごとに隠れ線を描くラインをまとめ直す（紐づけ/ライン増減時に呼ぶ）。"""
+    groups = {}
+    order = []
+    for ln in _all_screen_lines():
+        occ = _mesh_transforms_under(_line_occluders(ln))
+        if not occ:
+            continue
+        key = tuple(sorted(occ))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ln)
+    _HIDDEN_GROUPS[:] = [(k, groups[k]) for k in order]
+    return _HIDDEN_GROUPS
+
+
+def _hidden_line_mode(line):
+    try:
+        return int(cmds.getAttr(line + "." + LN_HID_MODE))
+    except Exception:
+        return 0
+
+
+def _hidden_frame_groups():
+    """描画ごとに: 表示中で隠れ線モードが ON のラインだけを残したグループ。"""
+    out = []
+    if not _hidden_scene_on():
+        return out
+    for occ, lines in _HIDDEN_GROUPS:
+        occ2 = [o for o in occ if cmds.objExists(o)]
+        lines2 = [ln for ln in lines if cmds.objExists(ln) and _scrn_line_visible(ln)
+                  and _hidden_line_mode(ln) != 0 and _fresnel_shader(ln)]
+        if occ2 and lines2:
+            out.append((occ2, lines2))
+    return out
+
+
+def _upgrade_scrn_shader(line):
+    """v0.1.46: 旧版のシェーダファイルを指す SCRN ラインを現行版へ差し替える。
+    入力接続（太さの駆動など）と値は控えて戻す。差し替えたら True。"""
+    shd = _fresnel_shader(line)
+    if not shd or not _attr_exists(line, SCRN_TAG) or not _attr_exists(shd, "shader"):
+        return False
+    try:
+        cur = (cmds.getAttr(shd + ".shader") or "").replace("\\", "/")
+    except Exception:
+        return False
+    path = _screen_fx_path()
+    if cur == path:
+        return False
+    conns = cmds.listConnections(shd, s=True, d=False, c=True, p=True) or []
+    pairs = [(conns[i + 1], conns[i]) for i in range(0, len(conns) - 1, 2)]
+    keep = {}
+    for an in (FRES_COLOR, SCRN_THICK, SCRN_DEPTH_BIAS, "stability",
+               SCRN_BRUSH_ROUGH, SCRN_BRUSH_WAVE, SCRN_BRUSH_SCALE):
+        if _attr_exists(shd, an) and not _plug_source(shd + "." + an):
+            try:
+                keep[an] = cmds.getAttr(shd + "." + an)
+            except Exception:
+                pass
+    try:
+        cmds.setAttr(shd + ".shader", path, type="string")
+    except Exception:
+        return False
+    for an, v in keep.items():
+        if not _attr_exists(shd, an):
+            continue
+        try:
+            if isinstance(v, (list, tuple)) and v and isinstance(v[0], (list, tuple)):
+                c = v[0]
+                cmds.setAttr(shd + "." + an, c[0], c[1], c[2], type="double3")
+            else:
+                cmds.setAttr(shd + "." + an, v)
+        except Exception:
+            pass
+    for src, dst in pairs:
+        try:
+            if cmds.objExists(dst) and not cmds.isConnected(src, dst):
+                cmds.connectAttr(src, dst, f=True)
+        except Exception:
+            pass
+    _bind_scrn_color_set_to_shader(shd, SCRN_CSET)
+    return True
+
+
+def _prepare_scrn_lines():
+    """既存 SCRN ラインを現行シェーダ＋見え方属性へ揃える（冪等・ツール起動時に呼ぶ）。"""
+    for ln in _all_screen_lines():
+        try:
+            _upgrade_scrn_shader(ln)
+        except Exception:
+            pass
+        try:
+            _ensure_line_render_attrs(ln)
+        except Exception:
+            pass
+
+
 def _scrn_set_depth_bias(v):
     """全スクリーン輪郭ラインの重なり深度押し込み（ビュー空間）を設定。"""
     global _SCRN_ZBIAS
@@ -709,7 +1040,7 @@ def _scrn_set_hidden(enabled=None, dash_len=None, dash_fill=None, alpha=None):
     except Exception: pass
 
 
-_SCRN_FX_HLSL = """// OG Toonline Manager - Geometry-shader silhouette outline (dx11Shader / HLSL5)
+_SCRN_FX_HLSL_COMMON = """// OG Toonline Manager - Geometry-shader silhouette outline (dx11Shader / HLSL5)
 // v0.1.11+ 本格派: VS でビュー空間座標・法線を計算 → GS で三角形ごとに
 // シルエット検出(頂点の facing 符号が混在する三角形だけ処理) → エッジ横断点
 // 2 つを結ぶ細い quad をスクリーン空間で押し出す。これにより:
@@ -802,10 +1133,19 @@ float hiddenAlpha <
     float UIStep = 0.01;
 > = 0.6;
 
+// v0.1.46: 表側の線を描くか（レイヤーで「隠れ線だけ」を書き出すときに 0）
+int showVisible <
+    string UIName = "Show Visible Line";
+    int UIMin = 0;
+    int UIMax = 1;
+> = 1;
+
 struct APPDATA {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
+#ifndef OG_NO_COLOR0
     float4 Color    : COLOR0;
+#endif
 };
 struct V2G {
     float4 CPos  : SV_Position;  // 使わないが rasterizer 要件
@@ -836,8 +1176,12 @@ V2G VShader(APPDATA i)
     // v0.1.11: GS アプローチでは深度バイアス不要(quad はシルエット位置に描く)。
     // 旧 VS 版のため uniform は残置するが VS では使わない。
     o.CPos = mul(vp, gProj);
+#ifndef OG_NO_COLOR0
     float w = i.Color.r;
     o.ColR = (w < 0.001f) ? 1.0f : w;
+#else
+    o.ColR = 1.0f;
+#endif
     return o;
 }
 
@@ -973,49 +1317,87 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     v.HPos = float4((ndc2 + off2) * w2, p2.z, w2); v.UV = float2(1.0f, 1.0f); stream.Append(v);
 }
 
-float4 PShader(G2P i) : SV_Target
+// ペンシル風縁のカサつき。UV.y: 0 = シルエット側(内), 1 = 外側。両端ほどランダム discard。
+void brush_discard(G2P i)
 {
-    // v0.1.15: ペンシル風縁のカサつき。
-    // UV.y: 0 = シルエット側(内), 1 = 外側。両端ほど「縁」なので、|UV.y - 0.5|*2 で縁度。
-    // 中央(0.5)は残し、両端ほどランダム discard して毛羽立たせる。
     if (brushRoughness > 0.001f) {
         float edge = abs(i.UV.y - 0.5f) * 2.0f;  // 0=中心, 1=縁
         float rough = brushRoughness * edge * edge;
         float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
         if (h < rough) discard;
     }
+}
+"""
+
+# 通常描画（dx11Shader に割り当てる本体）。v0.1.46 で旧「何にでも透ける隠れ線」pass は撤去し、
+# 隠れ線は MRenderOverride 側の専用パス（_SCRN_FX_HLSL_HIDDEN）だけで描く。
+_SCRN_FX_HLSL_MAIN_TAIL = """
+float4 PShader(G2P i) : SV_Target
+{
+    if (showVisible == 0) discard;
+    brush_discard(i);
     return float4(lineColor, 1.0f);
 }
 
-// v0.1.38: 隠れ線用 PS (quad の長手方向にスクリーン px 基準の破線)。
-// 2nd pass で DepthFunc=GREATER にするので「裏側に回ったシルエット」だけここに来る。
-// showHidden=0 なら discard して描画しない（UI トグルで切替）。
-float4 PShaderHidden(G2P i) : SV_Target
+DepthStencilState DSS_Visible { DepthEnable = TRUE; DepthFunc = LESS_EQUAL; DepthWriteMask = ALL; };
+
+technique11 Main
 {
-    if (showHidden == 0) discard;
-    // ブラシのカサつきは可視側と同じ処理
-    if (brushRoughness > 0.001f) {
-        float edge = abs(i.UV.y - 0.5f) * 2.0f;
-        float rough = brushRoughness * edge * edge;
-        float h = hash12(i.HPos.xy * 0.37f + i.UV * 11.0f);
-        if (h < rough) discard;
+    pass p0
+    {
+        SetVertexShader(CompileShader(vs_5_0, VShader()));
+        SetGeometryShader(CompileShader(gs_5_0, GShader()));
+        SetPixelShader(CompileShader(ps_5_0, PShader()));
+        SetDepthStencilState(DSS_Visible, 0);
     }
-    // スクリーン px 単位の破線: 1 周期 = hiddenDashLen, 塗り部= 周期*hiddenDashFill
-    float dashPosPx = i.UV.x * i.LenPx;
-    float period = max(hiddenDashLen, 1.0f);
-    float phase = frac(dashPosPx / period);
-    if (phase > hiddenDashFill) discard;
+}
+"""
+
+# v0.1.46: 紐づけた物（例: 前髪）の裏に回った部分だけを描く隠れ線パス。MRenderOverride の
+# MSceneRender.shaderOverride で線のシェルに当てる。深度テストは使わず、PS で
+#   紐づけ先だけの深度(gOccDepth) と 全シーン深度(gSceneDepth) を見て
+#   「線が紐づけ先より奥」かつ「紐づけ先が一番手前」の画素だけ描く。
+# shaderOverride では色セットの頂点ストリームが来る保証がないので COLOR0 は使わない。
+_SCRN_FX_HLSL_HIDDEN_TAIL = """
+Texture2D gOccDepth;
+Texture2D gSceneDepth;
+float gNear = 0.1f;
+float gFar  = 10000.0f;
+int   hiddenMode = 1;          // 1=破線 2=実線
+float hiddenTol  = 0.002f;     // 相対深度の許容差
+
+float og_lin(float z)
+{
+    float denom = gFar - z * (gFar - gNear);
+    return (gNear * gFar) / max(denom, 1e-6f);
+}
+
+float4 PShaderOcc(G2P i) : SV_Target
+{
+    int3 px = int3(int(i.HPos.x), int(i.HPos.y), 0);
+    float ro = gOccDepth.Load(px).r;
+    if (ro >= 0.99999f) discard;                     // 紐づけ先が無い画素
+    float zl = og_lin(i.HPos.z);
+    float zo = og_lin(ro);
+    if (zl <= zo * (1.0f + hiddenTol)) discard;      // 線が紐づけ先より手前（通常の線が描く）
+    float zs = og_lin(gSceneDepth.Load(px).r);
+    if (zs < zo * (1.0f - hiddenTol)) discard;       // 紐づけ先より手前に別の物がある
+    brush_discard(i);
+    if (hiddenMode == 1) {
+        float dashPosPx = i.UV.x * i.LenPx;
+        float period = max(hiddenDashLen, 1.0f);
+        float phase = frac(dashPosPx / period);
+        if (phase > hiddenDashFill) discard;
+    }
     return float4(lineColor, clamp(hiddenAlpha, 0.0f, 1.0f));
 }
 
-// v0.1.38: DX11 用 state ブロック。pass p0 = 可視(標準深度), pass p1 = 隠れ線(深度逆転)。
-DepthStencilState DSS_Visible { DepthEnable = TRUE; DepthFunc = LESS_EQUAL; DepthWriteMask = ALL; };
-DepthStencilState DSS_Hidden  { DepthEnable = TRUE; DepthFunc = GREATER;    DepthWriteMask = ZERO; };
-BlendState BS_HiddenBlend {
+DepthStencilState DSS_Off { DepthEnable = FALSE; DepthWriteMask = ZERO; };
+BlendState BS_Alpha {
     BlendEnable[0] = TRUE;
     SrcBlend[0] = SRC_ALPHA;
     DestBlend[0] = INV_SRC_ALPHA;
-    SrcBlendAlpha[0] = SRC_ALPHA;
+    SrcBlendAlpha[0] = ONE;
     DestBlendAlpha[0] = INV_SRC_ALPHA;
     BlendOp[0] = ADD;
     BlendOpAlpha[0] = ADD;
@@ -1028,19 +1410,15 @@ technique11 Main
     {
         SetVertexShader(CompileShader(vs_5_0, VShader()));
         SetGeometryShader(CompileShader(gs_5_0, GShader()));
-        SetPixelShader(CompileShader(ps_5_0, PShader()));
-        SetDepthStencilState(DSS_Visible, 0);
-    }
-    pass p1
-    {
-        SetVertexShader(CompileShader(vs_5_0, VShader()));
-        SetGeometryShader(CompileShader(gs_5_0, GShader()));
-        SetPixelShader(CompileShader(ps_5_0, PShaderHidden()));
-        SetDepthStencilState(DSS_Hidden, 0);
-        SetBlendState(BS_HiddenBlend, float4(0,0,0,0), 0xFFFFFFFF);
+        SetPixelShader(CompileShader(ps_5_0, PShaderOcc()));
+        SetDepthStencilState(DSS_Off, 0);
+        SetBlendState(BS_Alpha, float4(0, 0, 0, 0), 0xFFFFFFFF);
     }
 }
 """
+
+_SCRN_FX_HLSL = _SCRN_FX_HLSL_COMMON + _SCRN_FX_HLSL_MAIN_TAIL
+_SCRN_FX_HLSL_HIDDEN = "#define OG_NO_COLOR0 1\n" + _SCRN_FX_HLSL_COMMON + _SCRN_FX_HLSL_HIDDEN_TAIL
 
 
 _SCRN_FX_OGSFX = """#version 410
@@ -1088,6 +1466,11 @@ uniform float brushNoiseScale
 <
     string UIName = "Brush Noise Scale (px freq)";
 > = 20.0;
+
+uniform int showVisible
+<
+    string UIName = "Show Visible Line";
+> = 1;
 
 attribute VS_INPUT
 {
@@ -1251,6 +1634,7 @@ GLSLShader ShaderPixel
     }
     void main()
     {
+        if (showVisible == 0) discard;
         if (brushRoughness > 0.001) {
             float edge = abs(PS_IN.uv.y - 0.5) * 2.0;
             float rough = brushRoughness * edge * edge;
@@ -1276,39 +1660,25 @@ technique Main
 """
 
 
-_SCRN_FX_PATH_CACHE = None
+_FX_WRITTEN = {}   # このセッションで書き出し済みのシェーダファイル {path: True}
 
 
-def _screen_fx_path():
-    """SCRN 用シェーダを 1 セッション 1 回だけ書き出してキャッシュ。drawAPI に応じて
-    HLSL(.fx) か OGSFX(.ogsfx) を書き分ける（v0.1.37 で OGSFX 版追加）。"""
-    global _SCRN_FX_PATH_CACHE
-    is_gl = _vp2_is_opengl()
-    src = _SCRN_FX_OGSFX if is_gl else _SCRN_FX_HLSL
-    if _SCRN_FX_PATH_CACHE and os.path.exists(_SCRN_FX_PATH_CACHE) and \
-       os.path.getsize(_SCRN_FX_PATH_CACHE) == len(src):
-        return _SCRN_FX_PATH_CACHE
+def _write_fx_file(fname, src):
+    """userAppDir/OG_Toonline_Manager/<fname> へシェーダを書き出してパスを返す（1 セッション 1 回）。
+    v0.1.38: 日本語コメントが cp932 で書き出されるとパーサが文字化けするため UTF-8 固定。"""
     d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
     try:
         if not os.path.isdir(d):
             os.makedirs(d)
     except Exception:
         d = cmds.internalVar(userTmpDir=True)
-    fname = "OG_ToonScreen.ogsfx" if is_gl else "OG_ToonScreen.fx"
     path = os.path.join(d, fname).replace("\\", "/")
-    try:
-        if os.path.exists(path) and os.path.getsize(path) == len(src):
-            _SCRN_FX_PATH_CACHE = path
-            return path
-    except Exception:
-        pass
+    if _FX_WRITTEN.get(path) and os.path.exists(path):
+        return path
     import tempfile
     try:
-        fd, tmp = tempfile.mkstemp(suffix=(".ogsfx" if is_gl else ".fx"),
-                                    prefix="OG_ToonScreen_", dir=d)
+        fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(fname)[1], prefix="OG_fx_", dir=d)
         try:
-            # v0.1.38: 日本語コメントが cp932 で書き出されると dx11Shader/glslShader の
-            # パーサで文字化け → effect ファイル読込失敗の原因になるため UTF-8 固定で書く。
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
                 f.write(src)
             os.replace(tmp, path)
@@ -1322,8 +1692,27 @@ def _screen_fx_path():
                 f.write(src)
         except Exception:
             pass
-    _SCRN_FX_PATH_CACHE = path
+    _FX_WRITTEN[path] = True
     return path
+
+
+def _fx_ver_tag():
+    return __version__.replace(".", "_")
+
+
+def _screen_fx_path():
+    """SCRN 用シェーダのパス。drawAPI に応じて HLSL(.fx) か OGSFX(.ogsfx) を書き分ける（v0.1.37）。
+    v0.1.46: ファイル名に版を入れる。dx11Shader/MShaderManager はパス単位でコンパイル結果を
+    使い回すため、同じパスで中身だけ変えても新しい版が反映されない。既存ラインは
+    _upgrade_scrn_shader で新しいパスへ差し替える。"""
+    if _vp2_is_opengl():
+        return _write_fx_file("OG_ToonScreen_v" + _fx_ver_tag() + ".ogsfx", _SCRN_FX_OGSFX)
+    return _write_fx_file("OG_ToonScreen_v" + _fx_ver_tag() + ".fx", _SCRN_FX_HLSL)
+
+
+def _scrn_hidden_fx_path():
+    """v0.1.46: 紐づけ先の裏だけに描く隠れ線パス用シェーダ（DX11 のみ）。"""
+    return _write_fx_file("OG_ScrnHidden_v" + _fx_ver_tag() + ".fx", _SCRN_FX_HLSL_HIDDEN)
 
 
 def _dump_dx11_varying(shd):
@@ -1844,18 +2233,39 @@ def _ctrl_of(line):
     return None
 
 
+def _set_if_diff(plug, value):
+    """数値属性を、値が違うときだけ setAttr する。
+    ツリー更新などで毎回呼ばれる「確保」処理が同じ値を書くと Undo 履歴に無意味な操作が
+    積まれ、直前の操作が Ctrl+Z 1 回で戻らなくなるため（v0.1.46）。"""
+    try:
+        if abs(float(cmds.getAttr(plug)) - float(value)) <= 1e-9:
+            return
+    except Exception:
+        pass
+    try:
+        cmds.setAttr(plug, value)
+    except Exception:
+        pass
+
+
 def _set_outliner_color(node, rgb):
     try:
-        cmds.setAttr(node + ".useOutlinerColor", 1)
-        cmds.setAttr(node + ".outlinerColor", rgb[0], rgb[1], rgb[2], type="double3")
+        _set_if_diff(node + ".useOutlinerColor", 1)
+        cur = cmds.getAttr(node + ".outlinerColor")[0]
+        if any(abs(float(cur[i]) - float(rgb[i])) > 1e-4 for i in range(3)):
+            cmds.setAttr(node + ".outlinerColor", rgb[0], rgb[1], rgb[2], type="double3")
     except Exception:
         pass
 
 
 def _lock_trs(node):
     for at in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "v"):
+        plug = node + "." + at
         try:
-            cmds.setAttr(node + "." + at, lock=True, keyable=False, channelBox=False)
+            if (cmds.getAttr(plug, lock=True) and not cmds.getAttr(plug, keyable=True)
+                    and not cmds.getAttr(plug, channelBox=True)):
+                continue   # すでにロック済み（書くと Undo 履歴を汚す）
+            cmds.setAttr(plug, lock=True, keyable=False, channelBox=False)
         except Exception:
             pass
 
@@ -2246,6 +2656,151 @@ def create_outline_render_layer(name, lines, src_meshes):
     return name
 
 
+# ---- v0.1.46: Render Setup でラインの見え方をレイヤーごとに上書きする ----
+def _rs_model():
+    try:
+        import maya.app.renderSetup.model.renderSetup as rsM
+        return rsM.instance()
+    except Exception:
+        return None
+
+
+def _rs_layer_names():
+    rs = _rs_model()
+    if rs is None:
+        return []
+    try:
+        return [L.name() for L in rs.getRenderLayers()]
+    except Exception:
+        return []
+
+
+def _rs_get_layer(name):
+    rs = _rs_model()
+    if rs is None or not name:
+        return None
+    for L in rs.getRenderLayers():
+        if L.name() == name:
+            return L
+    return None
+
+
+def _rs_visible_layer_name():
+    """いま表示中のレンダーレイヤー名（マスターなら ""）。"""
+    rs = _rs_model()
+    if rs is None:
+        return ""
+    try:
+        vis = rs.getVisibleRenderLayer()
+        if vis is None or vis.name() == rs.getDefaultRenderLayer().name():
+            return ""
+        return vis.name()
+    except Exception:
+        return ""
+
+
+def _rs_switch(name):
+    """表示レイヤーを切り替える（"" ならマスター）。"""
+    rs = _rs_model()
+    if rs is None:
+        return False
+    try:
+        L = _rs_get_layer(name) if name else rs.getDefaultRenderLayer()
+        if L is None:
+            return False
+        rs.switchToLayer(L)
+        return True
+    except Exception as exc:
+        cmds.warning("レンダーレイヤーの切り替えに失敗: {0}".format(exc))
+        return False
+
+
+def _rs_line_collection(layer, line, create=False):
+    """layer 内の、このライン用コレクション（<layer>_OG_<line>）。"""
+    name = _sanitize_layer_name(layer.name() + "_OG_" + _short(line))
+    for c in layer.getCollections():
+        if c.name() == name:
+            return c
+    if not create:
+        return None
+    c = layer.createCollection(name)
+    c.getSelector().staticSelection.set([_short(line)])
+    return c
+
+
+def _rs_find_override(layer_name, line, attr):
+    L = _rs_get_layer(layer_name)
+    if L is None:
+        return None
+    c = _rs_line_collection(L, line)
+    if c is None:
+        return None
+    for ov in c.getOverrides():
+        try:
+            if ov.attributeName() == attr:
+                return ov
+        except Exception:
+            pass
+    return None
+
+
+def _rs_set_override(layer_name, line, attr, value):
+    """layer で line.attr を value に上書きする（絶対オーバーライドが無ければ作る）。"""
+    L = _rs_get_layer(layer_name)
+    if L is None:
+        return False
+    ov = _rs_find_override(layer_name, line, attr)
+    if ov is None:
+        c = _rs_line_collection(L, line, create=True)
+        ov = c.createAbsoluteOverride(_short(line), attr)
+    ov.setAttrValue(value)
+    return True
+
+
+def _rs_remove_override(layer_name, line, attr):
+    """layer での line.attr の上書きを消す（マスターと同じに戻す）。"""
+    ov = _rs_find_override(layer_name, line, attr)
+    if ov is None:
+        return False
+    try:
+        import maya.app.renderSetup.model.override as overrideM
+        overrideM.delete(ov)
+    except Exception:
+        try:
+            cmds.delete(ov.name())
+        except Exception:
+            return False
+    return True
+
+
+def create_hidden_only_layer(lines, name=None):
+    """lines の「隠れ線だけ」を書き出すレイヤーを作る（表側の線は描かない）。
+    シーンのメッシュ（元メッシュ・紐づけ先・手前の物）は useBackground で深度だけ書く
+    （透かす位置の判定と、手前の物で隠れる所を本番の絵と一致させるため）。
+    作ったレイヤー名を返す。"""
+    lines = [ln for ln in lines or [] if _attr_exists(ln, SCRN_TAG)]
+    if not lines:
+        raise RuntimeError("スクリーン輪郭のラインがありません")
+    holdouts = list(_source_meshes_of(lines))
+    for ln in lines:
+        for o in _mesh_transforms_under(_line_occluders(ln)):
+            if o not in holdouts:
+                holdouts.append(o)
+    # 他のメッシュも深度だけ書かせる（手前の物が隠れ線を正しく遮る＝本番の絵と合成で一致する）
+    for s in cmds.ls(type="mesh", long=True, ni=True) or []:
+        par = cmds.listRelatives(s, parent=True, f=True) or []
+        if par and par[0] not in holdouts and not _is_toon_node(par[0]):
+            holdouts.append(par[0])
+    lname = create_outline_render_layer(name or (_short(lines[0]) + "_hidden"), lines, holdouts)
+    _rs_switch(lname)
+    for ln in lines:
+        _ensure_line_render_attrs(ln)
+        _rs_set_override(lname, ln, LN_SHOW_VIS, False)
+        if _hidden_line_mode(ln) == 0:
+            _rs_set_override(lname, ln, LN_HID_MODE, 1)
+    return lname
+
+
 def _ensure_follow(line):
     """元オブジェクトのトランスフォーム移動にラインを追従させる（parent/scale 拘束）。
     outMesh は変形のみ追従するので、移動/回転/スケールは拘束で合わせる。"""
@@ -2335,10 +2890,7 @@ def _ensure_thickness_chain(line):
                 cmds.disconnectAttr(p, mA + ".input2")
             except Exception:
                 pass
-        try:
-            cmds.setAttr(mA + ".input2", 1.0)
-        except Exception:
-            pass
+        _set_if_diff(mA + ".input2", 1.0)
     # mB = mA * globalCtrl.thicknessMult → 総太さ（UI 表示値ベース）
     _connect(mA + ".output", mB + ".input1")
     _connect(gctrl + "." + GMULT, mB + ".input2")
@@ -2361,10 +2913,7 @@ def _ensure_thickness_chain(line):
         if not cmds.objExists(mS):
             mS = cmds.createNode("multDoubleLinear", name=mS)
         _connect(mTD + ".output", mS + ".input1")   # v0.1.33: mB→mTD→mS
-        try:
-            cmds.setAttr(mS + ".input2", EDGE_THICK_SCALE)
-        except Exception:
-            pass
+        _set_if_diff(mS + ".input2", EDGE_THICK_SCALE)
         _connect(mS + ".output", target)
         # 円プロファイルの基準半径も太さに比例させ、細くするとチューブ全体が細る
         circ = _line_circle_node(line)
@@ -2373,10 +2922,7 @@ def _ensure_thickness_chain(line):
             if not cmds.objExists(mR):
                 mR = cmds.createNode("multDoubleLinear", name=mR)
             _connect(mTD + ".output", mR + ".input1")   # v0.1.33: distAtten 後の値を使う
-            try:
-                cmds.setAttr(mR + ".input2", EDGE_BASE_SCALE)
-            except Exception:
-                pass
+            _set_if_diff(mR + ".input2", EDGE_BASE_SCALE)
             _connect(mR + ".output", circ + ".radius")
     elif cmds.attributeQuery(FRES_TAG, node=line, exists=True):
         # フレネルは UI 太さ×FRES_SCALE を condition.secondTerm(facingRatio しきい値)へ。
@@ -2385,10 +2931,7 @@ def _ensure_thickness_chain(line):
         if not cmds.objExists(mS):
             mS = cmds.createNode("multDoubleLinear", name=mS)
         _connect(mB + ".output", mS + ".input1")
-        try:
-            cmds.setAttr(mS + ".input2", FRES_SCALE)
-        except Exception:
-            pass
+        _set_if_diff(mS + ".input2", FRES_SCALE)
         _connect(mS + ".output", target)
         # 帯の画面px幅の上限 = UI太さ × SCRN_SCALE × globalCtrl.fresSens（感度）。
         # 感度=見た目の太さを変えずに「どこまで内側（寝た面）まで検出するか」を調整。
@@ -2398,10 +2941,7 @@ def _ensure_thickness_chain(line):
             if not cmds.objExists(mW):
                 mW = cmds.createNode("multDoubleLinear", name=mW)
             _connect(mB + ".output", mW + ".input1")
-            try:
-                cmds.setAttr(mW + ".input2", SCRN_SCALE)
-            except Exception:
-                pass
+            _set_if_diff(mW + ".input2", SCRN_SCALE)
             # v0.1.18: mW.output × gctrl.fresSens → maxWidthPx
             mWS = base + "_fresMaxWSens"
             if not cmds.objExists(mWS):
@@ -2415,10 +2955,7 @@ def _ensure_thickness_chain(line):
         if not cmds.objExists(mS):
             mS = cmds.createNode("multDoubleLinear", name=mS)
         _connect(mB + ".output", mS + ".input1")
-        try:
-            cmds.setAttr(mS + ".input2", SCRN_SCALE)
-        except Exception:
-            pass
+        _set_if_diff(mS + ".input2", SCRN_SCALE)
         # v0.1.32: 距離減衰 (ctrl.camDistAtten を乗算) を末尾に挿入。
         if not cmds.attributeQuery(CTRL_DISTATTEN, node=ctrl, exists=True):
             try:
@@ -2439,10 +2976,7 @@ def _ensure_thickness_chain(line):
             if not cmds.objExists(mBoost):
                 mBoost = cmds.createNode("multDoubleLinear", name=mBoost)
             _connect(mB + ".output", mBoost + ".input1")
-            try:
-                cmds.setAttr(mBoost + ".input2", 1.0 + MASK_INFLATE_FRAC)
-            except Exception:
-                pass
+            _set_if_diff(mBoost + ".input2", 1.0 + MASK_INFLATE_FRAC)
             for p in (cmds.listConnections(target, s=True, d=False, p=True) or []):
                 if p != mBoost + ".output":
                     try:
@@ -2474,13 +3008,10 @@ def _ensure_thickness_chain(line):
             cnd = base + "_visCond"
             if not cmds.objExists(cnd):
                 cnd = cmds.createNode("condition", name=cnd)
-            try:
-                cmds.setAttr(cnd + ".operation", 2)          # Greater Than
-                cmds.setAttr(cnd + ".secondTerm", EDGE_VIS_EPS)
-                cmds.setAttr(cnd + ".colorIfTrueR", 1)
-                cmds.setAttr(cnd + ".colorIfFalseR", 0)
-            except Exception:
-                pass
+            _set_if_diff(cnd + ".operation", 2)          # Greater Than
+            _set_if_diff(cnd + ".secondTerm", EDGE_VIS_EPS)
+            _set_if_diff(cnd + ".colorIfTrueR", 1)
+            _set_if_diff(cnd + ".colorIfFalseR", 0)
             _connect(mB + ".output", cnd + ".firstTerm")
             try:
                 if cmds.getAttr(lshape + ".visibility", lock=True):
@@ -3506,7 +4037,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         except Exception:
             pass
         try:
-            _edge_disable()          # 画像空間エッジ検出のオーバーライドを後始末
+            # 交差線/旧エッジは UI と一緒に止める。隠れ線はシーンの設定なので、
+            # ウィンドウを閉じてもプレイブラストに出るよう残す（v0.1.46）。
+            _OVR_STATE["edge"] = False
+            _OVR_STATE["intersect"] = False
+            _og_override_sync()
+        except Exception:
+            pass
+        try:
+            if _line_options_win[0] is not None:
+                _line_options_win[0].close()
         except Exception:
             pass
         # v0.1.39: importlib.reload 後は ToonOutlineUI シンボルが別クラスに差し
@@ -3847,29 +4387,19 @@ class ToonOutlineUI(QtWidgets.QDialog):
         ix_row.addWidget(self.spn_intersect_thr)
         sec_feel.add_layout(ix_row)
 
-        # v0.1.38: 隠れ線を破線で表示（SCRN シルエットの裏側を dashed で見せる・DX11 のみ）
-        hd_row = QtWidgets.QHBoxLayout()
-        self.chk_hidden_dash = QtWidgets.QCheckBox("隠れ線を破線で表示（SCRN・DX11）")
-        self.chk_hidden_dash.setChecked(bool(_SCRN_HIDDEN_DEF))
+        # v0.1.46: 隠れ線は「紐づけた物の裏」だけに出る。紐づけ・破線/色はライン詳細設定で。
+        # ここはシーン全体の ON/OFF だけ（シーンに保存。プレイブラストにも効く）。
+        self.chk_hidden_dash = QtWidgets.QCheckBox("隠れ線を透かして描く（紐づけた物の裏）")
+        self.chk_hidden_dash.setChecked(_hidden_scene_on())
         self.chk_hidden_dash.setToolTip(
-            "SCRN シルエットの『裏側に回った部分』を破線で表示する（Pencil+4 風）。\n"
-            "・手前に他物体がある部分のシルエット＝破線 / 直接見える所＝実線\n"
-            "・HLSL の 2nd pass (DepthFunc=GREATER) で実装 → DirectX11 VP2 のみ\n"
-            "・OpenGL VP2 では無効（線は可視側のみ）")
+            "ON: ラインを『紐づけた物』の裏に回った所だけ、隠れ線として透かして描きます。\n"
+            "    例: 眉のラインに前髪を紐づけると、前髪越しに眉が透けて見える。\n"
+            "    紐づけていない物（頭など）の裏では隠れ線は出ません。\n"
+            "OFF: シーン全体で隠れ線を描きません。\n"
+            "紐づけ・破線/実線・色は、ライン一覧で右クリック →『ライン詳細設定』。\n"
+            "DirectX11 のビューポートのみ（プレイブラストにも出ます）。")
         self.chk_hidden_dash.toggled.connect(self._on_toggle_hidden_dash)
-        hd_row.addWidget(self.chk_hidden_dash)
-        hd_row.addStretch(1)
-        hd_row.addWidget(QtWidgets.QLabel("破線長"))
-        self.spn_hidden_dash = QtWidgets.QDoubleSpinBox()
-        self.spn_hidden_dash.setRange(2.0, 80.0); self.spn_hidden_dash.setDecimals(1)
-        self.spn_hidden_dash.setSingleStep(1.0); self.spn_hidden_dash.setValue(_SCRN_HIDDEN_DASH_DEF)
-        self.spn_hidden_dash.setFixedWidth(64)
-        self.spn_hidden_dash.setToolTip(
-            "破線 1 周期の長さ（画面 px 換算）。小=細かい破線 / 大=粗い破線。")
-        self.spn_hidden_dash.valueChanged.connect(
-            lambda v: _scrn_set_hidden(dash_len=float(v)))
-        hd_row.addWidget(self.spn_hidden_dash)
-        sec_feel.add_layout(hd_row)
+        sec_feel.add_widget(self.chk_hidden_dash)
 
         # v0.1.26: ライン単体表示モード（メッシュを useBackground で透明に・奥側線を隠蔽）
         self.chk_line_only = QtWidgets.QCheckBox(
@@ -4214,12 +4744,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
         if not (h and cmds.objExists(h)):
             return
         hide = 1 if getattr(self, "chk_hide_handles", None) is None or self.chk_hide_handles.isChecked() else 0
-        for fn in (
-            lambda: cmds.setAttr(h + ".hiddenInOutliner", hide),
-            lambda: cmds.setAttr(h + ".visibility", 0),
-        ):
+        # 値が同じなら書かない（Undo の履歴を汚さない）
+        for plug, v in ((h + ".hiddenInOutliner", hide), (h + ".visibility", 0)):
             try:
-                fn()
+                if int(cmds.getAttr(plug)) != v:
+                    cmds.setAttr(plug, v)
             except Exception:
                 pass
 
@@ -4257,14 +4786,16 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sh = self._shape_of(line)
         if not sh:
             return
-        try:
-            cmds.setAttr(sh + ".overrideEnabled", 1 if lock else 0)
-            if lock:
-                cmds.setAttr(sh + ".overrideDisplayType", 2)  # 2 = reference
-            else:
-                cmds.setAttr(sh + ".overrideDisplayType", 0)  # 0 = normal
-        except Exception:
-            pass
+        # 値が同じなら書かない（refresh_tree のたびに setAttr すると Undo の履歴に
+        # 無意味な操作が積まれ、直前の操作が Ctrl+Z 1 回で戻らなくなる）
+        want = ((sh + ".overrideEnabled", 1 if lock else 0),
+                (sh + ".overrideDisplayType", 2 if lock else 0))   # 2 = reference, 0 = normal
+        for plug, v in want:
+            try:
+                if int(cmds.getAttr(plug)) != v:
+                    cmds.setAttr(plug, v)
+            except Exception:
+                pass
 
     def _on_toggle_lock_select(self, state):
         """UIチェックで全ラインのビューポート選択可否を一括切替。"""
@@ -4480,7 +5011,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
             _edge_set_params(threshold=self.spn_edge_thr.value(),
                              thickness=self.spn_edge_w.value(), color=self._color,
                              debug=self.chk_edge_debug.isChecked())
-            if not _edge_enable():
+            _OVR_STATE["edge"] = True
+            if not _og_override_sync():
+                _OVR_STATE["edge"] = False
                 self.chk_edge.blockSignals(True)
                 self.chk_edge.setChecked(False)
                 self.chk_edge.blockSignals(False)
@@ -4490,7 +5023,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     "画像空間エッジ検出 ON（対象 {0} メッシュ）。VP2/DirectX11・ビューポート専用。"
                     .format(len(targets)))
         else:
-            _edge_disable()
+            _OVR_STATE["edge"] = False
+            _og_override_sync()
 
     def _on_edge_param(self, *args):
         """しきい値/太さ/色/デバッグ表示を反映（線色は共通カラーに追従）。"""
@@ -4529,7 +5063,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                              color=self._color,
                              intersect_mode=True,
                              intersect_threshold=float(self.spn_intersect_thr.value()))
-            if not _edge_enable():
+            _OVR_STATE["intersect"] = True
+            if not _og_override_sync():
+                _OVR_STATE["intersect"] = False
                 self.chk_intersect.blockSignals(True)
                 self.chk_intersect.setChecked(False)
                 self.chk_intersect.blockSignals(False)
@@ -4538,8 +5074,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     "交差線 ON（対象 {0} メッシュ・他メッシュとの重なりに線）"
                     .format(len(targets)))
         else:
+            _OVR_STATE["intersect"] = False
             _edge_set_params(intersect_mode=False)
-            _edge_disable()
+            _og_override_sync()   # 隠れ線を使っていればオーバーライドは残る
 
     def _on_toggle_line_only(self, state):
         """v0.1.26: ライン単体表示モードのトグル。"""
@@ -4553,14 +5090,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
             except Exception: pass
 
     def _on_toggle_hidden_dash(self, state):
-        """v0.1.38: 隠れ線（破線）を全 SCRN ラインに反映。OpenGL では該当 uniform が
-        shader に無いので attributeQuery 経由で安全にスキップされる。"""
-        _scrn_set_hidden(enabled=bool(state))
+        """v0.1.46: シーン全体で隠れ線（紐づけた物の裏に回った線）を描くか。
+        どの物の裏で透かすかは、ライン一覧の右クリック →『ライン詳細設定』で紐づける。"""
+        cmds.undoInfo(openChunk=True)
+        try:
+            _set_hidden_scene_on(bool(state))
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        _og_override_sync()
         if state and _vp2_is_opengl():
             try:
                 om2.MGlobal.displayWarning(
-                    "隠れ線（破線）は現在 DirectX11 VP2 のみ対応です。"
-                    "OpenGL VP2 では無効（可視側のみ描画）。")
+                    "隠れ線は DirectX11 のビューポートでのみ描けます（OpenGL では表示されません）。")
             except Exception:
                 pass
 
@@ -4739,13 +5280,18 @@ class ToonOutlineUI(QtWidgets.QDialog):
             type_color, type_label = (255, 158, 64), "エッジ"
         else:
             type_color, type_label = (128, 224, 128), "背面"
-        suffix = ""  # 旧テキスト撤去（アイコンで判別）
+        # v0.1.46: 隠れ線を紐づけたラインは [透] を付け、ツールチップに紐づけ先を出す
+        occ = _line_occluders(line) if is_scrn else []
+        suffix = "  [透]" if occ else ""
         label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
         it.setData(0, QtCore.Qt.UserRole, line)
         # v0.1.27: 種別はテキスト色で表現（旧ドットアイコンはチェックボックスと紛らわしかったため）
         it.setForeground(0, QtGui.QBrush(QtGui.QColor(*type_color)))
-        it.setToolTip(0, "{} ({})".format(_short(line), type_label))
+        tip = "{} ({})".format(_short(line), type_label)
+        if occ:
+            tip += "\n隠れ線を透かす物: " + ", ".join(_short(o) for o in occ)
+        it.setToolTip(0, tip)
         # ライン: ドラッグ可・ドロップ不可（グループにのみ落とす）
         it.setFlags((it.flags() | QtCore.Qt.ItemIsUserCheckable
                      | QtCore.Qt.ItemIsDragEnabled) & ~QtCore.Qt.ItemIsDropEnabled)
@@ -4815,6 +5361,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
         return gi
 
     def refresh_tree(self):
+        # v0.1.46: 既存 SCRN ラインを現行シェーダ＋見え方属性へ揃え、隠れ線の紐づけを読み直す
+        try:
+            _prepare_scrn_lines()
+            _hidden_refresh_cache()
+        except Exception:
+            pass
         self._populating = True
         self.tree.clear()
         # v0.1.18: フレネル感度はシーン属性と一方向同期（起動/再取得で現在値を反映）
@@ -4843,6 +5395,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
         # 既存シーンに隙間埋めがあればカメラ追従を起動（再取得/再起動時）
         try:
             self._ensure_cam_tracking()
+        except Exception:
+            pass
+        # v0.1.46: シーンの隠れ線 ON/OFF を UI へ反映し、オーバーライドを必要に応じて有効化
+        try:
+            self.chk_hidden_dash.blockSignals(True)
+            self.chk_hidden_dash.setChecked(_hidden_scene_on())
+            self.chk_hidden_dash.blockSignals(False)
+            _og_override_sync()
         except Exception:
             pass
 
@@ -5417,12 +5977,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         sh = self._shape_of(line)
         if not sh:
             return
-        # フレネル/スクリーンは dx11Shader の lineColor uniform を直接変更
+        # フレネル/スクリーンはシェーダの lineColor（v0.1.46: SCRN はライン属性経由）
         if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
                 or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
-            shd = _fresnel_shader(line)
-            if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
-                cmds.setAttr(shd + "." + FRES_COLOR, rgb[0], rgb[1], rgb[2], type="double3")
+            _scrn_set_color(line, rgb)
             return
         ss, sg = self._ensure_line_shader(line)
         cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
@@ -5459,10 +6017,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 # フレネル/スクリーンは SG を共有に差し替えると線が出ないため、色だけ共通値に戻す
                 if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
                         or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
-                    shd = _fresnel_shader(line)
-                    if shd and cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
-                        cmds.setAttr(shd + "." + FRES_COLOR, self._color[0], self._color[1],
-                                     self._color[2], type="double3")
+                    _scrn_set_color(line, self._color)
                     continue
                 if sh:
                     cmds.sets(sh, e=True, forceElement=sg)
@@ -5865,6 +6420,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.addAttr(dup, ln=TAG, at="bool", dv=True)
                 if not cmds.attributeQuery(SCRN_TAG, node=dup, exists=True):
                     cmds.addAttr(dup, ln=SCRN_TAG, at="bool", dv=True)
+                _ensure_line_render_attrs(dup)   # v0.1.46: 見え方属性（レイヤー別上書き用）
 
                 dup = cmds.parent(dup, grp)[0]
                 ctrl = _ensure_line_anim(dup, thick)
@@ -6265,6 +6821,12 @@ class ToonOutlineUI(QtWidgets.QDialog):
             a6 = menu.addAction("削除")
             a6.triggered.connect(lambda: self.delete_selected())
         elif is_line:
+            # v0.1.46: ライン詳細設定（隠れ線の紐づけ・レイヤーごとの色/表現）
+            if cmds.attributeQuery(SCRN_TAG, node=node, exists=True):
+                a0 = menu.addAction("ライン詳細設定…（隠れ線・レイヤーごとの見え方）")
+                f0 = a0.font(); f0.setBold(True); a0.setFont(f0)
+                a0.triggered.connect(lambda: self.open_line_options(node))
+                menu.addSeparator()
             a1 = menu.addAction("表示切替")
             a1.triggered.connect(lambda: self._toggle_line_vis(node))
             a2 = menu.addAction("色を変える…")
@@ -6286,6 +6848,14 @@ class ToonOutlineUI(QtWidgets.QDialog):
             a4 = menu.addAction("削除")
             a4.triggered.connect(lambda: self.delete_selected())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
+
+    def open_line_options(self, line):
+        """v0.1.46: ライン詳細設定を開く。ツリーで複数選択中なら選択中の SCRN ライン全部が対象。"""
+        lines = [n for n in self._selected_lines()
+                 if cmds.attributeQuery(SCRN_TAG, node=n, exists=True)]
+        if line not in lines:
+            lines = [line]
+        return show_line_options(lines, self)
 
     def _toggle_scrn_intersect(self, line, enabled):
         """v0.1.41: SCRN ラインの『交差線に含める』フラグを切替。
@@ -6565,6 +7135,510 @@ class ToonOutlineUI(QtWidgets.QDialog):
         self._ensure_cam_tracking()   # 隙間埋めが無くなればカメラ追従を止める
 
 
+# --------------------------------------------------------------------------- #
+# v0.1.46 ライン詳細設定ウィンドウ（右クリック →「ライン詳細設定…」）
+#   ・隠れ線を透かす物の紐づけ（全レイヤー共通）
+#   ・レイヤーごとの見え方（線を描く/線の色/隠れ線の表現・色・濃さ・破線）
+#     マスター＝ふだんのビューポート。各レンダーレイヤーは Render Setup の上書き。
+#   ・「隠れ線だけ」を書き出すレイヤーの作成
+# --------------------------------------------------------------------------- #
+_LINEOPT_OBJ = "OG_Toonline_LineOptions"
+_LINEOPT_CSS = _DIALOG_BG_CSS.replace("OG_Toonline_ManagerWin", _LINEOPT_OBJ) + (
+    "QLabel#OG_Toonline_LineOptSection { color: #c9a848; font-weight: bold;"
+    " padding-top: 6px; }"
+    "QLabel#OG_Toonline_LineOptNote { color: #9a9a9a; }"
+)
+_line_options_win = [None]
+
+
+def _line_set_attr(line, attr, value):
+    """ラインの見え方属性（マスター値）を設定する。"""
+    plug = line + "." + attr
+    if isinstance(value, (list, tuple)):
+        cmds.setAttr(plug, value[0], value[1], value[2], type="float3")
+    else:
+        cmds.setAttr(plug, value)
+
+
+def _rgb_style(rgb):
+    r, g, b = [int(max(0.0, min(1.0, float(c))) * 255) for c in rgb]
+    return "background-color: rgb({0},{1},{2}); border: 1px solid #222; min-height: 18px;".format(r, g, b)
+
+
+class _LineOptionsDialog(QtWidgets.QDialog):
+    """ライン詳細設定。複数ライン指定時は、表示は先頭のラインの値・変更は全ラインへ。"""
+
+    def __init__(self, lines, owner=None):
+        parent = owner if owner is not None else _maya_main()
+        super(_LineOptionsDialog, self).__init__(parent)
+        self.setObjectName(_LINEOPT_OBJ)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.Tool)
+        self.setStyleSheet(_LINEOPT_CSS)
+        self._owner = owner
+        self._lines = [ln for ln in lines if cmds.objExists(ln)]
+        self._updating = False
+        self._rows = {}           # attr -> (QLabel, 戻すボタン, 見出し)
+        for ln in self._lines:
+            try:
+                _ensure_line_render_attrs(ln)
+            except Exception:
+                pass
+        if len(self._lines) > 1:
+            self.setWindowTitle("ライン詳細設定 — {0} ほか {1} 本".format(
+                _short(self._lines[0]), len(self._lines) - 1))
+        else:
+            self.setWindowTitle("ライン詳細設定 — {0}".format(
+                _short(self._lines[0]) if self._lines else ""))
+        self.setMinimumWidth(380)
+        self._build()
+        self._no_wheel = _NoWheelFilter(self)
+        for w in self.findChildren(QtWidgets.QAbstractSpinBox):
+            w.installEventFilter(self._no_wheel)
+            w.setFocusPolicy(QtCore.Qt.StrongFocus)
+        for w in self.findChildren(QtWidgets.QSlider):
+            w.installEventFilter(self._no_wheel)
+        for w in self.findChildren(QtWidgets.QComboBox):
+            w.installEventFilter(self._no_wheel)
+            w.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self._reload_layers()
+        self._refresh()
+
+    # ---------- 構築 ----------
+    def _section(self, lay, text):
+        lb = QtWidgets.QLabel(text)
+        lb.setObjectName("OG_Toonline_LineOptSection")
+        lay.addWidget(lb)
+
+    def _note(self, lay, text):
+        lb = QtWidgets.QLabel(text)
+        lb.setObjectName("OG_Toonline_LineOptNote")
+        lb.setWordWrap(True)
+        lay.addWidget(lb)
+        return lb
+
+    def _row(self, grid, r, attr, title, widget, tip):
+        lb = QtWidgets.QLabel(title)
+        lb.setToolTip(tip)
+        widget.setToolTip(tip)
+        rb = QtWidgets.QPushButton(u"↺")
+        rb.setFixedWidth(26)
+        rb.setToolTip("このレイヤーでの変更をやめて、マスターと同じ値に戻す")
+        rb.clicked.connect(lambda: self._reset(attr))
+        grid.addWidget(lb, r, 0)
+        grid.addWidget(widget, r, 1)
+        grid.addWidget(rb, r, 2)
+        self._rows[attr] = (lb, rb, title)
+
+    def _pct(self, lo, hi, attr):
+        """0〜100 のスライダー＋数値欄。ドラッグ中は値だけ追従し、離したときに反映する。"""
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+        sl = QtWidgets.QSlider(QtCore.Qt.Horizontal); sl.setRange(lo, hi)
+        sp = QtWidgets.QSpinBox(); sp.setRange(lo, hi); sp.setFixedWidth(56)
+        h.addWidget(sl, 1); h.addWidget(sp)
+
+        def _from_slider(v):
+            sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+            if not sl.isSliderDown():
+                self._apply(attr, v / 100.0)
+        sl.valueChanged.connect(_from_slider)
+        sl.sliderReleased.connect(lambda: self._apply(attr, sl.value() / 100.0))
+
+        def _from_spin(v):
+            sl.blockSignals(True); sl.setValue(v); sl.blockSignals(False)
+            self._apply(attr, v / 100.0)
+        sp.valueChanged.connect(_from_spin)
+        return w, sl, sp
+
+    def _build(self):
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(4)
+
+        # ---- 隠れ線を透かす物 ----
+        self._section(lay, "隠れ線を透かす物（全レイヤー共通）")
+        self._note(lay, "ここに入れた物の裏に回った所だけ、隠れ線として透けて見えます"
+                        "（例: 眉 → 前髪）。入れていない物（頭など）の裏では出ません。")
+        self.lst_occ = QtWidgets.QListWidget()
+        self.lst_occ.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.lst_occ.setFixedHeight(84)
+        lay.addWidget(self.lst_occ)
+        orow = QtWidgets.QHBoxLayout()
+        b_add = QtWidgets.QPushButton("ビューポートで選んだ物を追加")
+        b_add.setToolTip("前髪など、透かしたい物をビューポートで選んでから押します。")
+        b_add.clicked.connect(self._add_occ)
+        b_rem = QtWidgets.QPushButton("一覧で選んだ物を外す")
+        b_rem.clicked.connect(self._remove_occ)
+        orow.addWidget(b_add); orow.addWidget(b_rem)
+        lay.addLayout(orow)
+        self.lbl_occ_state = self._note(lay, "")
+
+        # ---- レイヤーごとの見え方 ----
+        self._section(lay, "レイヤーごとの見え方")
+        lrow = QtWidgets.QHBoxLayout()
+        lrow.addWidget(QtWidgets.QLabel("レイヤー"))
+        self.cmb_layer = QtWidgets.QComboBox()
+        self.cmb_layer.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb_layer.setMinimumContentsLength(10)
+        self.cmb_layer.setToolTip(
+            "どのレイヤーの見え方を設定するか。選ぶとビューポートもそのレイヤーに切り替わります。\n"
+            "マスター＝ふだんのビューポート。プレイブラスト用の色などは各レイヤーで変えます。")
+        self.cmb_layer.currentIndexChanged.connect(self._on_layer_changed)
+        lrow.addWidget(self.cmb_layer, 1)
+        b_rl = QtWidgets.QPushButton(u"↻")
+        b_rl.setFixedWidth(26)
+        b_rl.setToolTip("レイヤー一覧を読み直す")
+        b_rl.clicked.connect(lambda: (self._reload_layers(), self._refresh()))
+        lrow.addWidget(b_rl)
+        lay.addLayout(lrow)
+        self._note(lay, u"● が付いた項目は、このレイヤーだけ変えています（↺ でマスターと同じに戻す）。")
+
+        grid = QtWidgets.QGridLayout()
+        grid.setColumnStretch(1, 1)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+
+        self.chk_vis = QtWidgets.QCheckBox("描く")
+        self.chk_vis.toggled.connect(lambda v: self._apply(LN_SHOW_VIS, bool(v)))
+        self._row(grid, 0, LN_SHOW_VIS, "線（表側）", self.chk_vis,
+                  "見えている部分の線を描くか。\nOFF にすると、隠れ線だけを書き出すレイヤーが作れます。")
+
+        self.btn_col = QtWidgets.QPushButton()
+        self.btn_col.clicked.connect(lambda: self._pick(LN_COLOR, "線の色"))
+        self._row(grid, 1, LN_COLOR, "線の色", self.btn_col,
+                  "このレイヤーでの線の色。\n例: マスターは黒、プレイブラスト用レイヤーでは緑。")
+
+        self.cmb_hid = QtWidgets.QComboBox()
+        self.cmb_hid.addItems(["出さない", "破線", "実線"])
+        self.cmb_hid.currentIndexChanged.connect(lambda i: self._apply(LN_HID_MODE, int(i)))
+        self._row(grid, 2, LN_HID_MODE, "隠れ線", self.cmb_hid,
+                  "紐づけた物の裏に回った部分の描き方。\n"
+                  "出さない / 破線 / 実線（色や濃さは下で変えられます）。")
+
+        hc = QtWidgets.QWidget()
+        hcl = QtWidgets.QHBoxLayout(hc); hcl.setContentsMargins(0, 0, 0, 0)
+        self.chk_same = QtWidgets.QCheckBox("線と同じ")
+        self.chk_same.toggled.connect(lambda v: self._apply(LN_HID_SAME, bool(v)))
+        self.btn_hcol = QtWidgets.QPushButton()
+        self.btn_hcol.clicked.connect(lambda: self._pick(LN_HID_COLOR, "隠れ線の色"))
+        hcl.addWidget(self.chk_same); hcl.addWidget(self.btn_hcol, 1)
+        self._row(grid, 3, LN_HID_COLOR, "隠れ線の色", hc,
+                  "隠れ線の色。『線と同じ』を外すと別の色にできます。")
+        # 「線と同じ」も同じ行の ↺ で戻す
+        self._rows[LN_HID_SAME] = self._rows[LN_HID_COLOR]
+
+        w_a, self.sl_alpha, self.sp_alpha = self._pct(0, 100, LN_HID_ALPHA)
+        self._row(grid, 4, LN_HID_ALPHA, "隠れ線の濃さ", w_a,
+                  "0 = 見えない / 50 = 半分透けた線 / 100 = 普通の線と同じ濃さ")
+
+        self.sp_dash = QtWidgets.QDoubleSpinBox()
+        self.sp_dash.setRange(1.0, 200.0); self.sp_dash.setDecimals(1)
+        self.sp_dash.setSingleStep(1.0); self.sp_dash.setSuffix(" px")
+        self.sp_dash.valueChanged.connect(lambda v: self._apply(LN_HID_DASH, float(v)))
+        self._row(grid, 5, LN_HID_DASH, "破線の長さ", self.sp_dash,
+                  "破線 1 区切り（線＋すき間）の長さ。画面のピクセル数。\n小さいほど細かい破線。")
+
+        w_f, self.sl_fill, self.sp_fill = self._pct(5, 95, LN_HID_FILL)
+        self._row(grid, 6, LN_HID_FILL, "破線の線の割合", w_f,
+                  "1 区切りのうち線を描く割合。\n5 = ほぼ点 / 50 = 線とすき間が半々 / 95 = ほぼつながった線")
+        lay.addLayout(grid)
+
+        # ---- 書き出し用 ----
+        self._section(lay, "書き出し用レイヤー")
+        b_hl = QtWidgets.QPushButton("このラインの隠れ線だけのレイヤーを作る")
+        b_hl.setToolTip(
+            "隠れ線だけが写るレンダーレイヤーを作ります（表側の線は描かない）。\n"
+            "元のメッシュと紐づけた物は、背景色で深度だけ書くので見えません。\n"
+            "別素材として書き出して合成するときに使います。")
+        b_hl.clicked.connect(self._make_hidden_layer)
+        lay.addWidget(b_hl)
+        self.lbl_status = self._note(lay, "")
+
+        brow = QtWidgets.QHBoxLayout()
+        brow.addStretch(1)
+        b_close = QtWidgets.QPushButton("閉じる")
+        b_close.clicked.connect(self.close)
+        brow.addWidget(b_close)
+        lay.addLayout(brow)
+
+    # ---------- レイヤー ----------
+    def _layer(self):
+        d = self.cmb_layer.itemData(self.cmb_layer.currentIndex())
+        return d or ""
+
+    def _reload_layers(self):
+        cur = _rs_visible_layer_name()
+        self.cmb_layer.blockSignals(True)
+        self.cmb_layer.clear()
+        self.cmb_layer.addItem("マスター（ふだんのビューポート）", "")
+        for n in _rs_layer_names():
+            self.cmb_layer.addItem(n, n)
+        idx = self.cmb_layer.findData(cur)
+        self.cmb_layer.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_layer.blockSignals(False)
+
+    def _on_layer_changed(self, idx):
+        if self._updating:
+            return
+        _rs_switch(self._layer())
+        self._refresh()
+
+    # ---------- 値の反映 ----------
+    def _apply(self, attr, value):
+        if self._updating or not self._lines:
+            return
+        layer = self._layer()
+        if layer != _rs_visible_layer_name():
+            _rs_switch(layer)   # 表示中のレイヤーと設定先を必ず揃える
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in self._lines:
+                _ensure_line_render_attrs(ln)
+                if layer:
+                    _rs_set_override(layer, ln, attr, value)
+                else:
+                    _line_set_attr(ln, attr, value)
+        except Exception as exc:
+            cmds.warning("ライン詳細設定の変更に失敗: {0}".format(exc))
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        try:
+            cmds.refresh()
+        except Exception:
+            pass
+        self._refresh()
+        self._owner_refresh_colors()
+
+    def _pick(self, attr, title):
+        if not self._lines:
+            return
+        try:
+            cur = cmds.getAttr(self._lines[0] + "." + attr)[0]
+        except Exception:
+            cur = (0.0, 0.0, 0.0)
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor.fromRgbF(cur[0], cur[1], cur[2]), self, title)
+        if c.isValid():
+            self._apply(attr, (c.redF(), c.greenF(), c.blueF()))
+
+    def _reset(self, attr):
+        layer = self._layer()
+        if not layer:
+            return
+        attrs = [attr]
+        if attr in (LN_HID_COLOR, LN_HID_SAME):
+            attrs = [LN_HID_COLOR, LN_HID_SAME]
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in self._lines:
+                for a in attrs:
+                    _rs_remove_override(layer, ln, a)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        _rs_switch(layer)   # 上書きを外した値を取り直す
+        self._refresh()
+        self._owner_refresh_colors()
+
+    def _owner_refresh_colors(self):
+        try:
+            if self._owner is not None:
+                self._owner.refresh_tree()
+        except Exception:
+            pass
+
+    # ---------- 紐づけ ----------
+    def _add_occ(self):
+        cands = _occluder_candidates(cmds.ls(sl=True, long=True) or [])
+        if not cands:
+            cmds.warning("透かしたい物（前髪など）をビューポートで選んでから押してください"
+                         "（ラインそのものは選べません）")
+            return
+        cmds.undoInfo(openChunk=True)
+        n = 0
+        try:
+            for ln in self._lines:
+                n += _add_line_occluders(ln, cands)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        _hidden_refresh_cache()
+        _og_override_sync()
+        self._refresh()
+        self._owner_refresh_colors()
+
+    def _remove_occ(self):
+        names = [it.data(QtCore.Qt.UserRole) for it in self.lst_occ.selectedItems()]
+        if not names:
+            cmds.warning("外す物を一覧で選んでください")
+            return
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in self._lines:
+                _remove_line_occluders(ln, names)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        _hidden_refresh_cache()
+        _og_override_sync()
+        self._refresh()
+        self._owner_refresh_colors()
+
+    # ---------- 書き出し用レイヤー ----------
+    def _make_hidden_layer(self):
+        if not any(_line_occluders(ln) for ln in self._lines):
+            cmds.warning("先に『隠れ線を透かす物』を紐づけてください（紐づけが無いと隠れ線は出ません）")
+            return
+        default = _sanitize_layer_name(_short(self._lines[0]) + "_hidden")
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "隠れ線だけのレイヤー", u"レイヤー名（英数/_）:",
+            QtWidgets.QLineEdit.Normal, default)
+        if not ok or not (name or "").strip():
+            return
+        cmds.undoInfo(openChunk=True)
+        try:
+            lname = create_hidden_only_layer(self._lines, name.strip())
+        except Exception as exc:
+            cmds.warning("レイヤーを作れませんでした: {0}".format(exc))
+            return
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self._reload_layers()
+        self._refresh()
+        self.lbl_status.setText(u"レイヤー「{0}」を作りました（いま表示中）。".format(lname))
+
+    # ---------- 表示 ----------
+    def _refresh(self):
+        if not self._lines:
+            return
+        self._updating = True
+        try:
+            # 他の画面でレイヤーが切り替わっていたら合わせる
+            vis = _rs_visible_layer_name()
+            if vis != self._layer():
+                idx = self.cmb_layer.findData(vis)
+                if idx < 0:
+                    self._reload_layers()
+                else:
+                    self.cmb_layer.setCurrentIndex(idx)
+            ln = self._lines[0]
+
+            def _get(attr, dv):
+                try:
+                    return cmds.getAttr(ln + "." + attr)
+                except Exception:
+                    return dv
+            self.chk_vis.setChecked(bool(_get(LN_SHOW_VIS, 1)))
+            self.btn_col.setStyleSheet(_rgb_style(_get(LN_COLOR, [(0, 0, 0)])[0]))
+            mode = int(_get(LN_HID_MODE, 1))
+            self.cmb_hid.setCurrentIndex(mode)
+            same = bool(_get(LN_HID_SAME, 1))
+            self.chk_same.setChecked(same)
+            self.btn_hcol.setEnabled(not same)
+            self.btn_hcol.setStyleSheet(_rgb_style(
+                _get(LN_COLOR if same else LN_HID_COLOR, [(0, 0, 0)])[0]))
+            a = int(round(float(_get(LN_HID_ALPHA, _SCRN_HIDDEN_ALPHA_DEF)) * 100))
+            self.sl_alpha.setValue(a); self.sp_alpha.setValue(a)
+            self.sp_dash.setValue(float(_get(LN_HID_DASH, _SCRN_HIDDEN_DASH_DEF)))
+            fl = int(round(float(_get(LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)) * 100))
+            self.sl_fill.setValue(fl); self.sp_fill.setValue(fl)
+            # 隠れ線を出さないときは関連項目を薄く、破線の項目は破線のときだけ
+            for w in (self.chk_same, self.btn_hcol, self.sl_alpha, self.sp_alpha):
+                w.setEnabled(mode != 0 and (w is not self.btn_hcol or not same))
+            for w in (self.sp_dash, self.sl_fill, self.sp_fill):
+                w.setEnabled(mode == 1)
+            # このレイヤーで上書きしている項目に印
+            layer = self._layer()
+            for attr, (lb, rb, title) in self._rows.items():
+                ov = False
+                if layer:
+                    keys = [LN_HID_COLOR, LN_HID_SAME] if attr in (LN_HID_COLOR, LN_HID_SAME) else [attr]
+                    ov = any(_rs_find_override(layer, ln, k) is not None for k in keys)
+                lb.setText((u"● " if ov else u"") + title)
+                lb.setStyleSheet("color: #e5c76b; font-weight: bold;" if ov else "")
+                rb.setVisible(bool(layer))
+                rb.setEnabled(ov)
+            # 紐づけ一覧（全ラインの合併）
+            self.lst_occ.clear()
+            seen = []
+            for l2 in self._lines:
+                for o in _line_occluders(l2):
+                    if o not in seen:
+                        seen.append(o)
+            for o in seen:
+                it = QtWidgets.QListWidgetItem(_short(o))
+                it.setData(QtCore.Qt.UserRole, o)
+                it.setToolTip(o)
+                self.lst_occ.addItem(it)
+            if not seen:
+                self.lbl_occ_state.setText(u"まだ紐づけがありません。このラインの隠れ線は出ません。")
+            elif not _hidden_scene_on():
+                self.lbl_occ_state.setText(u"メイン画面の『隠れ線を透かして描く』が OFF のため、いまは描かれません。")
+            elif _vp2_is_opengl():
+                self.lbl_occ_state.setText(u"OpenGL のビューポートでは隠れ線は描かれません（DirectX11 で表示）。")
+            else:
+                self.lbl_occ_state.setText(u"")
+        finally:
+            self._updating = False
+
+    def closeEvent(self, event):
+        if _line_options_win[0] is self:
+            _line_options_win[0] = None
+        QtWidgets.QDialog.closeEvent(self, event)
+
+
+def show_line_options(lines, owner=None):
+    """ライン詳細設定ウィンドウを開く（開いていれば閉じて開き直す）。"""
+    old = _line_options_win[0]
+    if old is not None:
+        try:
+            old.close()
+            old.deleteLater()
+        except Exception:
+            pass
+    lines = [ln for ln in lines or [] if _attr_exists(ln, SCRN_TAG)]
+    if not lines:
+        cmds.warning("ライン詳細設定はスクリーン輪郭のラインで使えます")
+        return None
+    dlg = _LineOptionsDialog(lines, owner)
+    _line_options_win[0] = dlg
+    dlg.show()
+    return dlg
+
+
+# ---- シーンを開き直したら隠れ線の紐づけを読み直す（ツールのウィンドウが閉じていても） ----
+def _on_scene_changed():
+    try:
+        _hidden_refresh_cache()
+        _og_override_sync()
+    except Exception:
+        pass
+    try:
+        if _toon_win is not None and _toon_win.isVisible():
+            _toon_win.refresh_tree()
+    except Exception:
+        pass
+
+
+def _kill_scene_jobs():
+    """このツールが登録したシーン切替 scriptJob を消す（モジュール再読込で二重登録しない）。"""
+    try:
+        for j in cmds.scriptJob(listJobs=True) or []:
+            if "_on_scene_changed" in j and "Scene" in j:
+                try:
+                    cmds.scriptJob(kill=int(j.split(":")[0]), force=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _ensure_scene_jobs():
+    _kill_scene_jobs()
+    for ev in ("SceneOpened", "NewSceneOpened"):
+        try:
+            cmds.scriptJob(event=[ev, _on_scene_changed], protected=False)
+        except Exception:
+            pass
+
+
 _toon_win = None
 
 
@@ -6773,12 +7847,19 @@ def _close_tool_windows():
     try:
         for w in QtWidgets.QApplication.topLevelWidgets():
             try:
-                if w.objectName() == WINDOW_OBJ:
+                if w.objectName() in (WINDOW_OBJ, _LINEOPT_OBJ):
                     w.close(); w.deleteLater()
             except Exception:
                 pass
     except Exception:
         pass
+    # v0.1.46: 更新でモジュールが入れ替わる前に、このモジュールのオーバーライドと
+    # シーン監視を片付ける（新しいモジュールが同名で登録し直す）
+    try:
+        _edge_disable()
+    except Exception:
+        pass
+    _kill_scene_jobs()
 
 
 def _run_update(sha_override=None, tag_label=""):
@@ -6901,6 +7982,7 @@ float  gNear      = 0.1f;
 float  gFar       = 10000.0f;
 int    gDebug     = 0;                  // 1: 線形化深度を可視化（切り分け用）
 int    gIntersectMode    = 0;           // 1: 対象と他オブジェクトの交差線モード
+int    gEdgeMode         = 0;           // 1: 対象の自己エッジ（旧・画像空間エッジ）
 float  gIntersectThresh  = 0.01f;       // 深度一致とみなす相対差しきい値
 
 struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
@@ -7016,12 +8098,13 @@ float4 PS(VOUT i) : SV_Target
     // （以前は self-silhouette と合成していたため、交差線 ON にすると cup 自身の
     // 円筒 tangential silhouette が余計に overlay されて「cup 中に縦線がある」ように
     // 見えていた。）
-    float e;
+    // v0.1.46: どちらも OFF（隠れ線だけでオーバーライドを使うとき）は素通し。
+    float e = 0.0f;
     if (gIntersectMode != 0)
     {
         e = intersectEdge(i.UV, t);
     }
-    else
+    else if (gEdgeMode != 0)
     {
         float mask = visible;
         float hi = gThreshold * 1.15f;
@@ -7055,6 +8138,7 @@ uniform float gNear;
 uniform float gFar;
 uniform int gDebug;
 uniform int gIntersectMode;
+uniform int gEdgeMode;
 uniform float gIntersectThresh;
 
 attribute VS_IN {
@@ -7158,10 +8242,10 @@ GLSLShader PS {
         float visible = (zc < 0.9999 && abs(zc - zs) < 0.001) ? 1.0 : 0.0;
 
         // v0.1.44: 交差線モード時は intersect だけ描く（self-silhouette と合成しない）
-        float e;
+        float e = 0.0;
         if (gIntersectMode != 0) {
             e = intersectEdge(VSUV, t);
-        } else {
+        } else if (gEdgeMode != 0) {
             float mask = visible;
             float hi = gThreshold * 1.15;
             e = mask * smoothstep(gThreshold, hi, rel);
@@ -7315,6 +8399,51 @@ def _edge_active():
     return _edge_override is not None
 
 
+# v0.1.46: オーバーライドを使う機能の状態。交差線/旧エッジは UI のトグル、隠れ線は
+# 紐づけの有無（_HIDDEN_GROUPS）とシーン設定（ROOT.toonHiddenOn）で決まる。
+_OVR_STATE = {"edge": False, "intersect": False}
+
+
+def _hidden_set_shader_params(s, line, ovr):
+    """隠れ線パスのシェーダへ、このラインの現在値を渡す。ライン属性は Render Setup の
+    オーバーライド後の値が読めるので、表示中のレイヤーの見え方がそのまま出る。"""
+    def _get(node, attr, dv):
+        try:
+            return cmds.getAttr(node + "." + attr)
+        except Exception:
+            return dv
+    s.setParameter("gOccDepth", ovr.tOccDepth)
+    s.setParameter("gSceneDepth", ovr.tDepthScene)
+    n, f = _edge_active_camera_near_far(ovr.destination)
+    s.setParameter("gNear", float(n))
+    s.setParameter("gFar", float(f))
+    s.setParameter("hiddenTol", float(HIDDEN_DEPTH_TOL))
+    s.setParameter("hiddenMode", int(_hidden_line_mode(line)))
+    if bool(_get(line, LN_HID_SAME, 1)):
+        col = _get(line, LN_COLOR, [(0.0, 0.0, 0.0)])[0]
+    else:
+        col = _get(line, LN_HID_COLOR, [(0.0, 0.0, 0.0)])[0]
+    s.setParameter("lineColor", (float(col[0]), float(col[1]), float(col[2])))
+    s.setParameter("hiddenAlpha", float(_get(line, LN_HID_ALPHA, _SCRN_HIDDEN_ALPHA_DEF)))
+    s.setParameter("hiddenDashLen", float(_get(line, LN_HID_DASH, _SCRN_HIDDEN_DASH_DEF)))
+    s.setParameter("hiddenDashFill", float(_get(line, LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)))
+    shd = _fresnel_shader(line)
+    if shd:
+        for an, dv in ((SCRN_THICK, 3.0), (SCRN_DEPTH_BIAS, 0.0), ("stability", 0.0),
+                       (SCRN_BRUSH_ROUGH, 0.0), (SCRN_BRUSH_WAVE, 0.0), (SCRN_BRUSH_SCALE, 20.0)):
+            s.setParameter(an, float(_get(shd, an, dv)))
+
+
+def _og_override_sync():
+    """いま必要な機能に合わせてオーバーライドを有効/無効にする。有効なら True。"""
+    need_hidden = bool(_HIDDEN_GROUPS) and _hidden_scene_on() and not _vp2_is_opengl()
+    if _OVR_STATE["edge"] or _OVR_STATE["intersect"] or need_hidden:
+        return _edge_enable()
+    if _edge_override is not None:
+        _edge_disable()
+    return False
+
+
 def _edge_enable():
     """画像空間エッジ検出のレンダーオーバーライドを現在のモデルパネルへ適用。
     成功で True。レンダー API が無い/失敗しても例外を投げず False を返す（本体は無事）。"""
@@ -7324,6 +8453,7 @@ def _edge_enable():
     except Exception as exc:
         cmds.warning("画像空間エッジ検出はこの環境で使えません（VP2/DirectX11 が必要）: {0}".format(exc))
         return False
+    fresh = _edge_override is None
     if _edge_override is None:
         try:
             fx_path = _edge_fx_path()
@@ -7410,6 +8540,88 @@ def _edge_enable():
                 def objectSetOverride(self):
                     return _others_sel()
 
+            # ---- v0.1.46: 隠れ線（紐づけ先の裏だけ） ----
+            hidden_fx = _scrn_hidden_fx_path()
+            try:
+                _FILTER_SHADED = omr.MSceneRender.kRenderShadedItems
+            except Exception:
+                _FILTER_SHADED = None
+            try:
+                _MODE_SHADED = omr.MSceneRender.kShaded
+            except Exception:
+                _MODE_SHADED = None
+
+            def _sel_of(names):
+                sel = om2.MSelectionList()
+                for n in names:
+                    try:
+                        sel.add(n)
+                    except Exception:
+                        pass
+                return sel
+
+            class _SceneOcc(omr.MSceneRender):
+                """紐づけ先の物だけを tOccDepth へ（深度だけを使う）。"""
+                def __init__(self, name, ovr):
+                    omr.MSceneRender.__init__(self, name); self.ovr = ovr; self.names = []
+                def targetOverrideList(self):
+                    return [self.ovr.tColorScratch, self.ovr.tOccDepth]
+                def clearOperation(self):
+                    c = self.mClearOperation
+                    c.setClearGradient(False)
+                    c.setClearColor([0.0, 0.0, 0.0, 0.0])
+                    c.setClearDepth(1.0)
+                    c.setMask(omr.MClearOperation.kClearAll)
+                    return c
+                def objectSetOverride(self):
+                    return _sel_of(self.names)
+                def renderFilterOverride(self):
+                    return _FILTER_SHADED if _FILTER_SHADED is not None else \
+                        omr.MSceneRender.renderFilterOverride(self)
+                def displayModeOverride(self):
+                    return _MODE_SHADED if _MODE_SHADED is not None else \
+                        omr.MSceneRender.displayModeOverride(self)
+
+            class _SceneHiddenLine(omr.MSceneRender):
+                """1 本のラインの隠れ線を tColor へ重ねる（深度テストは使わず PS で判定）。"""
+                def __init__(self, name, ovr):
+                    omr.MSceneRender.__init__(self, name); self.ovr = ovr
+                    self.line = None; self.shaderInst = None
+                def targetOverrideList(self):
+                    return [self.ovr.tColor, self.ovr.tDepthHidden]
+                def clearOperation(self):
+                    c = self.mClearOperation
+                    c.setClearDepth(1.0)
+                    c.setMask(omr.MClearOperation.kClearDepth)   # 色は消さない
+                    return c
+                def objectSetOverride(self):
+                    return _sel_of([self.line] if self.line else [])
+                def renderFilterOverride(self):
+                    return _FILTER_SHADED if _FILTER_SHADED is not None else \
+                        omr.MSceneRender.renderFilterOverride(self)
+                def displayModeOverride(self):
+                    return _MODE_SHADED if _MODE_SHADED is not None else \
+                        omr.MSceneRender.displayModeOverride(self)
+                def ensure_shader(self):
+                    """隠れ線シェーダを用意する。失敗したらこのパスは組まない（素の線が
+                    深度テスト無しで全面に重なるのを防ぐ）。"""
+                    if self.shaderInst is None:
+                        sm = omr.MRenderer.getShaderManager()
+                        if sm is not None:
+                            try:
+                                self.shaderInst = sm.getEffectsFileShader(hidden_fx, "Main")
+                            except Exception:
+                                self.shaderInst = None
+                    return self.shaderInst is not None
+                def shaderOverride(self):
+                    s = self.shaderInst
+                    if s is not None and self.line:
+                        try:
+                            _hidden_set_shader_params(s, self.line, self.ovr)
+                        except Exception as exc:
+                            om2.MGlobal.displayWarning("[OG hidden] shader param: {0}".format(exc))
+                    return s
+
             class _QuadEdge(omr.MQuadRender):
                 def __init__(self, name, ovr):
                     omr.MQuadRender.__init__(self, name); self.ovr = ovr; self.shaderInst = None
@@ -7442,7 +8654,9 @@ def _edge_enable():
                         s.setParameter("gNear", float(n))
                         s.setParameter("gFar", float(f))
                         s.setParameter("gDebug", int(_EDGE_PARAMS["debug"]))
-                        s.setParameter("gIntersectMode", int(_EDGE_PARAMS["intersect_mode"]))
+                        s.setParameter("gIntersectMode",
+                                       int(bool(_OVR_STATE["intersect"] and _EDGE_PARAMS["intersect_mode"])))
+                        s.setParameter("gEdgeMode", int(bool(_OVR_STATE["edge"])))
                         s.setParameter("gIntersectThresh", float(_EDGE_PARAMS["intersect_threshold"]))
                     except Exception as exc:
                         om2.MGlobal.displayWarning("[OG edge] shader param: {0}".format(exc))
@@ -7467,14 +8681,22 @@ def _edge_enable():
                         "OG_edgeDepth", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
                     self._doDesc = omr.MRenderTargetDescription(
                         "OG_edgeDepthOther", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    # v0.1.46: 隠れ線用（紐づけ先だけの深度 / 隠れ線パスのダミー深度）
+                    self.tOccDepth = None; self.tDepthHidden = None
+                    self._ocDesc = omr.MRenderTargetDescription(
+                        "OG_hidOccDepth", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    self._dhDesc = omr.MRenderTargetDescription(
+                        "OG_hidDepth", 256, 256, 1, omr.MRenderer.kD24S8, 0, False)
+                    self._occ_ops = []      # _SceneOcc（紐づけ先グループごと）
+                    self._hid_ops = {}      # line -> _SceneHiddenLine
+                    self._n_hid = 0
                     self._sceneFull = _SceneFull("og_edge_full", self)
                     self._sceneTgt = _SceneTargets("og_edge_tgt", self)
                     self._sceneOther = _SceneOthers("og_edge_other", self)
                     self._quad = _QuadEdge("og_edge_quad", self)
                     self._hud = omr.MHUDRender()
                     self._present = omr.MPresentTarget("og_edge_present")
-                    self._ops = [self._sceneFull, self._sceneTgt, self._sceneOther,
-                                 self._quad, self._hud, self._present]
+                    self._ops = [self._sceneFull, self._quad, self._hud, self._present]
                     self._it = 0
                 def supportedDrawAPIs(self):
                     return omr.MRenderer.kAllDevices
@@ -7485,7 +8707,10 @@ def _edge_enable():
                     # サイズを直接測る（outputTargetSize() は Windows の HiDPI で論理
                     # サイズを返し、ターゲットが実バックバッファの半分になる→拡大ボケ
                     # によるかすれの主因になっていた）。取得不可なら旧 API へフォールバック。
-                    w = 0; h = 0
+                    # v0.1.46: プレイブラスト（パネルと違う解像度への出力）では出力解像度で描く。
+                    # パネルの大きさで描いて縮めると線が細く/太くなる（480x300 の書き出しで
+                    # 1321x764 で描いて縮小→線が 1/3 に細っていた）。
+                    lw = lh = 0; dpr = 1.0
                     try:
                         ptr = omui.MQtUtil.findControl(destination) if destination else None
                         if ptr:
@@ -7494,16 +8719,24 @@ def _edge_enable():
                                 dpr = float(widget.devicePixelRatioF())
                             except AttributeError:
                                 dpr = float(widget.devicePixelRatio())
-                            w = int(max(1, round(widget.width() * dpr)))
-                            h = int(max(1, round(widget.height() * dpr)))
+                            lw, lh = int(widget.width()), int(widget.height())
                     except Exception:
-                        w = 0; h = 0
-                    if w <= 0 or h <= 0:
-                        try:
-                            tgt = omr.MRenderer.outputTargetSize()
-                            w, h = int(tgt[0]), int(tgt[1])
-                        except Exception:
-                            w, h = 1280, 720
+                        lw = lh = 0
+                    ow = oh = 0
+                    try:
+                        tgt = omr.MRenderer.outputTargetSize()
+                        ow, oh = int(tgt[0]), int(tgt[1])
+                    except Exception:
+                        ow = oh = 0
+                    pw = int(max(1, round(lw * dpr))); ph = int(max(1, round(lh * dpr)))
+                    if ow > 0 and oh > 0:
+                        is_panel = lw > 0 and (((ow, oh) == (lw, lh)) or
+                                               (abs(ow - pw) <= 1 and abs(oh - ph) <= 1))
+                        w, h = (pw, ph) if is_panel else (ow, oh)
+                    elif lw > 0:
+                        w, h = pw, ph
+                    else:
+                        w, h = 1280, 720
                     self.w, self.h = w, h
                     # 変化時に一度だけログ（HiDPI/解像度の切り分け用）
                     global _edge_size_logged
@@ -7515,8 +8748,17 @@ def _edge_enable():
                                 .format(self.w, self.h, destination or ""))
                         except Exception:
                             pass
-                    for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc, self._doDesc):
+                    for desc in (self._cDesc, self._csDesc, self._dsDesc, self._dDesc, self._doDesc,
+                                 self._ocDesc, self._dhDesc):
                         desc.setWidth(self.w); desc.setHeight(self.h)
+                    if self.tOccDepth is None:
+                        self.tOccDepth = self._tmgr.acquireRenderTarget(self._ocDesc)
+                    else:
+                        self.tOccDepth.updateDescription(self._ocDesc)
+                    if self.tDepthHidden is None:
+                        self.tDepthHidden = self._tmgr.acquireRenderTarget(self._dhDesc)
+                    else:
+                        self.tDepthHidden.updateDescription(self._dhDesc)
                     if self.tColor is None:
                         self.tColor = self._tmgr.acquireRenderTarget(self._cDesc)
                     else:
@@ -7537,6 +8779,46 @@ def _edge_enable():
                         self.tDepthOther = self._tmgr.acquireRenderTarget(self._doDesc)
                     else:
                         self.tDepthOther.updateDescription(self._doDesc)
+                    self._ops = self._build_ops()
+                def _build_ops(self):
+                    """このフレームで使う機能だけのパス列（交差線/旧エッジ/隠れ線）。"""
+                    ops = [self._sceneFull]
+                    if _OVR_STATE["edge"] or _OVR_STATE["intersect"]:
+                        ops.append(self._sceneTgt)
+                        if _OVR_STATE["intersect"]:
+                            ops.append(self._sceneOther)
+                    groups = []
+                    try:
+                        if not _vp2_is_opengl():
+                            groups = _hidden_frame_groups()
+                    except Exception:
+                        groups = []
+                    for gi, (occ, lines) in enumerate(groups):
+                        hops = []
+                        for ln in lines:
+                            hop = self._hid_ops.get(ln)
+                            if hop is None:
+                                self._n_hid += 1
+                                hop = _SceneHiddenLine("og_hid_line_{0}".format(self._n_hid), self)
+                                hop.line = ln
+                                self._hid_ops[ln] = hop
+                            if hop.ensure_shader():
+                                hops.append(hop)
+                            elif not getattr(hop, "_warned", False):
+                                hop._warned = True
+                                om2.MGlobal.displayWarning(
+                                    "[OG hidden] 隠れ線シェーダを読み込めません: {0}".format(hidden_fx))
+                        if not hops:
+                            continue
+                        while len(self._occ_ops) <= gi:
+                            self._occ_ops.append(
+                                _SceneOcc("og_hid_occ_{0}".format(len(self._occ_ops)), self))
+                        op = self._occ_ops[gi]
+                        op.names = list(occ)
+                        ops.append(op)
+                        ops.extend(hops)
+                    ops.extend([self._quad, self._hud, self._present])
+                    return ops
                 def cleanup(self):
                     pass
                 def startOperationIterator(self):
@@ -7546,7 +8828,8 @@ def _edge_enable():
                 def nextRenderOperation(self):
                     self._it += 1; return self._it < len(self._ops)
                 def release(self):
-                    for a in ("tColor", "tColorScratch", "tDepthScene", "tDepth", "tDepthOther"):
+                    for a in ("tColor", "tColorScratch", "tDepthScene", "tDepth", "tDepthOther",
+                              "tOccDepth", "tDepthHidden"):
                         t = getattr(self, a, None)
                         if t is not None:
                             try:
@@ -7554,29 +8837,52 @@ def _edge_enable():
                             except Exception:
                                 pass
                             setattr(self, a, None)
+                    sm = omr.MRenderer.getShaderManager()
+                    for hop in list(self._hid_ops.values()):
+                        if hop.shaderInst is not None and sm is not None:
+                            try:
+                                sm.releaseShader(hop.shaderInst)
+                            except Exception:
+                                pass
+                        hop.shaderInst = None
 
+            # 古いモジュール（再読込前）が同名で登録したままなら外してから登録する
+            try:
+                stale = omr.MRenderer.findRenderOverride(EDGE_OVR_NAME)
+                if stale is not None:
+                    omr.MRenderer.deregisterOverride(stale)
+            except Exception:
+                pass
             _edge_override = _EdgeOverride(EDGE_OVR_NAME)
             omr.MRenderer.registerOverride(_edge_override)
         except Exception as exc:
             _edge_override = None
             cmds.warning("画像空間エッジ検出の初期化に失敗: {0}".format(exc))
             return False
-    # 現在のモデルパネルへ適用
-    panel = None
-    p = cmds.getPanel(withFocus=True)
-    if p and cmds.getPanel(typeOf=p) == "modelPanel":
-        panel = p
-    else:
-        for pp in (cmds.getPanel(type="modelPanel") or []):
-            panel = pp; break
-    if not panel:
+    # v0.1.46: 全モデルパネルへ適用（隠れ線はプレイブラストでも必要。どのパネルで
+    # プレイブラストしても同じ絵になるように、フォーカス中のパネルだけにしない）
+    panels = cmds.getPanel(type="modelPanel") or []
+    if not panels:
         cmds.warning("モデルパネルが見つかりません"); return False
+    ok = False
+    for panel in panels:
+        try:
+            cur = cmds.modelEditor(panel, q=True, rendererOverrideName=True)
+            # 登録し直した直後は、名前が同じでもパネルへ入れ直す。シーンを開くとパネル設定が
+            # 「このオーバーライドを使う」で復元されるが、その時点で未登録だと既定描画に
+            # 戻ったままになり、後から登録しても反映されない（v0.1.46 で確認）。
+            if fresh and cur == EDGE_OVR_NAME:
+                cmds.modelEditor(panel, e=True, rendererOverrideName="")
+            if fresh or cur != EDGE_OVR_NAME:
+                cmds.modelEditor(panel, e=True, rendererOverrideName=EDGE_OVR_NAME)
+            ok = True
+        except Exception as exc:
+            cmds.warning("画像空間エッジ検出の適用に失敗（{0}）: {1}".format(panel, exc))
     try:
-        cmds.modelEditor(panel, e=True, rendererOverrideName=EDGE_OVR_NAME)
         cmds.refresh()
-    except Exception as exc:
-        cmds.warning("画像空間エッジ検出の適用に失敗: {0}".format(exc)); return False
-    return True
+    except Exception:
+        pass
+    return ok
 
 
 def _edge_disable():
@@ -7626,6 +8932,7 @@ def show():
             pass
     _toon_win = ToonOutlineUI()
     _toon_win.show()
+    _ensure_scene_jobs()   # v0.1.46: シーンを開き直したら隠れ線の紐づけを読み直す
     return _toon_win
 
 

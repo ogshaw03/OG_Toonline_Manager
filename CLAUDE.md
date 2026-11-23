@@ -415,6 +415,60 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   シグネチャ（`objectSetOverride` 等）は Maya バージョン差の可能性があり、動かない場合の第一容疑者。
 - 元になった単体版 `OG_Edge_Outline.py`（全ビューポート対象）も残置。本体統合版はこれをオブジェクト単位に拡張したもの。
 
+### 交差線・隠れ線とオーバーライドの共通基盤（v0.1.40〜v0.1.46）
+
+画像空間の線（交差線・旧エッジ・隠れ線）は全て 1 つの `MRenderOverride`（`EDGE_OVR_NAME`）で描く。
+- **有効/無効は `_og_override_sync()` に一本化**: 交差線/旧エッジは `_OVR_STATE`（UI トグル）、隠れ線は
+  紐づけキャッシュ `_HIDDEN_GROUPS` が空でない かつ `ROOT.toonHiddenOn`（シーン保存・既定 ON）。
+  直接 `_edge_enable/_edge_disable` を呼ばない。パス列は `_EdgeOverride._build_ops()` が毎フレーム組む
+  （必要な機能のパスだけ）。オーバーライドは**全モデルパネル**へ適用（どのパネルでプレイブラストしても同じ絵）。
+- **シェーダファイルはファイル名に版を入れる**（`OG_EdgeOutline_v<ver>.fx` / `OG_ToonScreen_v<ver>.fx` /
+  `OG_ScrnHidden_v<ver>.fx`、`_write_fx_file`）。dx11Shader・`MShaderManager.getEffectsFileShader` は
+  **パス単位でコンパイル結果を使い回す**ため、同じパスで中身だけ変えても反映されない（v0.1.43 で踏んだ）。
+  既存 SCRN ラインは `_upgrade_scrn_shader` が新パスへ差し替え、入力接続（太さの駆動）と値を戻す。
+- 交差線（v0.1.40〜45）: 対象 = SCRN ラインで `toonIntersectOn`（右クリックで個別切替）かつ表示中の
+  元メッシュ。交差線モードでは self-silhouette を混ぜない（円筒の接線シルエットが縦線に見えた）。
+  `intersectEdge` は「scene 最前面が target 側/other 側に隣接」を条件に奥の擬似交差を捨てる。
+  太さは SCRN 本体の mB.output×SCRN_SCALE に合わせる。
+- 複数メッシュ選択で生成すると 1 グループ（`a_b_outlines` / `a_b_etc_outlines`）にまとめる（v0.1.42）。
+
+### ライン詳細設定（v0.1.46・右クリック →「ライン詳細設定…」）
+
+**ビューポート＝マスターの値、プレイブラスト＝レンダーレイヤーを切り替えて書き出す**、という運用に合わせ、
+ラインの見え方をレンダーレイヤーごとに変えられる（`_LineOptionsDialog`）。SCRN ラインのみ。
+- 見え方の属性はライン transform に置く（`LN_*`: 表側の線/線色/隠れ線モード・色・濃さ・破線）。
+  線色 `toonLineColor`→`shd.lineColor`、表側 `toonShowVisible`→`shd.showVisible` は**接続**しているので、
+  SCRN の色を変えるときは `_scrn_set_color(line, rgb)` を使う（シェーダへ直接 setAttr しない）。
+- **レイヤーごとの値 = Render Setup の絶対オーバーライド**（`_rs_set_override` / `_rs_remove_override`、
+  コレクション名 `<layer>_OG_<line>`）。ダイアログでレイヤーを選ぶと表示レイヤーも切り替わる
+  （値の読み書きは常に表示中のレイヤー＝getAttr でオーバーライド後の値が読める）。
+- **隠れ線 = 紐づけた物の裏に回った所だけ**描く（紐づけ無し＝描かない）。紐づけは
+  `toonHiddenOccluders`（物.message → multi。全レイヤー共通・リネームに強い）。旧「何の裏でも透ける
+  2nd pass」は撤去（SCRN 本体の technique は p0 のみ）。
+  - 描き方: オーバーライド内で、紐づけ先グループごとに `_SceneOcc`（紐づけ先だけの深度 tOccDepth）→
+    ラインごとに `_SceneHiddenLine`（線のシェルに shaderOverride で `_SCRN_FX_HLSL_HIDDEN` を当てる）。
+    隠れ線 PS は深度テストを使わず「線が紐づけ先より奥 かつ 紐づけ先がその画素で一番手前」の所だけ描く
+    （手前に別の物があれば描かない）。shaderOverride では色セットの頂点ストリームが来る保証が無いので
+    隠れ線版は COLOR0 を使わない（`#define OG_NO_COLOR0`）。パラメータは毎フレーム `_hidden_set_shader_params`
+    がライン属性から読む＝表示中レイヤーの値がそのまま出る。**DirectX11 のみ**（OpenGL は未対応）。
+  - 「このラインの隠れ線だけのレイヤーを作る」（`create_hidden_only_layer`）: 表側の線を OFF にし、元メッシュと
+    紐づけ先は useBackground で深度だけ書く（透かす判定に必要）。別素材として合成する用途。
+- シーンを開き直すと `_on_scene_changed`（`show()` が登録する scriptJob）が紐づけを読み直してオーバーライドを
+  有効化する（ツールのウィンドウを閉じていても動く。**Maya 起動後にツールを一度も開いていないと隠れ線は出ない**）。
+- **`refresh_tree` から呼ばれる処理は「値が違うときだけ setAttr」**（`_set_if_diff`）。毎回同じ値を書くと
+  Undo 履歴に積まれ、直前の操作（ライン生成・紐づけ等）が Ctrl+Z 1 回で戻らない（v0.1.46 で
+  `_set_outliner_color` / `_lock_trs` / `_ensure_thickness_chain` の係数 / `_apply_line_selectable` /
+  `_tuck_handle` / `showHidden` を修正）。新しく「確保」系の処理を足すときも同じにする。
+- **オーバーライドの描画先の大きさ**: ビューポートではパネルの実ピクセル（HiDPI 対策）、プレイブラストでは
+  `outputTargetSize()`（書き出し解像度）。パネルの大きさで描いて縮めると線の太さが変わる（v0.1.46 で修正）。
+
+### 見た目の検証方法
+
+利用者の Maya を commandPort で操作しない（重い操作で落ちたことがある）。専用 MAYA_APP_DIR の GUI Maya 2023 を
+**`MAYA_VP2_DEVICE_OVERRIDE=VirtualDeviceDx11`** で背面起動し（無いと OpenGL で起動して dx11Shader が映らない）、
+`playblast(offScreen=True)` で撮る。dx11Shader もオーバーライドの出力も写る。物を surfaceShader の 0/1 の色にして、
+線あり画像とライン非表示のマスク画像を突き合わせると「線の画素がどの物の上に出たか」を数えられる。
+
 ### 互換性の注意
 
 PySide2 系の旧 Maya（2019/2020）は Python 2.7。
