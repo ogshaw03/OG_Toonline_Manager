@@ -262,7 +262,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.50"
+__version__ = "0.1.51"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -1495,16 +1495,32 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
 
     // v0.1.49 入り抜き: 輪郭の端（輪郭が視線の方向に沿って縮む所）ほど細くする。
     // 輪郭の途切れる点では輪郭線が視線と平行になる（なす角の sin → 0）性質を使う局所判定。
+    // v0.1.51: s は三角形ごとの値で、ふつうの輪郭でも 0.6〜0.95 くらいでばらつく（傾けたトーラスの外周で
+    // 実測）。旧 s^4 はそのばらつきを外周の太さの起伏にしてしまった。
+    // 輪郭が途切れる点（カスプ）は鞍形（ガウス曲率が負）の所にしか起きない（Koenderink）ので、
+    // 三角形が鞍形のときだけ細くする。凸の所（頭や体の外周など）の輪郭は s がばらついても元の太さのまま。
+    // 鞍形の判定: 頂点法線の三角形と位置の三角形の向きが逆か（大きさで割った値＝縮尺・密度によらない）。
+    // 実測: 外周（凸）は最小 -0.53（ほぼ平らな所のぶれ）、内側の輪郭（鞍）は -0.90 以下。
     float taperK = 1.0f;
     if (brushTaper > 0.001f) {
         float3 seg = vsp2 - vsp1;
         float segLen2 = dot(seg, seg);
-        if (segLen2 > 1e-12f) {
+        float3 ta = normalize(tri[0].VSNrm);
+        float3 m1 = normalize(tri[1].VSNrm) - ta;
+        float3 m2 = normalize(tri[2].VSNrm) - ta;
+        float3 fc = cross(tri[1].VSPos - tri[0].VSPos, tri[2].VSPos - tri[0].VSPos);
+        float fl = length(fc);
+        float mm = length(m1) * length(m2);
+        float kd = (fl > 1e-12f && mm > 1e-12f) ? dot(cross(m1, m2), fc / fl) / mm : 1.0f;
+        float saddle = smoothstep(0.6f, 0.85f, -kd);
+        if (segLen2 > 1e-12f && saddle > 0.0f) {
             float3 vdir = normalize(vsp1 + vsp2);
             float along = dot(seg, vdir);
             float s = sqrt(saturate(1.0f - along * along / segLen2));
-            // 強さに応じた累乗で、端に向かって長めに細る（100 で s^4: s=0.9→0.66, 0.7→0.24）
-            taperK = pow(max(s, 1e-4f), 4.0f * saturate(brushTaper));
+            // 強さで細り始める所を決める（100 で s<0.85 から＝端の手前から長めに、50 で s<0.575）。
+            // 1 に近い所まで広げると、首のような鞍形の途切れない輪郭で s のばらつきが起伏に出るので 0.85 まで。
+            float hi = 0.3f + 0.55f * saturate(brushTaper);
+            taperK = lerp(1.0f, smoothstep(0.0f, hi, s), saddle);
         }
     }
 
