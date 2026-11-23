@@ -121,6 +121,7 @@ _SCRN_HIDDEN_DEF = 0                  # 既定 OFF（互換性）
 _SCRN_HIDDEN_DASH_DEF = 10.0
 _SCRN_HIDDEN_FILL_DEF = 0.55
 _SCRN_HIDDEN_ALPHA_DEF = 0.6
+SCRN_INTERSECT_ON = "toonIntersectOn"  # v0.1.41 SCRN ライン個別の「交差線に含める」フラグ(bool, 既定 True)
 MASK_TAG    = "isToonOverlapMask"    # 重なり隠しマスク（元メッシュ複製を面色で膨らませた覆い）の識別タグ
 MASK_LINK   = "toonMask"             # line → mask への message（重なりマスクの関連付け）
 MASK_INFLATE_FRAC = 1.0              # マスク膨らみ量 = ライン太さ × 係数。大きいほど交差を覆える
@@ -235,7 +236,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.40"
+__version__ = "0.1.41"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -525,6 +526,32 @@ def _all_screen_lines():
         if cmds.attributeQuery(SCRN_TAG, node=t, exists=True):
             out.append(t)
     return out
+
+
+def _scrn_intersect_on(line):
+    """v0.1.41: SCRN ラインが交差線の対象かどうか。未設定（旧シーン）は True 扱い。"""
+    try:
+        if not cmds.attributeQuery(SCRN_INTERSECT_ON, node=line, exists=True):
+            return True
+        return bool(cmds.getAttr(line + "." + SCRN_INTERSECT_ON))
+    except Exception:
+        return True
+
+
+def _scrn_set_intersect_on(line, enabled):
+    """v0.1.41: SCRN ラインの交差線参加フラグを設定（属性が無ければ作る）。"""
+    try:
+        if not cmds.attributeQuery(SCRN_INTERSECT_ON, node=line, exists=True):
+            cmds.addAttr(line, ln=SCRN_INTERSECT_ON, at="bool", dv=True)
+        cmds.setAttr(line + "." + SCRN_INTERSECT_ON, bool(enabled))
+    except Exception:
+        pass
+
+
+def _scrn_intersect_meshes():
+    """v0.1.41: 交差線対象の元メッシュ transform リスト（SCRN ラインで intersectOn=True のもの）。"""
+    lines = [ln for ln in _all_screen_lines() if _scrn_intersect_on(ln)]
+    return _source_meshes_of(lines)
 
 
 def _scrn_set_depth_bias(v):
@@ -4407,15 +4434,15 @@ class ToonOutlineUI(QtWidgets.QDialog):
                         scale=self.spn_brush_scale.value())
 
     def _on_toggle_intersect(self, state):
-        """v0.1.36: 交差線（画像空間、対象 vs 他メッシュ）の ON/OFF。
-        ON 時はビューポートで選択中のメッシュを対象にする。"""
+        """v0.1.36 → v0.1.41: 交差線（画像空間、対象 vs 他メッシュ）の ON/OFF。
+        対象メッシュは「SCRN ラインで『交差線に含める』(toonIntersectOn=True) の元メッシュ」。
+        ツリー右クリックメニューでライン個別に切替できる。"""
         if state:
-            sel = cmds.ls(sl=True, long=True, type="transform") or []
-            targets = [o for o in sel
-                       if cmds.listRelatives(o, shapes=True, type="mesh", ni=True)
-                       and not _is_toon_node(o)]
+            targets = _scrn_intersect_meshes()
             if not targets:
-                cmds.warning("交差線の対象メッシュをビューポートで選択してから ON にしてください")
+                cmds.warning("対象になる SCRN ラインがありません。先に『選択メッシュに輪郭を生成』で"
+                             "ラインを作ってから交差線を ON にしてください。"
+                             "（ツリー右クリックで個別に対象/除外できます）")
                 self.chk_intersect.blockSignals(True)
                 self.chk_intersect.setChecked(False)
                 self.chk_intersect.blockSignals(False)
@@ -6127,12 +6154,54 @@ class ToonOutlineUI(QtWidgets.QDialog):
             a1.triggered.connect(lambda: self._toggle_line_vis(node))
             a2 = menu.addAction("色を変える…")
             a2.triggered.connect(lambda: self._pick_color_for_line(node))
+            # v0.1.41: SCRN ラインのみ「交差線に含める」チェック
+            if cmds.attributeQuery(SCRN_TAG, node=node, exists=True):
+                menu.addSeparator()
+                aix = menu.addAction("交差線に含める")
+                aix.setCheckable(True)
+                aix.setChecked(_scrn_intersect_on(node))
+                aix.setToolTip(
+                    "このラインを交差線の対象に含めるかどうか。\n"
+                    "OFF にすると、交差線 ON 時にこのメッシュとの交差は検出されない。\n"
+                    "複数選択時は、このラインと同じ状態に全部切り替わる。")
+                aix.triggered.connect(lambda chk: self._toggle_scrn_intersect(node, chk))
             menu.addSeparator()
             a3 = menu.addAction("リネーム…")
             a3.triggered.connect(lambda: self.rename_node(node))
             a4 = menu.addAction("削除")
             a4.triggered.connect(lambda: self.delete_selected())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
+
+    def _toggle_scrn_intersect(self, line, enabled):
+        """v0.1.41: SCRN ラインの『交差線に含める』フラグを切替。
+        ツリーで複数選択されていれば、同じ値を全選択 SCRN ラインへ適用する。"""
+        lines = []
+        for it in self.tree.selectedItems():
+            n = it.data(0, QtCore.Qt.UserRole)
+            if n and cmds.objExists(n) and cmds.attributeQuery(SCRN_TAG, node=n, exists=True):
+                lines.append(n)
+        if line not in lines:
+            lines.append(line)
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ln in lines:
+                _scrn_set_intersect_on(ln, enabled)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        # 交差線が今 ON なら対象メッシュを更新（OFF なら何もしない）
+        try:
+            if self.chk_intersect.isChecked():
+                targets = _scrn_intersect_meshes()
+                if targets:
+                    _edge_set_targets(targets)
+                    try: cmds.refresh()
+                    except Exception: pass
+                else:
+                    # 全部 OFF になった → 交差線自体を OFF に
+                    self.chk_intersect.setChecked(False)
+        except Exception:
+            pass
+        self.refresh_tree()
 
     def _set_group_lines_vis(self, group, show):
         """グループ配下の全ラインの visibility を一括設定。"""
