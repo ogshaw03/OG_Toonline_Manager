@@ -482,6 +482,27 @@ SCRN のみ（DX11 HLSL。OGSFX は未対応＝属性はあっても効かない
 - 二重線 `brushDouble`: GS で 2 本目の細い quad を外側に出す（`maxvertexcount(8)` + `RestartStrip`）。
 - プリセット（`BRUSH_PRESETS`）は全ブラシ属性をまとめて 1 回の Undo で入れる。
 
+### エッジ線・クリース線の隠れ線と詳細設定（v0.1.50）
+
+ライン詳細設定・隠れ線の対象は `_is_detail_line`（SCRN または EDGE_TAG のチューブ）。ブラシタブは SCRN のみ
+（チューブは形で太さが決まるため無効表示）。
+- **チューブは詳細設定で値を変えた時点で初めて変換**（ダイアログを開くだけでは何も書かない）。`_ensure_line_render_attrs`
+  がライン属性（`LN_*`）を足し、**専用 surfaceShader**（`_tube_own_shader`＝個別カラーと同じ `COL_PREFIX+<line>_SS/_SG`）に
+  `LN_COLOR→outColor`、`LN_SHOW_VIS→reverse(<line>_OG_visRev)→outTransparency` を接続。以降は共通カラー一括変更の
+  対象外（個別色）で、メイン画面の色変更は `_scrn_set_color` 経由で `LN_COLOR` に入る（接続済みの SS へ直接 setAttr しない）。
+- 隠れ線パスは SCRN と同じ `_SceneHiddenLine` で、チューブには `_TUBE_HIDDEN_FX`（GS なし・`OG_TubeHidden_v<ver>.fx`）を当てる。
+  判定（紐づけ先より奥 かつ 紐づけ先が一番手前）は SCRN と同じ。
+- **破線の位置はチューブの UV を使わない**: 中心線（ライン配下の一番長いカーブ＝polyToCurve）を `_tube_axis` が om2 で
+  ワールドの折れ線（最大 `_TUBE_AXIS_MAX`=128 点、多いと間引く）にして `gAxX/gAxY/gAxZ`（`setArrayParameter`）で渡し、
+  PS で画素のワールド位置を一番近い区間へ投影して「線に沿った長さ」を出す。px 換算は線の中心（`_tube_center`）の深さ
+  1 点で決める（＝破線はワールドで等間隔。頂点ごとの深さだとチューブの手前側と縁でずれて「く」の字になった）。
+  ※ UV の V は、角の輪が斜めに切られているため長い面の 2 つの三角形で向きがずれてジグザグになり、さらにエッジ 1 本ごとに
+  同じだけ進むので長いエッジで破線が伸びる。画面上の V の変化で割る方式は誤差が積み重なって市松模様になった。
+- 描画中（毎フレーム）に呼ぶ処理で **`cmds.arclen` などコマンドを使わない**（Undo 履歴に積まれ、直前の操作が Ctrl+Z
+  1 回で戻らなくなる）。om2 で測る。
+- 検証: `gui_tube_check`（箱の前面 4 辺のチューブ＋前髪に見立てた板、破線が線に直角に切れているか＝半分だけ描かれた列の
+  割合、間隔のばらつきも数える）。
+
 ### 見た目の検証方法
 
 利用者の Maya を commandPort で操作しない（重い操作で落ちたことがある）。専用 MAYA_APP_DIR の GUI Maya 2023 を

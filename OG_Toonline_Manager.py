@@ -262,7 +262,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.49"
+__version__ = "0.1.50"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -701,11 +701,59 @@ def _brush_preset_values(name):
     return [(ln, float(vals.get(ln, dv))) for ln, _sh, dv, _lo, _hi in BRUSH_ATTRS]
 
 
+def _tube_shape(line):
+    sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True) or []
+    return sh[0] if sh else None
+
+
+def _tube_current_color(line):
+    """チューブ（エッジ/クリース線）がいま使っている surfaceShader の色。"""
+    sh = _tube_shape(line)
+    if sh:
+        for sg in cmds.listConnections(sh, type="shadingEngine") or []:
+            for ss in cmds.listConnections(sg + ".surfaceShader") or []:
+                try:
+                    v = cmds.getAttr(ss + ".outColor")[0]
+                    return [float(v[0]), float(v[1]), float(v[2])]
+                except Exception:
+                    pass
+    return [0.0, 0.0, 0.0]
+
+
+def _tube_own_shader(line, rgb):
+    """チューブ専用の surfaceShader/SG（無ければ作って割り当てる）。個別カラーと同じ名前。"""
+    base = COL_PREFIX + _short(line)
+    ss = base + "_SS"
+    sg = base + "_SG"
+    if not cmds.objExists(ss):
+        ss = cmds.shadingNode("surfaceShader", asShader=True, name=ss)
+        cmds.setAttr(ss + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+    if not cmds.objExists(sg):
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=sg)
+    _connect(ss + ".outColor", sg + ".surfaceShader")
+    sh = _tube_shape(line)
+    if sh:
+        try:
+            if not cmds.sets(sh, isMember=sg):
+                cmds.sets(sh, e=True, forceElement=sg)
+        except Exception:
+            pass
+    return ss
+
+
+def _is_detail_line(line):
+    """ライン詳細設定・隠れ線の対象（スクリーン輪郭 / エッジ線・クリース線）か。"""
+    return _attr_exists(line, SCRN_TAG) or _attr_exists(line, EDGE_TAG)
+
+
 def _ensure_line_render_attrs(line):
-    """SCRN ラインに見え方属性を用意し、線色/表側表示をシェーダへ接続する（冪等）。"""
-    if not _attr_exists(line, SCRN_TAG):
+    """ラインに見え方属性を用意し、線色/表側表示をシェーダへ接続する（冪等）。
+    SCRN はシェーダの uniform へ、エッジ/クリース線（v0.1.50）は専用 surfaceShader へ接続する。"""
+    is_scrn = _attr_exists(line, SCRN_TAG)
+    is_tube = (not is_scrn) and _attr_exists(line, EDGE_TAG)
+    if not (is_scrn or is_tube):
         return False
-    shd = _fresnel_shader(line)
+    shd = _fresnel_shader(line) if is_scrn else None
     cur = [0.0, 0.0, 0.0]
     if shd and _attr_exists(shd, FRES_COLOR):
         try:
@@ -713,6 +761,8 @@ def _ensure_line_render_attrs(line):
             cur = [float(v[0]), float(v[1]), float(v[2])]
         except Exception:
             pass
+    elif is_tube:
+        cur = _tube_current_color(line)
     if not _attr_exists(line, LN_SHOW_VIS):
         cmds.addAttr(line, ln=LN_SHOW_VIS, at="bool", dv=True)
     if not _attr_exists(line, LN_COLOR):
@@ -734,6 +784,17 @@ def _ensure_line_render_attrs(line):
                      dv=_SCRN_HIDDEN_FILL_DEF)
     if not _attr_exists(line, LN_OCCLUDERS):
         cmds.addAttr(line, ln=LN_OCCLUDERS, at="message", multi=True, indexMatters=False)
+    if is_tube:
+        # 専用の surfaceShader に色を、表側の線の表示は透明度（0=見える / 1=消える）に接続
+        ss = _tube_own_shader(line, cur)
+        _connect(line + "." + LN_COLOR, ss + ".outColor")
+        rev = _short(line) + "_OG_visRev"
+        if not cmds.objExists(rev):
+            rev = cmds.createNode("reverse", name=rev)
+        for ax in ("X", "Y", "Z"):
+            _connect(line + "." + LN_SHOW_VIS, rev + ".input" + ax)
+        _connect(rev + ".output", ss + ".outTransparency")
+        return True
     # v0.1.49: ブラシ（初期値はいまのシェーダの値＝メイン画面で一括設定していた値を引き継ぐ）
     for ln_attr, sh_attr, dv, lo, hi in BRUSH_ATTRS:
         if _attr_exists(line, ln_attr):
@@ -906,11 +967,22 @@ def _set_hidden_scene_on(on):
 _HIDDEN_GROUPS = []   # [(紐づけ先メッシュ transform のタプル, [ライン, ...]), ...]
 
 
+def _all_detail_lines():
+    """ライン詳細設定・隠れ線の対象になる全ライン（スクリーン輪郭＋エッジ線・クリース線）。"""
+    out = []
+    if not cmds.objExists(ROOT):
+        return out
+    for t in cmds.listRelatives(ROOT, allDescendents=True, type="transform", f=True) or []:
+        if _is_detail_line(t):
+            out.append(t)
+    return out
+
+
 def _hidden_refresh_cache():
     """紐づけ先ごとに隠れ線を描くラインをまとめ直す（紐づけ/ライン増減時に呼ぶ）。"""
     groups = {}
     order = []
-    for ln in _all_screen_lines():
+    for ln in _all_detail_lines():
         occ = _mesh_transforms_under(_line_occluders(ln))
         if not occ:
             continue
@@ -938,7 +1010,8 @@ def _hidden_frame_groups():
     for occ, lines in _HIDDEN_GROUPS:
         occ2 = [o for o in occ if cmds.objExists(o)]
         lines2 = [ln for ln in lines if cmds.objExists(ln) and _scrn_line_visible(ln)
-                  and _hidden_line_mode(ln) != 0 and _fresnel_shader(ln)]
+                  and _hidden_line_mode(ln) != 0
+                  and (_fresnel_shader(ln) if _attr_exists(ln, SCRN_TAG) else _tube_shape(ln))]
         if occ2 and lines2:
             out.append((occ2, lines2))
     return out
@@ -1003,6 +1076,14 @@ def _prepare_scrn_lines():
             _ensure_line_render_attrs(ln)
         except Exception:
             pass
+    # エッジ/クリース線は、詳細設定を使ったもの（見え方属性がある）だけ接続を直す。
+    # 使っていない線を勝手に専用シェーダへ切り替えない（共通カラーに付いたままにする）。
+    for ln in _all_detail_lines():
+        if not _attr_exists(ln, SCRN_TAG) and _attr_exists(ln, LN_COLOR):
+            try:
+                _ensure_line_render_attrs(ln)
+            except Exception:
+                pass
 
 
 def _scrn_set_depth_bias(v):
@@ -1587,6 +1668,131 @@ technique11 Main
 }
 """
 
+# v0.1.50: エッジ線・クリース線（チューブ）の隠れ線パス。チューブは普通のメッシュなので GS は不要。
+# 判定は SCRN の隠れ線と同じ（線が紐づけ先より奥 かつ 紐づけ先がその画素で一番手前）。
+# 破線: 線の中心線（折れ線・ワールド）を Python が毎フレーム配列で渡し、PS で画素のワールド位置に一番近い
+# 区間へ投影して「線に沿った長さ」を出す → 線の中心の深さでの「1 単位あたりの px」を掛けて px 位置にする。
+# ※ チューブの UV の V は使わない: 角の輪が斜めに切られているので長い面の 2 つの三角形で V の向きがずれて
+#   破線がジグザグになり、さらに V はエッジ 1 本ごとに同じだけ進むので長いエッジで破線が伸びる。
+#   画面上の V の変化で割る方式は三角形ごとのずれが積み重なって市松模様になった。
+_TUBE_AXIS_MAX = 128
+_TUBE_HIDDEN_FX = """// OG Toonline Manager - tube (edge/crease) line hidden pass (MRenderOverride shaderOverride)
+#define OG_AXIS_MAX 128
+float4x4 gWVP : WorldViewProjection;
+float4x4 gWorld : World;
+float4x4 gView : View;
+float4x4 gProj : Projection;
+float2   gScreen : ViewportPixelSize;
+float  tubeLength = 1.0f;                     // 線の長さ（ワールド単位）。中心線が無いときの予備
+float3 tubeCenter = float3(0.0f, 0.0f, 0.0f); // 線の中心（ワールド）。px 換算はこの深さ 1 点で決める
+int    gAxisCount = 0;                        // 中心線の点の数（0/1 = 中心線なし → UV の V で代用）
+float  gAxX[OG_AXIS_MAX];
+float  gAxY[OG_AXIS_MAX];
+float  gAxZ[OG_AXIS_MAX];
+Texture2D gOccDepth;
+Texture2D gSceneDepth;
+float gNear = 0.1f;
+float gFar  = 10000.0f;
+int   hiddenMode = 1;
+float hiddenTol  = 0.002f;
+float3 lineColor = {0.0f, 0.0f, 0.0f};
+float hiddenAlpha = 0.6f;
+float hiddenDashLen = 10.0f;
+float hiddenDashFill = 0.55f;
+
+struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
+struct VOUT { float4 HPos : SV_Position; float2 UV : TEXCOORD0; float PxPerUnit : TEXCOORD1;
+              float3 WPos : TEXCOORD2; };
+
+VOUT VS(VIN i)
+{
+    VOUT o;
+    o.HPos = mul(float4(i.Pos, 1.0f), gWVP);
+    o.UV = i.UV;
+    o.WPos = mul(float4(i.Pos, 1.0f), gWorld).xyz;
+    // 1 単位が何 px か。頂点ごとの深さで出すとチューブの手前側と縁で値がずれ、それが線の長さぶん
+    // 積み重なって破線が「く」の字に曲がる。線の中心の深さ 1 点で決める（＝破線はワールドで等間隔）。
+    float vz = max(abs(mul(float4(tubeCenter, 1.0f), gView).z), 1e-4f);
+    o.PxPerUnit = 0.5f * gScreen.y * gProj[1][1] / vz;
+    return o;
+}
+
+float og_lin(float z)
+{
+    float denom = gFar - z * (gFar - gNear);
+    return (gNear * gFar) / max(denom, 1e-6f);
+}
+
+// 画素のワールド位置を中心線（折れ線）の一番近い区間へ投影し、線の始点からの長さを返す
+float og_axis_len(float3 p, float vFallback)
+{
+    int n = min(gAxisCount, OG_AXIS_MAX);
+    if (n < 2) return vFallback * tubeLength;
+    float best = 3.4e38f;
+    float bestS = 0.0f;
+    float acc = 0.0f;
+    float3 a = float3(gAxX[0], gAxY[0], gAxZ[0]);
+    [loop]
+    for (int k = 1; k < n; ++k) {
+        float3 b = float3(gAxX[k], gAxY[k], gAxZ[k]);
+        float3 ab = b - a;
+        float l2 = dot(ab, ab);
+        float t = (l2 > 1e-12f) ? saturate(dot(p - a, ab) / l2) : 0.0f;
+        float3 d = p - (a + ab * t);
+        float dd = dot(d, d);
+        float l = sqrt(l2);
+        if (dd < best) { best = dd; bestS = acc + t * l; }
+        acc += l;
+        a = b;
+    }
+    return bestS;
+}
+
+float4 PS(VOUT i) : SV_Target
+{
+    int3 px = int3(int(i.HPos.x), int(i.HPos.y), 0);
+    float ro = gOccDepth.Load(px).r;
+    if (ro >= 0.99999f) discard;
+    float zl = og_lin(i.HPos.z);
+    float zo = og_lin(ro);
+    if (zl <= zo * (1.0f + hiddenTol)) discard;
+    float zs = og_lin(gSceneDepth.Load(px).r);
+    if (zs < zo * (1.0f - hiddenTol)) discard;
+    if (hiddenMode == 1) {
+        float posPx = og_axis_len(i.WPos, i.UV.y) * i.PxPerUnit;
+        float phase = frac(posPx / max(hiddenDashLen, 1.0f));
+        if (phase > hiddenDashFill) discard;
+    }
+    return float4(lineColor, saturate(hiddenAlpha));
+}
+
+DepthStencilState DSS_Off { DepthEnable = FALSE; DepthWriteMask = ZERO; };
+RasterizerState RS_Back { CullMode = BACK; };
+BlendState BS_Alpha {
+    BlendEnable[0] = TRUE;
+    SrcBlend[0] = SRC_ALPHA;
+    DestBlend[0] = INV_SRC_ALPHA;
+    SrcBlendAlpha[0] = ONE;
+    DestBlendAlpha[0] = INV_SRC_ALPHA;
+    BlendOp[0] = ADD;
+    BlendOpAlpha[0] = ADD;
+    RenderTargetWriteMask[0] = 0x0F;
+};
+
+technique11 Main
+{
+    pass p0
+    {
+        SetVertexShader(CompileShader(vs_5_0, VS()));
+        SetGeometryShader(NULL);
+        SetPixelShader(CompileShader(ps_5_0, PS()));
+        SetDepthStencilState(DSS_Off, 0);
+        SetRasterizerState(RS_Back);
+        SetBlendState(BS_Alpha, float4(0, 0, 0, 0), 0xFFFFFFFF);
+    }
+}
+"""
+
 _SCRN_FX_HLSL = _SCRN_FX_HLSL_COMMON + _SCRN_FX_HLSL_MAIN_TAIL
 _SCRN_FX_HLSL_HIDDEN = "#define OG_NO_COLOR0 1\n" + _SCRN_FX_HLSL_COMMON + _SCRN_FX_HLSL_HIDDEN_TAIL
 
@@ -1883,6 +2089,11 @@ def _screen_fx_path():
 def _scrn_hidden_fx_path():
     """v0.1.46: 紐づけ先の裏だけに描く隠れ線パス用シェーダ（DX11 のみ）。"""
     return _write_fx_file("OG_ScrnHidden_v" + _fx_ver_tag() + ".fx", _SCRN_FX_HLSL_HIDDEN)
+
+
+def _tube_hidden_fx_path():
+    """v0.1.50: エッジ線・クリース線（チューブ）の隠れ線パス用シェーダ（DX11 のみ）。"""
+    return _write_fx_file("OG_TubeHidden_v" + _fx_ver_tag() + ".fx", _TUBE_HIDDEN_FX)
 
 
 def _dump_dx11_varying(shd):
@@ -2957,9 +3168,9 @@ def create_hidden_only_layer(lines, name=None):
     シーンのメッシュ（元メッシュ・紐づけ先・手前の物）は useBackground で深度だけ書く
     （透かす位置の判定と、手前の物で隠れる所を本番の絵と一致させるため）。
     作ったレイヤー名を返す。"""
-    lines = [ln for ln in lines or [] if _attr_exists(ln, SCRN_TAG)]
+    lines = [ln for ln in lines or [] if _is_detail_line(ln)]
     if not lines:
-        raise RuntimeError("スクリーン輪郭のラインがありません")
+        raise RuntimeError("スクリーン輪郭・エッジ線・クリース線のラインがありません")
     holdouts = list(_source_meshes_of(lines))
     for ln in lines:
         for o in _mesh_transforms_under(_line_occluders(ln)):
@@ -5456,7 +5667,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
         else:
             type_color, type_label = (128, 224, 128), "背面"
         # v0.1.46: 隠れ線を紐づけたラインは [透] を付け、ツールチップに紐づけ先を出す
-        occ = _line_occluders(line) if is_scrn else []
+        occ = _line_occluders(line) if (is_scrn or is_edge) else []
         suffix = "  [透]" if occ else ""
         label = _short(line) + suffix
         it = QtWidgets.QTreeWidgetItem([label, "", ""])
@@ -6154,7 +6365,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             return
         # フレネル/スクリーンはシェーダの lineColor（v0.1.46: SCRN はライン属性経由）
         if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
-                or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
+                or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
+                or _attr_exists(line, LN_COLOR)):   # v0.1.50: 詳細設定を使ったエッジ線も属性経由
             _scrn_set_color(line, rgb)
             return
         ss, sg = self._ensure_line_shader(line)
@@ -6190,8 +6402,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
             for line in lines:
                 sh = self._shape_of(line)
                 # フレネル/スクリーンは SG を共有に差し替えると線が出ないため、色だけ共通値に戻す
+                # v0.1.50: 詳細設定を使ったエッジ線は専用シェーダのまま色だけ戻す（接続を保つ）
                 if (cmds.attributeQuery(FRES_TAG, node=line, exists=True)
-                        or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)):
+                        or cmds.attributeQuery(SCRN_TAG, node=line, exists=True)
+                        or _attr_exists(line, LN_COLOR)):
                     _scrn_set_color(line, self._color)
                     continue
                 if sh:
@@ -6996,8 +7210,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             a6 = menu.addAction("削除")
             a6.triggered.connect(lambda: self.delete_selected())
         elif is_line:
-            # v0.1.46: ライン詳細設定（隠れ線の紐づけ・レイヤーごとの色/表現）
-            if cmds.attributeQuery(SCRN_TAG, node=node, exists=True):
+            # v0.1.46: ライン詳細設定（隠れ線の紐づけ・レイヤーごとの色/表現）。v0.1.50: エッジ線も
+            if _is_detail_line(node):
                 a0 = menu.addAction("ライン詳細設定…（隠れ線・レイヤーごとの見え方）")
                 f0 = a0.font(); f0.setBold(True); a0.setFont(f0)
                 a0.triggered.connect(lambda: self.open_line_options(node))
@@ -7025,9 +7239,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
 
     def open_line_options(self, line):
-        """v0.1.46: ライン詳細設定を開く。ツリーで複数選択中なら選択中の SCRN ライン全部が対象。"""
-        lines = [n for n in self._selected_lines()
-                 if cmds.attributeQuery(SCRN_TAG, node=n, exists=True)]
+        """v0.1.46: ライン詳細設定を開く。ツリーで複数選択中なら選択中の対象ライン全部。"""
+        lines = [n for n in self._selected_lines() if _is_detail_line(n)]
         if line not in lines:
             lines = [line]
         return show_line_options(lines, self)
@@ -7277,6 +7490,11 @@ class ToonOutlineUI(QtWidgets.QDialog):
             g = _gapfill_of(line)
             if g:
                 victims.add(g)
+            # v0.1.50: エッジ線の専用シェーダと表示切替ノードも片付ける
+            for n2 in (COL_PREFIX + _short(line) + "_SS", COL_PREFIX + _short(line) + "_SG",
+                       _short(line) + "_OG_visRev"):
+                if cmds.objExists(n2):
+                    victims.add(n2)
 
         victims = set(nodes)
         for n in list(nodes):
@@ -7353,11 +7571,14 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         self._lines = [ln for ln in lines if cmds.objExists(ln)]
         self._updating = False
         self._rows = {}           # attr -> (QLabel, 戻すボタン, 見出し)
+        # SCRN は属性を揃えておく（通常は作成時に済んでいる）。エッジ線は開いただけで専用シェーダへ
+        # 切り替えないよう、値を変えたとき（_apply_many / 紐づけ）に初めて用意する。
         for ln in self._lines:
-            try:
-                _ensure_line_render_attrs(ln)
-            except Exception:
-                pass
+            if _attr_exists(ln, SCRN_TAG):
+                try:
+                    _ensure_line_render_attrs(ln)
+                except Exception:
+                    pass
         if len(self._lines) > 1:
             self.setWindowTitle("ライン詳細設定 — {0} ほか {1} 本".format(
                 _short(self._lines[0]), len(self._lines) - 1))
@@ -7789,7 +8010,11 @@ class _LineOptionsDialog(QtWidgets.QDialog):
                 except Exception:
                     return dv
             self.chk_vis.setChecked(bool(_get(LN_SHOW_VIS, 1)))
-            self.btn_col.setStyleSheet(_rgb_style(_get(LN_COLOR, [(0, 0, 0)])[0]))
+            if _attr_exists(ln, LN_COLOR):
+                line_rgb = _get(LN_COLOR, [(0, 0, 0)])[0]
+            else:
+                line_rgb = _tube_current_color(ln)   # まだ詳細設定を使っていないエッジ線
+            self.btn_col.setStyleSheet(_rgb_style(line_rgb))
             mode = int(_get(LN_HID_MODE, 1))
             if 0 <= mode < len(self.rb_hid):
                 self.rb_hid[mode].setChecked(True)
@@ -7808,6 +8033,18 @@ class _LineOptionsDialog(QtWidgets.QDialog):
                 bv = int(round(float(_get(attr, 0.0)) * 100))
                 sl.setValue(bv); sp.setValue(bv)
             self.sp_bscale.setValue(int(round(float(_get(LN_BR_SCALE, 20.0)))))
+            # v0.1.50: ブラシはスクリーン輪郭だけ（エッジ線・クリース線はチューブの形で太さが決まる）
+            n_scrn = sum(1 for l2 in self._lines if _attr_exists(l2, SCRN_TAG))
+            self.tabs.setTabEnabled(1, n_scrn > 0)
+            if n_scrn == 0:
+                self.lbl_brush_note.setText(u"")
+                self.tabs.setTabToolTip(1, u"ブラシはスクリーン輪郭のラインで使えます"
+                                           u"（エッジ線・クリース線は対象外）。")
+            elif n_scrn < len(self._lines):
+                self.lbl_brush_note.setText(u"ブラシはスクリーン輪郭のラインだけに入ります"
+                                            u"（選択中のエッジ線・クリース線には入りません）。")
+            else:
+                self.lbl_brush_note.setText(u"")
             # 隠れ線を出さないときは関連項目を薄く、破線の項目は破線のときだけ
             for w in (self.chk_same, self.btn_hcol, self.sl_alpha, self.sp_alpha):
                 w.setEnabled(mode != 0 and (w is not self.btn_hcol or not same))
@@ -7862,9 +8099,9 @@ def show_line_options(lines, owner=None):
             old.deleteLater()
         except Exception:
             pass
-    lines = [ln for ln in lines or [] if _attr_exists(ln, SCRN_TAG)]
+    lines = [ln for ln in lines or [] if _is_detail_line(ln)]
     if not lines:
-        cmds.warning("ライン詳細設定はスクリーン輪郭のラインで使えます")
+        cmds.warning("ライン詳細設定はスクリーン輪郭・エッジ線・クリース線で使えます")
         return None
     dlg = _LineOptionsDialog(lines, owner)
     _line_options_win[0] = dlg
@@ -8675,6 +8912,60 @@ def _edge_active():
 _OVR_STATE = {"edge": False, "intersect": False}
 
 
+def _tube_axis(line):
+    """チューブ（エッジ線・クリース線）の中心線。ライン配下のカーブのうち一番長いもの（円の断面は短い）を
+    ワールドの折れ線にして (点のリスト, 長さ) で返す。点は最大 _TUBE_AXIS_MAX 個（多いときは間引く）。
+    描画中に毎フレーム呼ばれるので om2 で測る（cmds.arclen 等は Undo 履歴に積まれて直前の操作が戻らなくなる）。"""
+    best = None
+    try:
+        import maya.api.OpenMaya as om2
+        for cv in cmds.listRelatives(line, allDescendents=True, type="nurbsCurve", f=True) or []:
+            try:
+                sel = om2.MSelectionList()
+                sel.add(cv)
+                fn = om2.MFnNurbsCurve(sel.getDagPath(0))
+                ln = float(fn.length())
+                if best is None or ln > best[1]:
+                    best = (fn, ln)
+            except Exception:
+                pass
+        if best is None:
+            return [], 1.0
+        fn, ln = best
+        lo, hi = fn.knotDomain
+        if fn.degree == 1:
+            # 折れ線のカーブ（polyToCurve の既定）: 区間の境目＝ノットの位置に点がある
+            params = sorted(set(k for k in fn.knots() if lo - 1e-9 <= k <= hi + 1e-9))
+        else:
+            params = [lo + (hi - lo) * j / 63.0 for j in range(64)]
+        if len(params) > _TUBE_AXIS_MAX:
+            step = (len(params) - 1) / float(_TUBE_AXIS_MAX - 1)
+            params = [params[int(round(j * step))] for j in range(_TUBE_AXIS_MAX)]
+        pts = []
+        for p in params:
+            q = fn.getPointAtParam(p, om2.MSpace.kWorld)
+            pts.append((float(q.x), float(q.y), float(q.z)))
+        return pts, (ln if ln > 1e-6 else 1.0)
+    except Exception:
+        return [], 1.0
+
+
+def _tube_center(line):
+    """チューブの形の中心（ワールド）。om2 で測る（Undo 履歴に何も積まない）。"""
+    try:
+        import maya.api.OpenMaya as om2
+        shp = _tube_shape(line)
+        if shp:
+            sel = om2.MSelectionList()
+            sel.add(shp)
+            dp = sel.getDagPath(0)
+            c = om2.MPoint(om2.MFnDagNode(dp).boundingBox.center) * dp.inclusiveMatrix()
+            return (float(c.x), float(c.y), float(c.z))
+    except Exception:
+        pass
+    return (0.0, 0.0, 0.0)
+
+
 def _hidden_set_shader_params(s, line, ovr):
     """隠れ線パスのシェーダへ、このラインの現在値を渡す。ライン属性は Render Setup の
     オーバーライド後の値が読めるので、表示中のレイヤーの見え方がそのまま出る。"""
@@ -8698,6 +8989,22 @@ def _hidden_set_shader_params(s, line, ovr):
     s.setParameter("hiddenAlpha", float(_get(line, LN_HID_ALPHA, _SCRN_HIDDEN_ALPHA_DEF)))
     s.setParameter("hiddenDashLen", float(_get(line, LN_HID_DASH, _SCRN_HIDDEN_DASH_DEF)))
     s.setParameter("hiddenDashFill", float(_get(line, LN_HID_FILL, _SCRN_HIDDEN_FILL_DEF)))
+    if not _attr_exists(line, SCRN_TAG):
+        # v0.1.50: チューブの破線用に中心線（ワールドの折れ線）と長さ・中心を渡す
+        pts, length = _tube_axis(line)
+        s.setParameter("tubeLength", float(length))
+        s.setParameter("tubeCenter", _tube_center(line))
+        n = len(pts)
+        try:
+            if n >= 2:
+                pad = [0.0] * (_TUBE_AXIS_MAX - n)
+                s.setArrayParameter("gAxX", [p[0] for p in pts] + pad, _TUBE_AXIS_MAX)
+                s.setArrayParameter("gAxY", [p[1] for p in pts] + pad, _TUBE_AXIS_MAX)
+                s.setArrayParameter("gAxZ", [p[2] for p in pts] + pad, _TUBE_AXIS_MAX)
+            s.setParameter("gAxisCount", int(n if n >= 2 else 0))
+        except Exception:
+            s.setParameter("gAxisCount", 0)
+        return
     shd = _fresnel_shader(line)
     if shd:
         params = [(SCRN_THICK, 3.0), (SCRN_DEPTH_BIAS, 0.0), ("stability", 0.0)]
@@ -8814,8 +9121,9 @@ def _edge_enable():
                 def objectSetOverride(self):
                     return _others_sel()
 
-            # ---- v0.1.46: 隠れ線（紐づけ先の裏だけ） ----
+            # ---- v0.1.46: 隠れ線（紐づけ先の裏だけ）。v0.1.50: チューブ用シェーダも ----
             hidden_fx = _scrn_hidden_fx_path()
+            tube_fx = _tube_hidden_fx_path()
             try:
                 _FILTER_SHADED = omr.MSceneRender.kRenderShadedItems
             except Exception:
@@ -8860,7 +9168,7 @@ def _edge_enable():
                 """1 本のラインの隠れ線を tColor へ重ねる（深度テストは使わず PS で判定）。"""
                 def __init__(self, name, ovr):
                     omr.MSceneRender.__init__(self, name); self.ovr = ovr
-                    self.line = None; self.shaderInst = None
+                    self.line = None; self.shaderInst = None; self.fx = hidden_fx
                 def targetOverrideList(self):
                     return [self.ovr.tColor, self.ovr.tDepthHidden]
                 def clearOperation(self):
@@ -8883,7 +9191,7 @@ def _edge_enable():
                         sm = omr.MRenderer.getShaderManager()
                         if sm is not None:
                             try:
-                                self.shaderInst = sm.getEffectsFileShader(hidden_fx, "Main")
+                                self.shaderInst = sm.getEffectsFileShader(self.fx, "Main")
                             except Exception:
                                 self.shaderInst = None
                     return self.shaderInst is not None
@@ -9075,13 +9383,15 @@ def _edge_enable():
                                 self._n_hid += 1
                                 hop = _SceneHiddenLine("og_hid_line_{0}".format(self._n_hid), self)
                                 hop.line = ln
+                                if not _attr_exists(ln, SCRN_TAG):
+                                    hop.fx = tube_fx    # エッジ線・クリース線（チューブ）
                                 self._hid_ops[ln] = hop
                             if hop.ensure_shader():
                                 hops.append(hop)
                             elif not getattr(hop, "_warned", False):
                                 hop._warned = True
                                 om2.MGlobal.displayWarning(
-                                    "[OG hidden] 隠れ線シェーダを読み込めません: {0}".format(hidden_fx))
+                                    "[OG hidden] 隠れ線シェーダを読み込めません: {0}".format(hop.fx))
                         if not hops:
                             continue
                         while len(self._occ_ops) <= gi:
