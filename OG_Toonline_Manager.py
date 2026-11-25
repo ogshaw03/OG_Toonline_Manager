@@ -185,6 +185,11 @@ LN_TRACE_RAW  = "toonTraceRaw"         # エッジ線・クリース線: 隣の�
 SCRN_TRACE    = "traceAmount"          # SCRN シェーダの uniform
 SCRN_TRACE_DARK = "traceDark"
 TRACE_DARK_DEF = 0.45
+# v0.1.55: 太さを背面法と同じく「3D の長さ」として扱う（寄れば太く・引けば細く）。
+# 1 = 3D の長さ（既定）/ 0 = 画面上で一定のピクセル（v0.1.54 までの動き）。
+# 3D の長さ = UI 太さ × 倍率（＝背面法の textureDeformer.offset と同じ値）× 物の大きさ（スケール）。
+LN_THICK_WORLD   = "toonThickWorld"    # ライン属性 → shd.thickWorld へ接続（レイヤーごとに上書き可）
+SCRN_THICK_WORLD = "thickWorld"        # SCRN/フレネルのシェーダの uniform（int 0/1、既定 1）
 ROOT_HIDDEN_ON = "toonHiddenOn"        # シーン全体で隠れ線を描くか（ROOT の属性、既定 ON）
 HIDDEN_DEPTH_TOL = 0.002               # 隠れ線の前後判定に使う相対深度の許容差
 # v0.1.49: ブラシ（SCRN シェーダの uniform 名と、ラインごと・レイヤーごとの属性名）
@@ -313,7 +318,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.54"
+__version__ = "0.1.55"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -443,6 +448,8 @@ _FRES_FX_HLSL = """// OG Toonline Manager - Fresnel contour (Maya dx11Shader / H
 // ※ ビューポートは「テクスチャ表示 ON（ホットキー 6）」で表示されます。
 float4x4 gWVP : WorldViewProjection;
 float4x4 gWV  : WorldView;
+float4x4 gProj : Projection;
+float2   gScreen : ViewportPixelSize;
 
 float threshold <
     string UIName = "Threshold";
@@ -458,19 +465,32 @@ float maxWidthPx <
     float UIStep = 0.1;
 > = 3.0;   // 輪郭線の画面px幅。太さチェーン(UI太さ×SCRN_SCALE)から接続される。既定は約3px。
 
+// v0.1.55: 1 = 太さを 3D の長さとして扱う（スクリーン輪郭と同じ。寄れば太く・引けば細く）
+int thickWorld <
+    string UIName = "Thickness In World Units";
+    int UIMin = 0;
+    int UIMax = 1;
+> = 1;
+float thickUnitPx = 6.0;
+
 float3 lineColor <
     string UIName = "Line Color";
     string UIWidget = "Color";
 > = {0.0f, 0.0f, 0.0f};
 
 struct APPDATA { float3 Position : POSITION; float3 Normal : NORMAL; };
-struct V2P { float4 HPos : SV_Position; float3 VN : TEXCOORD0; };
+struct V2P { float4 HPos : SV_Position; float3 VN : TEXCOORD0; float2 WS : TEXCOORD1; };
 
 V2P VShader(APPDATA IN)
 {
     V2P OUT;
     OUT.HPos = mul(float4(IN.Position, 1.0f), gWVP);
     OUT.VN   = mul(IN.Normal, (float3x3)gWV);    // ビュー空間法線
+    // v0.1.55: x = クリップ座標の w（透視=距離・正投影=1）、y = 物のスケール
+    float3x3 m = (float3x3)gWV;
+    OUT.WS = float2(OUT.HPos.w,
+                    (length(mul(float3(1.0f, 0.0f, 0.0f), m)) + length(mul(float3(0.0f, 1.0f, 0.0f), m))
+                     + length(mul(float3(0.0f, 0.0f, 1.0f), m))) / 3.0f);
     return OUT;
 }
 
@@ -484,7 +504,14 @@ float4 PShader(V2P IN) : SV_Target
     // 平らな面は fwidth≈0 → sd 巨大 → 線が出ない（ムラ源のワイドな帯そのものが消える）。
     float w = max(fwidth(facing), 1e-6f);
     float sd = facing / w;                                // ≒ シルエット/輪郭からのピクセル距離
-    float a = 1.0f - smoothstep(maxWidthPx - 1.0f, maxWidthPx + 1.0f, sd);
+    float mw = maxWidthPx;
+    if (thickWorld != 0) {
+        // 3D の長さ（= maxWidthPx / thickUnitPx × スケール）をこの画素の深さでの px に直す
+        float pxu = 0.5f * gScreen.y * gProj[1][1] / max(IN.WS.x, 1e-4f);
+        mw = min(maxWidthPx / max(thickUnitPx, 1e-4f) * IN.WS.y * pxu, gScreen.y * 0.25f);
+    }
+    float a = 1.0f - smoothstep(mw - 1.0f, mw + 1.0f, sd);
+    a *= saturate(mw);                                    // 1px より細いときは薄くする
     if (a <= 0.002f) discard;
     return float4(lineColor, a);
 }
@@ -506,6 +533,8 @@ _FRES_FX_OGSFX = """#version 410
 
 uniform mat4 gWVP : WorldViewProjection;
 uniform mat4 gWV  : WorldView;
+uniform mat4 gProj : Projection;
+uniform vec2 gScreen : ViewportPixelSize;
 
 uniform float threshold
 <
@@ -516,6 +545,14 @@ uniform float maxWidthPx
 <
     string UIName = "Width (px)";
 > = 3.0;
+
+// v0.1.55: 1 = 太さを 3D の長さとして扱う（HLSL 版と同じ）
+uniform int thickWorld
+<
+    string UIName = "Thickness In World Units";
+> = 1;
+
+uniform float thickUnitPx = 6.0;
 
 uniform vec3 lineColor
 <
@@ -532,6 +569,7 @@ attribute VS_INPUT
 attribute VS_TO_PS
 {
     vec3 vn;
+    vec2 ws;
 };
 
 attribute PS_OUTPUT
@@ -545,6 +583,8 @@ GLSLShader ShaderVertex
     {
         gl_Position = gWVP * vec4(Pos, 1.0);
         VS_OUT.vn = mat3(gWV) * Nrm;
+        mat3 m = mat3(gWV);
+        VS_OUT.ws = vec2(gl_Position.w, (length(m[0]) + length(m[1]) + length(m[2])) / 3.0);
     }
 }
 
@@ -556,7 +596,13 @@ GLSLShader ShaderPixel
         float facing = abs(N.z);
         float w = max(fwidth(facing), 1e-6);
         float sd = facing / w;
-        float a = 1.0 - smoothstep(maxWidthPx - 1.0, maxWidthPx + 1.0, sd);
+        float mw = maxWidthPx;
+        if (thickWorld != 0) {
+            float pxu = 0.5 * gScreen.y * gProj[1][1] / max(PS_IN.ws.x, 1e-4);
+            mw = min(maxWidthPx / max(thickUnitPx, 1e-4) * PS_IN.ws.y * pxu, gScreen.y * 0.25);
+        }
+        float a = 1.0 - smoothstep(mw - 1.0, mw + 1.0, sd);
+        a *= clamp(mw, 0.0, 1.0);
         if (a <= 0.002) discard;
         outColor = vec4(lineColor, a);
     }
@@ -584,40 +630,12 @@ _FRES_FX_PATH_CACHE = None
 
 def _fresnel_fx_path():
     """フレネル用シェーダを現 drawAPI に応じて HLSL(.fx) か OGSFX(.ogsfx) で書き出してパスを返す。
-    v0.1.37: OpenGL VP2 でも動くように GLSL(OGSFX) 版を追加。"""
-    global _FRES_FX_PATH_CACHE
-    is_gl = _vp2_is_opengl()
-    src = _FRES_FX_OGSFX if is_gl else _FRES_FX_HLSL
-    if _FRES_FX_PATH_CACHE and os.path.exists(_FRES_FX_PATH_CACHE) and \
-       os.path.getsize(_FRES_FX_PATH_CACHE) == len(src):
-        return _FRES_FX_PATH_CACHE
-    d = os.path.join(cmds.internalVar(userAppDir=True), "OG_Toonline_Manager")
-    try:
-        if not os.path.isdir(d):
-            os.makedirs(d)
-    except Exception:
-        d = cmds.internalVar(userTmpDir=True)
-    fname = "OG_ToonFresnel.ogsfx" if is_gl else "OG_ToonFresnel.fx"
-    path = os.path.join(d, fname).replace("\\", "/")
-    try:
-        if os.path.exists(path) and os.path.getsize(path) == len(src):
-            _FRES_FX_PATH_CACHE = path
-            return path
-    except Exception:
-        pass
-    try:
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(src)
-            f.flush()
-            try: os.fsync(f.fileno())
-            except Exception: pass
-    except Exception as e:
-        try:
-            om2.MGlobal.displayWarning("[FRES] FX write failed: {0}".format(e))
-        except Exception:
-            pass
-    _FRES_FX_PATH_CACHE = path
-    return path
+    v0.1.37: OpenGL VP2 でも動くように GLSL(OGSFX) 版を追加。
+    v0.1.55: スクリーン輪郭と同じくファイル名に版を入れる（同じパスだと中身を変えても前の版の
+    コンパイル結果が使われる）。既存のフレネル線は _upgrade_scrn_shader で新しいパスへ差し替える。"""
+    if _vp2_is_opengl():
+        return _write_fx_file("OG_ToonFresnel_v" + _fx_ver_tag() + ".ogsfx", _FRES_FX_OGSFX)
+    return _write_fx_file("OG_ToonFresnel_v" + _fx_ver_tag() + ".fx", _FRES_FX_HLSL)
 
 
 def _build_fresnel_network(line, shape, color):
@@ -669,6 +687,16 @@ def _all_screen_lines():
     for root in _all_roots():
         for t in cmds.listRelatives(root, allDescendents=True, type="transform", f=True) or []:
             if cmds.attributeQuery(SCRN_TAG, node=t, exists=True) and t not in out:
+                out.append(t)
+    return out
+
+
+def _all_fresnel_lines():
+    """シーン内の全フレネル線（FRES_TAG）を返す（リファレンスしたアセットの線も含む）。v0.1.55"""
+    out = []
+    for root in _all_roots():
+        for t in cmds.listRelatives(root, allDescendents=True, type="transform", f=True) or []:
+            if cmds.attributeQuery(FRES_TAG, node=t, exists=True) and t not in out:
                 out.append(t)
     return out
 
@@ -753,6 +781,46 @@ def _scrn_intersect_screen_thickness():
     if best <= 0.0:
         return 3.0
     return max(1.0, best * SCRN_SCALE)
+
+
+def _line_world_scale(node):
+    """ノードのワールドのスケール（3 軸の平均）。om2 で測る（Undo 履歴に積まない）。"""
+    try:
+        sel = om2.MSelectionList()
+        sel.add(node)
+        m = om2.MTransformationMatrix(sel.getDagPath(0).inclusiveMatrix())
+        s = m.scale(om2.MSpace.kWorld)
+        return max((abs(s[0]) + abs(s[1]) + abs(s[2])) / 3.0, 1e-6)
+    except Exception:
+        return 1.0
+
+
+def _scrn_intersect_world_thickness():
+    """v0.1.55: 交差線の太さを 3D の長さで返す（参加中の SCRN ラインのうち一番太いもの。
+    太さ = mB.output × そのラインのスケール＝スクリーン輪郭本体と同じ）。
+    一番太いラインが「画面上で一定の太さ」(toonThickWorld=0) なら 0（＝px のまま）。"""
+    best = 0.0
+    best_world = True
+    for ln in _all_screen_lines():
+        if not _scrn_intersect_on(ln) or not _scrn_line_visible(ln):
+            continue
+        ctrl = _ctrl_of(ln)
+        if not ctrl:
+            continue
+        mB = _short(ctrl) + "_thkB"
+        try:
+            v = float(cmds.getAttr((mB + ".output") if cmds.objExists(mB) else (ctrl + "." + CTRL_THICK)))
+        except Exception:
+            continue
+        v *= _line_world_scale(ln)
+        if v > best:
+            best = v
+            try:
+                best_world = bool(cmds.getAttr(ln + "." + LN_THICK_WORLD)) \
+                    if _attr_exists(ln, LN_THICK_WORLD) else True
+            except Exception:
+                best_world = True
+    return best if (best > 0.0 and best_world) else 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -932,6 +1000,9 @@ def _ensure_line_render_attrs(line):
             _connect(line + "." + LN_SHOW_VIS, rev + ".input" + ax)
         _connect(rev + ".output", ss + ".outTransparency")
         return True
+    # v0.1.55: 太さを 3D の長さとして扱うか（既定 ON＝背面法と同じく寄れば太く・引けば細く）
+    if not _attr_exists(line, LN_THICK_WORLD):
+        cmds.addAttr(line, ln=LN_THICK_WORLD, at="bool", dv=True)
     # v0.1.49: ブラシ（初期値はいまのシェーダの値＝メイン画面で一括設定していた値を引き継ぐ）
     for ln_attr, sh_attr, dv, lo, hi in BRUSH_ATTRS:
         if _attr_exists(line, ln_attr):
@@ -949,7 +1020,8 @@ def _ensure_line_render_attrs(line):
             pass
     if shd:
         links = [(LN_COLOR, FRES_COLOR), (LN_SHOW_VIS, SCRN_SHOW_VIS),
-                 (LN_TRACE, SCRN_TRACE), (LN_TRACE_DARK, SCRN_TRACE_DARK)]
+                 (LN_TRACE, SCRN_TRACE), (LN_TRACE_DARK, SCRN_TRACE_DARK),
+                 (LN_THICK_WORLD, SCRN_THICK_WORLD)]
         links += [(ln_attr, sh_attr) for ln_attr, sh_attr, _dv, _lo, _hi in BRUSH_ATTRS]
         for src_attr, dst_attr in links:
             if not _attr_exists(shd, dst_attr):
@@ -1404,9 +1476,12 @@ def _hidden_frame_groups():
 
 def _upgrade_scrn_shader(line):
     """v0.1.46: 旧版のシェーダファイルを指す SCRN ラインを現行版へ差し替える。
-    入力接続（太さの駆動など）と値は控えて戻す。差し替えたら True。"""
+    入力接続（太さの駆動など）と値は控えて戻す。差し替えたら True。
+    v0.1.55: フレネル線（FRES_TAG）も同じように差し替える（フレネルのファイル名にも版を入れた）。"""
     shd = _fresnel_shader(line)
-    if not shd or not _attr_exists(line, SCRN_TAG) or not _attr_exists(shd, "shader"):
+    is_scrn = _attr_exists(line, SCRN_TAG)
+    is_fres = (not is_scrn) and _attr_exists(line, FRES_TAG)
+    if not shd or not (is_scrn or is_fres) or not _attr_exists(shd, "shader"):
         return False
     try:
         cur = (cmds.getAttr(shd + ".shader") or "").replace("\\", "/")
@@ -1417,14 +1492,15 @@ def _upgrade_scrn_shader(line):
     # 差してしまい、そのまま保存すると DX11 で開いたときも壊れたまま（読み込みエラー）になった。
     if (cmds.nodeType(shd) == "GLSLShader") != _vp2_is_opengl():
         return False
-    path = _screen_fx_path()
+    path = _screen_fx_path() if is_scrn else _fresnel_fx_path()
     if cur == path:
         return False
     conns = cmds.listConnections(shd, s=True, d=False, c=True, p=True) or []
     pairs = [(conns[i + 1], conns[i]) for i in range(0, len(conns) - 1, 2)]
     keep = {}
     for an in (FRES_COLOR, SCRN_THICK, SCRN_DEPTH_BIAS, "stability",
-               SCRN_BRUSH_ROUGH, SCRN_BRUSH_WAVE, SCRN_BRUSH_SCALE):
+               SCRN_BRUSH_ROUGH, SCRN_BRUSH_WAVE, SCRN_BRUSH_SCALE,
+               FRES_THRESH, FRES_MAXW, SCRN_THICK_WORLD):
         if _attr_exists(shd, an) and not _plug_source(shd + "." + an):
             try:
                 keep[an] = cmds.getAttr(shd + "." + an)
@@ -1451,7 +1527,8 @@ def _upgrade_scrn_shader(line):
                 cmds.connectAttr(src, dst, f=True)
         except Exception:
             pass
-    _bind_scrn_color_set_to_shader(shd, SCRN_CSET)
+    if is_scrn:
+        _bind_scrn_color_set_to_shader(shd, SCRN_CSET)
     return True
 
 
@@ -1464,6 +1541,12 @@ def _prepare_scrn_lines():
             pass
         try:
             _ensure_line_render_attrs(ln)
+        except Exception:
+            pass
+    # v0.1.55: フレネル線もシェーダを現行版へ（ファイル名に版を入れたため）
+    for ln in _all_fresnel_lines():
+        try:
+            _upgrade_scrn_shader(ln)
         except Exception:
             pass
     # エッジ/クリース線は、詳細設定を使ったもの（見え方属性がある）だけ接続を直す。
@@ -1597,7 +1680,7 @@ _SCRN_FX_HLSL_COMMON = """// OG Toonline Manager - Geometry-shader silhouette ou
 // 2 つを結ぶ細い quad をスクリーン空間で押し出す。これにより:
 //   - 外周シルエット: 綺麗な薄線(従来通り)
 //   - 凹部内側シルエット(トーラスの穴など): blob 化せず綺麗な薄線に
-//   - distance attenuation 付き(遠距離で線が緩やかに細くなる)
+//   - v0.1.55: 太さは既定で 3D の長さ（背面法と同じく寄れば太く・引けば細く。thickWorld=0 で画面 px 一定）
 //   - 曲率(COLOR0.r)もエッジ横断点で補間
 // ※ ビューポートは「テクスチャ表示 ON(ホットキー 6)」で表示。VP2/DirectX11 前提。
 float4x4 gWVP : WorldViewProjection;
@@ -1611,6 +1694,15 @@ float thickness <
     float UIMax = 30.0;
     float UIStep = 0.1;
 > = 3.0;
+
+// v0.1.55: 1 = 太さを 3D の長さとして扱う（背面法と同じく寄れば太く・引けば細く）。
+// 3D の長さ = thickness / thickUnitPx（= UI 太さ × 倍率）× 物のスケール。0 = 画面上で一定の px。
+int thickWorld <
+    string UIName = "Thickness In World Units";
+    int UIMin = 0;
+    int UIMax = 1;
+> = 1;
+float thickUnitPx = 6.0;   // thickness へは UI 太さ × 6 (SCRN_SCALE) が入っている
 
 float depthBias <
     string UIName = "Overlap Depth Bias (view ratio)";
@@ -1853,6 +1945,22 @@ float2 perp_from_normal(float3 vspos, float3 vsnrm)
     return d / l;
 }
 
+// v0.1.55: 交点ごとの太さ（px）。thickWorld=1 なら 3D の長さを、その交点の深さでの px に直す
+// （背面法の線と同じく、寄れば太く・引けば細く）。w = 交点のクリップ座標の w（透視=カメラからの距離、
+// 正投影=1）。1 単位が何 px か = 0.5 × 画面の高さ × Projection[1][1] / w（正投影もこの式でよい）。
+// 物のスケールは WorldView の各軸の長さ（ビューは回転だけなので、ワールドのスケールが残る）。
+// 隣の三角形と共有する交点は同じ w になるので、太さは継ぎ目で途切れない。
+float og_thick_px(float w)
+{
+    if (thickWorld == 0) return thickness;
+    float3x3 m = (float3x3)gWV;
+    float os = (length(mul(float3(1.0f, 0.0f, 0.0f), m)) + length(mul(float3(0.0f, 1.0f, 0.0f), m))
+              + length(mul(float3(0.0f, 0.0f, 1.0f), m))) / 3.0f;
+    float pxu = 0.5f * gScreen.y * gProj[1][1] / max(w, 1e-4f);
+    float t = thickness / max(thickUnitPx, 1e-4f) * os * pxu;
+    return min(t, gScreen.y * 0.25f);   // カメラにほぼ接した所で画面を覆わないように
+}
+
 [maxvertexcount(8)]
 void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
 {
@@ -1949,8 +2057,11 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     //   - 線幅 = thickness * cr * wav * taper ピクセル（cr=曲率、wav=ブラシゆらぎ）
     // perp は NDC 単位ベクトル、px = 2/screen。off を w 乗算後に除算すると
     // ピクセル距離が perp * thickness とちょうど一致する（長さ厳密に = thickness px）。
-    float tw1 = thickness * cr1 * wav1 * taperK;
-    float tw2 = thickness * cr2 * wav2 * taperK;
+    // v0.1.55: thickness の代わりに交点ごとの太さ（3D の長さを px に直した値）を使う。
+    float th1 = og_thick_px(w1);
+    float th2 = og_thick_px(w2);
+    float tw1 = th1 * cr1 * wav1 * taperK;
+    float tw2 = th2 * cr2 * wav2 * taperK;
     float2 off1 = perp1 * tw1 * px;
     float2 off2 = perp2 * tw2 * px;
 
@@ -1962,8 +2073,8 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     float wb1 = 0.0f;
     float wb2 = 0.0f;
     if (brushWobble > 0.001f) {
-        wb1 = brushWobble * thickness * 1.5f * vnoise(sp1 / cell);
-        wb2 = brushWobble * thickness * 1.5f * vnoise(sp2 / cell);
+        wb1 = brushWobble * th1 * 1.5f * vnoise(sp1 / cell);
+        wb2 = brushWobble * th2 * 1.5f * vnoise(sp2 / cell);
     }
     float2 b1 = ndc1 + perp1 * wb1 * px;
     float2 b2 = ndc2 + perp2 * wb2 * px;
@@ -1983,8 +2094,8 @@ void GShader(triangle V2G tri[3], inout TriangleStream<G2P> stream)
     // v0.1.49 二重線: 少し外側に細い 2 本目を引く（スケッチ風）
     if (brushDouble > 0.001f) {
         stream.RestartStrip();
-        float g1 = tw1 * (0.8f + 1.5f * brushDouble) + thickness * 0.8f * brushDouble * vnoise(sp1 / cell + 7.31f);
-        float g2 = tw2 * (0.8f + 1.5f * brushDouble) + thickness * 0.8f * brushDouble * vnoise(sp2 / cell + 7.31f);
+        float g1 = tw1 * (0.8f + 1.5f * brushDouble) + th1 * 0.8f * brushDouble * vnoise(sp1 / cell + 7.31f);
+        float g2 = tw2 * (0.8f + 1.5f * brushDouble) + th2 * 0.8f * brushDouble * vnoise(sp2 / cell + 7.31f);
         float2 c1 = b1 + perp1 * g1 * px;
         float2 c2 = b2 + perp2 * g2 * px;
         float2 o1 = perp1 * (tw1 * 0.6f) * px;
@@ -2267,6 +2378,14 @@ uniform float thickness
     string UIName = "Thickness(px)";
 > = 3.0;
 
+// v0.1.55: 1 = 太さを 3D の長さとして扱う（HLSL 版と同じ）
+uniform int thickWorld
+<
+    string UIName = "Thickness In World Units";
+> = 1;
+
+uniform float thickUnitPx = 6.0;
+
 uniform float depthBias
 <
     string UIName = "Overlap Depth Bias (view ratio)";
@@ -2390,6 +2509,17 @@ GLSLShader ShaderGeometry
         colR = mix(GS_IN[ia].colR, GS_IN[ib].colR, t);
     }
 
+    // v0.1.55: 交点ごとの太さ（px）。HLSL 版 og_thick_px と同じ。
+    float thickPx(float w)
+    {
+        if (thickWorld == 0) return thickness;
+        mat3 m = mat3(gWV);
+        float os = (length(m[0]) + length(m[1]) + length(m[2])) / 3.0;
+        float pxu = 0.5 * gScreen.y * gProj[1][1] / max(w, 1e-4);
+        float t = thickness / max(thickUnitPx, 1e-4) * os * pxu;
+        return min(t, gScreen.y * 0.25);
+    }
+
     void emitVert(vec2 ndc, float z, float w, vec2 uv)
     {
         gl_Position = vec4(ndc * w, z, w);
@@ -2444,8 +2574,8 @@ GLSLShader ShaderGeometry
         float wav1 = 1.0 + brushWaviness * (phase1 - 0.5) * 2.0;
         float wav2 = 1.0 + brushWaviness * (phase2 - 0.5) * 2.0;
 
-        vec2 off1 = perp1 * (thickness * cr1 * wav1) * px;
-        vec2 off2 = perp2 * (thickness * cr2 * wav2) * px;
+        vec2 off1 = perp1 * (thickPx(w1) * cr1 * wav1) * px;
+        vec2 off2 = perp2 * (thickPx(w2) * cr2 * wav2) * px;
 
         emitVert(ndc1,        p1.z, w1, vec2(0.0, 0.0));
         emitVert(ndc1 + off1, p1.z, w1, vec2(0.0, 1.0));
@@ -5528,7 +5658,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
 
         # v0.1.32: 遠景で細くする（距離減衰・SCRN のみ）
         dist_row = QtWidgets.QHBoxLayout()
-        dist_row.addWidget(QtWidgets.QLabel("遠景で細くする"))
+        lbl_dist = QtWidgets.QLabel("遠景で細くする")
+        dist_row.addWidget(lbl_dist)
         self.spn_dist_atten = QtWidgets.QDoubleSpinBox()
         self.spn_dist_atten.setRange(0.0, 1.0)
         self.spn_dist_atten.setDecimals(2)
@@ -5543,6 +5674,10 @@ class ToonOutlineUI(QtWidgets.QDialog):
         dist_row.addWidget(self.spn_dist_atten)
         dist_row.addStretch(1)
         sec_feel.add_layout(dist_row)
+        # v0.1.55: 太さを 3D の長さで扱う（背面法と同じく引けば細く）ようになったので、基準距離で細くする
+        # この項目は画面から外す（重ねると二重に細くなる）。値が入っている既存シーンでは今までどおり効く。
+        lbl_dist.setVisible(False)
+        self.spn_dist_atten.setVisible(False)
 
         # v0.1.36: 交差線（他オブジェクトとの重なりに線）
         ix_row = QtWidgets.QHBoxLayout()
@@ -6249,6 +6384,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             # v0.1.45: thickness は SCRN 本体と同じ pixel 幅になるように計算
             _edge_set_params(threshold=0.05,
                              thickness=_scrn_intersect_screen_thickness(),
+                             thick_world=_scrn_intersect_world_thickness(),
                              color=self._color,
                              intersect_mode=True,
                              intersect_threshold=float(self.spn_intersect_thr.value()))
@@ -6716,7 +6852,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
             tgt = _scrn_intersect_meshes()
             if tgt:
                 _edge_set_targets(tgt)
-                _edge_set_params(thickness=_scrn_intersect_screen_thickness())
+                _edge_set_params(thickness=_scrn_intersect_screen_thickness(),
+                                 thick_world=_scrn_intersect_world_thickness())
                 try: cmds.refresh()
                 except Exception: pass
             else:
@@ -8616,7 +8753,7 @@ _EXPORT_CTRL_ATTRS = (CTRL_THICK, CTRL_CURV, CTRL_CAP, CTRL_CMIN, CTRL_TAPER)
 
 def _export_look_attrs():
     return ([LN_SHOW_VIS, LN_HID_MODE, LN_HID_SAME, LN_HID_COLOR, LN_HID_ALPHA, LN_HID_DASH,
-             LN_HID_FILL, LN_TRACE, LN_TRACE_DARK] + [b[0] for b in BRUSH_ATTRS])
+             LN_HID_FILL, LN_TRACE, LN_TRACE_DARK, LN_THICK_WORLD] + [b[0] for b in BRUSH_ATTRS])
 
 
 def _scene_lines():
@@ -9070,6 +9207,15 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         self._row(grid, 1, LN_COLOR, "線の色", self.btn_col,
                   "このレイヤーでの線の色。\n例: マスターは黒、プレイブラスト用レイヤーでは緑。")
 
+        # v0.1.55: 太さを 3D の長さとして扱うか（スクリーン輪郭）
+        self.chk_thkw = QtWidgets.QCheckBox("引くと細く（背面法と同じ）")
+        self.chk_thkw.toggled.connect(lambda v: self._apply(LN_THICK_WORLD, bool(v)))
+        self._row(grid, 2, LN_THICK_WORLD, "太さ", self.chk_thkw,
+                  "ON: 背面法の線と同じく、カメラが寄れば太く・引けば細くなります"
+                  "（キャラに対する線の太さが変わらない）。\n"
+                  "OFF: カメラの距離によらず、画面上でいつも同じ太さ（ピクセル）。\n"
+                  "スクリーン輪郭の線だけの設定です（エッジ線・クリース線はもともと寄れば太く・引けば細く）。")
+
         # v0.1.47: 破線/実線がひと目で選べるよう、プルダウンではなくラジオボタンを横並びに
         w_hid = QtWidgets.QWidget()
         hh = QtWidgets.QHBoxLayout(w_hid); hh.setContentsMargins(0, 0, 0, 0)
@@ -9082,7 +9228,7 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             hh.addWidget(rb)
             self.rb_hid.append(rb)
         hh.addStretch(1)
-        self._row(grid, 2, LN_HID_MODE, "隠れ線", w_hid,
+        self._row(grid, 3, LN_HID_MODE, "隠れ線", w_hid,
                   "紐づけた物の裏に回った部分の描き方。\n"
                   "出さない / 破線 / 実線（色や濃さは下で変えられます）。")
 
@@ -9093,39 +9239,39 @@ class _LineOptionsDialog(QtWidgets.QDialog):
         self.btn_hcol = QtWidgets.QPushButton()
         self.btn_hcol.clicked.connect(lambda: self._pick(LN_HID_COLOR, "隠れ線の色"))
         hcl.addWidget(self.chk_same); hcl.addWidget(self.btn_hcol, 1)
-        self._row(grid, 3, LN_HID_COLOR, "隠れ線の色", hc,
+        self._row(grid, 4, LN_HID_COLOR, "隠れ線の色", hc,
                   "隠れ線の色。『線と同じ』を外すと別の色にできます。")
         # 「線と同じ」も同じ行の ↺ で戻す
         self._rows[LN_HID_SAME] = self._rows[LN_HID_COLOR]
 
         w_a, self.sl_alpha, self.sp_alpha = self._pct(0, 100, LN_HID_ALPHA)
-        self._row(grid, 4, LN_HID_ALPHA, "隠れ線の濃さ", w_a,
+        self._row(grid, 5, LN_HID_ALPHA, "隠れ線の濃さ", w_a,
                   "0 = 見えない / 50 = 半分透けた線 / 100 = 普通の線と同じ濃さ")
 
         self.sp_dash = QtWidgets.QDoubleSpinBox()
         self.sp_dash.setRange(1.0, 200.0); self.sp_dash.setDecimals(1)
         self.sp_dash.setSingleStep(1.0); self.sp_dash.setSuffix(" px")
         self.sp_dash.valueChanged.connect(lambda v: self._apply(LN_HID_DASH, float(v)))
-        self._row(grid, 5, LN_HID_DASH, "破線の長さ", self.sp_dash,
+        self._row(grid, 6, LN_HID_DASH, "破線の長さ", self.sp_dash,
                   "破線 1 区切り（線＋すき間）の長さ。画面のピクセル数。\n小さいほど細かい破線。")
 
         w_f, self.sl_fill, self.sp_fill = self._pct(5, 95, LN_HID_FILL)
-        self._row(grid, 6, LN_HID_FILL, "破線の線の割合", w_f,
+        self._row(grid, 7, LN_HID_FILL, "破線の線の割合", w_f,
                   "1 区切りのうち線を描く割合。\n5 = ほぼ点 / 50 = 線とすき間が半々 / 95 = ほぼつながった線")
         # v0.1.53: 色トレス（線の色を下の面のマテリアルの色から作る）
         w_t, self.sl_trace, self.sp_trace = self._pct(0, 100, LN_TRACE)
-        self._row(grid, 7, LN_TRACE, "色トレス", w_t,
+        self._row(grid, 8, LN_TRACE, "色トレス", w_t,
                   "線の色を、下の面のマテリアルの色から作る割合。\n"
                   "0 = 線の色のまま / 50 = 半々 / 100 = 面の色から作った色\n"
                   "（肌の上は赤茶、髪の上は濃い髪色、のようになります）")
         w_d, self.sl_tdark, self.sp_tdark = self._pct(0, 100, LN_TRACE_DARK)
-        self._row(grid, 8, LN_TRACE_DARK, "トレスの明るさ", w_d,
+        self._row(grid, 9, LN_TRACE_DARK, "トレスの明るさ", w_d,
                   "面の色をどれくらいの明るさで使うか。\n20 = かなり暗い / 45 = 標準 / 100 = 面の色そのまま")
         b_tr = QtWidgets.QPushButton("面の色を読み直す")
         b_tr.setToolTip("マテリアルの色や割り当てを変えたあとに押すと、色トレスの色を読み直します。")
         b_tr.clicked.connect(self._reload_trace)
-        grid.addWidget(b_tr, 9, 1)
-        grid.setRowStretch(10, 1)
+        grid.addWidget(b_tr, 10, 1)
+        grid.setRowStretch(11, 1)
         self.tabs.addTab(page_look, "見え方")
 
         # ---- ブラシ（v0.1.49）----
@@ -9270,6 +9416,13 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             pass
         self._refresh()
         self._owner_refresh_colors()
+        if any(a == LN_THICK_WORLD for a, _v in pairs):
+            # v0.1.55: 交差線の太さもスクリーン輪郭に合わせ直す
+            try:
+                if self._owner is not None:
+                    self._owner._refresh_intersect_targets_if_on()
+            except Exception:
+                pass
 
     def _pick(self, attr, title):
         if not self._lines:
@@ -9424,6 +9577,18 @@ class _LineOptionsDialog(QtWidgets.QDialog):
             self.sl_trace.setValue(tr); self.sp_trace.setValue(tr)
             td = int(round(float(_get(LN_TRACE_DARK, TRACE_DARK_DEF)) * 100))
             self.sl_tdark.setValue(td); self.sp_tdark.setValue(td)
+            # v0.1.55: 太さ（3D の長さか画面 px か）。スクリーン輪郭の線だけ
+            scrn = [l2 for l2 in self._lines if _attr_exists(l2, SCRN_TAG)]
+            self.chk_thkw.setEnabled(bool(scrn))
+            if scrn:
+                try:
+                    tw = bool(cmds.getAttr(scrn[0] + "." + LN_THICK_WORLD)) \
+                        if _attr_exists(scrn[0], LN_THICK_WORLD) else True
+                except Exception:
+                    tw = True
+                self.chk_thkw.setChecked(tw)
+            else:
+                self.chk_thkw.setChecked(True)
             # v0.1.49: ブラシ
             for attr, (sl, sp) in self._br_widgets.items():
                 bv = int(round(float(_get(attr, 0.0)) * 100))
@@ -9881,7 +10046,7 @@ EDGE_OVR_NAME = "OG_ToonEdgeOutline"
 #   intersect_threshold は target と other の深度一致判定しきい値（相対差 |Δz|/z）。
 _EDGE_PARAMS = {"threshold": 0.05, "thickness": 1.0, "color": (0.0, 0.0, 0.0),
                 "near": 0.1, "far": 10000.0, "debug": 0,
-                "intersect_mode": 0, "intersect_threshold": 0.01}
+                "intersect_mode": 0, "intersect_threshold": 0.01, "thick_world": 0.0}
 _EDGE_TARGETS = []          # エッジ検出対象の transform 名リスト（オブジェクト単位を保持）
 _edge_override = None
 _edge_size_logged = (0, 0)  # 直近ログしたターゲット (w, h) — 変化時に一度だけ報告
@@ -9905,6 +10070,10 @@ int    gDebug     = 0;                  // 1: 線形化深度を可視化（切�
 int    gIntersectMode    = 0;           // 1: 対象と他オブジェクトの交差線モード
 int    gEdgeMode         = 0;           // 1: 対象の自己エッジ（旧・画像空間エッジ）
 float  gIntersectThresh  = 0.01f;       // 深度一致とみなす相対差しきい値
+// v0.1.55: 交差線の太さを 3D の長さで（スクリーン輪郭と同じく寄れば太く・引けば細く）。0 = gTexel の px のまま
+float  gThickWorld  = 0.0f;             // 太さ（3D の長さ）
+float  gPxPerUnitK  = 500.0f;           // 0.5 × 画面の高さ px × Projection[1][1]（透視はこれを距離で割る）
+float2 gTexelBase   = {0.001f, 0.001f}; // (1/width, 1/height)
 
 struct VIN  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
 struct VOUT { float4 Pos : SV_Position; float2 UV : TEXCOORD0; };
@@ -9941,6 +10110,11 @@ float intersectEdge(float2 uv, float2 t)
     float rel_c = abs(za_c - zb_c) / og_scale(min(za_c, zb_c));
     // 中心が近接の目安を外れていればまず線にしない（範囲を少し緩めて取りこぼし防止）
     if (rel_c > gIntersectThresh * 3.0f) return 0.0f;
+    // v0.1.55: 太さを 3D の長さで決めるときは、この画素の深さで px に直す
+    if (gThickWorld > 0.0f) {
+        float pxu = gPxPerUnitK / ((gOrtho > 0.5f) ? 1.0f : max(min(za_c, zb_c), 1e-4f));
+        t = gTexelBase * clamp(gThickWorld * pxu, 1.0f, 64.0f);
+    }
     bool a_front_c = (za_c <= zb_c);
     // scene の最前面が target / other どちらか（イプシロンは画面空間深度の 0.2%）
     float eps_c = og_scale(max(za_c, zb_c)) * 0.002f;
@@ -9950,13 +10124,18 @@ float intersectEdge(float2 uv, float2 t)
     bool any_flip = false;
     float min_rel = rel_c;
     // 4 方向で前後関係が反転しているか（= 実際に 3D で交差している証拠）
+    // v0.1.55: 太さの距離 t だけでなく t/2・t/4 でも調べる。太い線（寄りのカメラで t が大きい）だと、
+    // t 先が重なりの外（片方の物しか無い）に出て反転が見つからず、線が消えることがあった。
     [unroll]
-    for (int k = 0; k < 4; k++)
+    for (int q = 0; q < 12; q++)
     {
-        float2 off = (k == 0) ? float2(0.0f, -t.y)
-                   : (k == 1) ? float2(0.0f,  t.y)
-                   : (k == 2) ? float2(-t.x, 0.0f)
-                   :            float2( t.x, 0.0f);
+        int k = q % 4;
+        float sc = (q < 4) ? 1.0f : ((q < 8) ? 0.5f : 0.25f);
+        float2 tq = max(t * sc, gTexelBase);
+        float2 off = (k == 0) ? float2(0.0f, -tq.y)
+                   : (k == 1) ? float2(0.0f,  tq.y)
+                   : (k == 2) ? float2(-tq.x, 0.0f)
+                   :            float2( tq.x, 0.0f);
         float2 nuv = uv + off;
         float ra_n = gDepthTex.Sample(gSamp, nuv).r;
         float rb_n = gDepthOtherTex.Sample(gSamp, nuv).r;
@@ -10068,6 +10247,9 @@ uniform int gDebug;
 uniform int gIntersectMode;
 uniform int gEdgeMode;
 uniform float gIntersectThresh;
+uniform float gThickWorld;           // v0.1.55: 交差線の太さ（3D の長さ）。0 = gTexel のまま
+uniform float gPxPerUnitK;           // 0.5 × 画面の高さ px × Projection[1][1]
+uniform vec2 gTexelBase;             // (1/width, 1/height)
 
 attribute VS_IN {
     vec3 Pos : POSITION;
@@ -10106,6 +10288,11 @@ GLSLShader PS {
         float zs_c = linearize(rs_c);
         float rel_c = abs(za_c - zb_c) / og_scale(min(za_c, zb_c));
         if (rel_c > gIntersectThresh * 3.0) return 0.0;
+        // v0.1.55: 太さを 3D の長さで決めるときは、この画素の深さで px に直す（HLSL 版と同じ）
+        if (gThickWorld > 0.0) {
+            float pxu = gPxPerUnitK / ((gOrtho > 0.5) ? 1.0 : max(min(za_c, zb_c), 1e-4));
+            t = gTexelBase * clamp(gThickWorld * pxu, 1.0, 64.0);
+        }
         bool a_front_c = (za_c <= zb_c);
         // v0.1.42: scene 最前面が target / other どちらか（HLSL 版と同条件）
         float eps_c = og_scale(max(za_c, zb_c)) * 0.002;
@@ -10113,12 +10300,16 @@ GLSLShader PS {
         bool saw_b_front = (abs(zs_c - zb_c) < eps_c);
         bool any_flip = false;
         float min_rel = rel_c;
-        for (int k = 0; k < 4; ++k) {
+        // v0.1.55: t だけでなく t/2・t/4 でも調べる（HLSL 版と同じ）
+        for (int q = 0; q < 12; ++q) {
+            int k = q - (q / 4) * 4;
+            float sc = (q < 4) ? 1.0 : ((q < 8) ? 0.5 : 0.25);
+            vec2 tq = max(t * sc, gTexelBase);
             vec2 off;
-            if (k == 0)      off = vec2(0.0, -t.y);
-            else if (k == 1) off = vec2(0.0,  t.y);
-            else if (k == 2) off = vec2(-t.x, 0.0);
-            else             off = vec2( t.x, 0.0);
+            if (k == 0)      off = vec2(0.0, -tq.y);
+            else if (k == 1) off = vec2(0.0,  tq.y);
+            else if (k == 2) off = vec2(-tq.x, 0.0);
+            else             off = vec2( tq.x, 0.0);
             vec2 nuv = uv + off;
             float ra_n = texture2D(gDepthSamp, nuv).r;
             float rb_n = texture2D(gDepthOtherSamp, nuv).r;
@@ -10231,12 +10422,15 @@ def _edge_set_targets(names):
 
 
 def _edge_set_params(threshold=None, thickness=None, color=None, debug=None,
-                     intersect_mode=None, intersect_threshold=None):
+                     intersect_mode=None, intersect_threshold=None, thick_world=None):
     if threshold is not None:
         # smoothstep(gThreshold, gThreshold*2, ..) が 0/0 になる事故を防ぐ最小値
         _EDGE_PARAMS["threshold"] = max(1e-4, float(threshold))
     if thickness is not None:
         _EDGE_PARAMS["thickness"] = float(thickness)
+    if thick_world is not None:
+        # v0.1.55: 交差線の太さ（3D の長さ）。0 = thickness の px のまま
+        _EDGE_PARAMS["thick_world"] = max(0.0, float(thick_world))
     if color is not None:
         _EDGE_PARAMS["color"] = (color[0], color[1], color[2])
     if debug is not None:
@@ -10332,6 +10526,7 @@ def _edge_active_camera_near_far(destination=None):
                     ortho, scale = False, 10.0
                 _EDGE_CAM_ORTHO["ortho"] = ortho
                 _EDGE_CAM_ORTHO["scale"] = max(scale, 1e-3)
+                _EDGE_CAM_ORTHO["cam"] = cam_shape
                 return n, f
     except Exception:
         pass
@@ -10345,6 +10540,25 @@ def _edge_set_ortho_params(s):
         s.setParameter("gOrthoScale", float(_EDGE_CAM_ORTHO["scale"]))
     except Exception:
         pass
+
+
+def _edge_camera_proj_yy(w, h):
+    """v0.1.55: 直前の _edge_active_camera_near_far で見たカメラの、w×h の画面での Projection[1][1]
+    （画面の縦の半分が 1 になる倍率）。透視はフィルムフィットを含めた縦の画角から、正投影は
+    正投影の幅（横）と画面の縦横比から出す。om2 で測る（描画中に呼ぶので cmds の Undo 履歴を汚さない）。"""
+    try:
+        if _EDGE_CAM_ORTHO.get("ortho"):
+            ow = float(_EDGE_CAM_ORTHO.get("scale", 10.0))
+            return 2.0 / max(ow * float(h) / float(max(w, 1)), 1e-6)
+        cam = _EDGE_CAM_ORTHO.get("cam")
+        if cam:
+            sel = om2.MSelectionList()
+            sel.add(cam)
+            _hf, vf = om2.MFnCamera(sel.getDagPath(0)).getPortFieldOfView(int(max(w, 1)), int(max(h, 1)))
+            return 1.0 / max(math.tan(vf * 0.5), 1e-6)
+    except Exception:
+        pass
+    return 1.0 / math.tan(math.radians(54.43) * 0.5)   # Maya 既定の 35mm 相当
 
 
 def _edge_active():
@@ -10456,6 +10670,11 @@ def _hidden_set_shader_params(s, line, ovr):
         params += [(sh_attr, dv) for _ln, sh_attr, dv, _lo, _hi in BRUSH_ATTRS]
         for an, dv in params:
             s.setParameter(an, float(_get(shd, an, dv)))
+        # v0.1.55: 太さを 3D の長さとして扱うか（表側の線と同じ太さで隠れ線を描く）
+        try:
+            s.setParameter(SCRN_THICK_WORLD, int(bool(_get(shd, SCRN_THICK_WORLD, 1))))
+        except Exception:
+            pass
 
 
 def _og_override_needed():
@@ -10473,12 +10692,16 @@ def _og_override_sync():
 
 
 _PANEL_GUARD = [None]   # QTimer: オーバーライドが有効な間、空に戻されたパネルへ入れ直す
+_PANEL_GUARD_PENDING = [False]   # 入れ直しを evalDeferred で予約済みか
 
 
 def _guard_panels():
     """v0.1.54: Maya の updateRenderOverride（新しいシーンの直後や、Arnold などレンダラーのメニュー更新で
     遅れて走る）がパネルのオーバーライドを空に戻すことがある。戻されたままだとそのパネルの
-    プレイブラストに隠れ線が出ないので、空のパネルにだけ入れ直す（他のオーバーライドのパネルは取らない）。"""
+    プレイブラストに隠れ線が出ないので、空のパネルにだけ入れ直す（他のオーバーライドのパネルは取らない）。
+    v0.1.55: タイマーから直接パネルを触らず、Maya が手すきになったとき（evalDeferred）に入れ直す。
+    Qt のタイマーはプレイブラストの最中にも呼ばれ、その最中にパネルのオーバーライドを付け替えると
+    メモリが壊れて、あとでツールのウィンドウを開き直したときなどに Maya ごと落ちた（0xc0000374）。"""
     if _edge_override is None:
         t = _PANEL_GUARD[0]
         if t is not None:
@@ -10486,6 +10709,20 @@ def _guard_panels():
                 t.stop()
             except Exception:
                 pass
+        return
+    if _PANEL_GUARD_PENDING[0]:
+        return
+    _PANEL_GUARD_PENDING[0] = True
+    try:
+        cmds.evalDeferred(_guard_panels_apply, lowestPriority=True)
+    except Exception:
+        _PANEL_GUARD_PENDING[0] = False
+
+
+def _guard_panels_apply():
+    """_guard_panels が予約した入れ直し（Maya が手すきのときに走る）。"""
+    _PANEL_GUARD_PENDING[0] = False
+    if _edge_override is None:
         return
     try:
         for p in cmds.getPanel(type="modelPanel") or []:
@@ -10774,6 +11011,12 @@ def _edge_enable():
                         s.setParameter("gNear", float(n))
                         s.setParameter("gFar", float(f))
                         _edge_set_ortho_params(s)
+                        # v0.1.55: 交差線の太さを 3D の長さで（この画面の大きさでの Projection[1][1]）
+                        tw = float(_EDGE_PARAMS.get("thick_world", 0.0))
+                        s.setParameter("gThickWorld", tw)
+                        s.setParameter("gTexelBase", (1.0 / float(w), 1.0 / float(h)))
+                        if tw > 0.0:
+                            s.setParameter("gPxPerUnitK", float(0.5 * h * _edge_camera_proj_yy(w, h)))
                         s.setParameter("gDebug", int(_EDGE_PARAMS["debug"]))
                         s.setParameter("gIntersectMode",
                                        int(bool(_OVR_STATE["intersect"] and _EDGE_PARAMS["intersect_mode"])))

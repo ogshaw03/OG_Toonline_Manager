@@ -385,6 +385,7 @@ pfxToon/MayaToonOutline のエッジ分類のうち**クリース（二面角>`C
   2 front+1 back/1 front+2 back で結果が反転して不安定で、旧非対称 quad の内側 15% が
   「面に黒」の原因でもあった）。v0.1.15 で:
   - 距離 atten を**完全撤去**（背面法と同じピクセル一定太さ＝ `thickness * cr * wav` px）
+    ※ v0.1.55 で既定を「3D の長さ」（寄れば太く・引けば細く）に変更。下の「線の太さを 3D の長さで」を参照
   - perp を**補間 VSNrm の NDC 射影方向**で算出（`perp_from_normal`）。共有クロス点では隣接
     三角形も同じ補間値 → perp が完全一致 → **真の miter joint** で quad 外側コーナーがピクセル
     一致 → 破線化が消える。法線は正の側＝外側を向くので旧 back_avg 判定は不要。
@@ -628,6 +629,15 @@ SCRN のみ（DX11 HLSL。OGSFX は未対応＝属性はあっても効かない
   パネルのオーバーライドを空に戻す**ことがある（persp だけ空になり、そのパネルのプレイブラストに隠れ線が
   出なかった）。オーバーライドが有効な間は `_PANEL_GUARD`（1 秒の QTimer、`_guard_panels`）が空のパネルにだけ
   入れ直す（他のオーバーライドのパネルは取らない）。`_edge_disable` で止める。
+  **v0.1.55: タイマーから直接パネルを触らず `cmds.evalDeferred(_guard_panels_apply, lowestPriority=True)` で
+  Maya が手すきのときに入れ直す。** Qt のタイマーはプレイブラストの最中にも呼ばれ、その最中に `modelEditor` で
+  オーバーライドを付け替えるとヒープが壊れ（0xc0000374）、あとでウィンドウを開き直したとき
+  （`_find_tool_windows` の `topLevelWidgets()`）に Maya ごと落ちた。v0.1.54 から起きていた（v0.1.53 は 3/3 通る、
+  v0.1.54/55 は検証用 Maya の状態によって 2/3 落ちる → ガードを止めると 4/4、evalDeferred 化で 5/5 通る）。
+  起きやすさは環境しだい（検証用の MAYA_APP_DIR に、レンダーレイヤーありでプレイブラストした `images/tmp/<レイヤー>`
+  があると再現しやすかった）。**描画中・プレイブラスト中に走りうる Qt タイマーからは Maya のパネル/オーバーライドを
+  変えない**（変えるなら evalDeferred）。落ちた場所は検証スクリプトで `faulthandler.enable(file=...)` すると分かる
+  （`gui_review_check.py` の OG_FAULT=1）。
 - **ツールのウィンドウを閉じるときは `_find_tool_windows` で先に集めてから `_close_and_delete`**（`show()` /
   `_close_tool_windows` / `show_line_options`）。**`_close_and_delete` は deleteLater のあと、そのウィンドウ宛ての
   DeferredDelete をその場で処理して破棄する**。deleteLater だけだと、新しいウィンドウを作っている最中（ツリー更新の
@@ -637,6 +647,35 @@ SCRN のみ（DX11 HLSL。OGSFX は未対応＝属性はあっても効かない
 - 検証で同じ名前の確認を 2 つ同時に流すときは、出力先（`-outDir`）と MAYA_APP_DIR を分ける（同じフォルダーに
   2 つの Maya が書き込み、ログが混ざって結果が読めなくなった）。`run_suites.ps1` は RESULT が出ないまま Maya が
   終わったら起動し直す（他の検証と並行して Maya が落ちることがある）。
+
+### 線の太さを 3D の長さで（v0.1.55・背面法と同じく寄れば太く・引けば細く）
+
+利用者の報告: キャラに適用するとカメラを引いたときに線がキャラに対して太くなる（スクリーン輪郭は画面上の px が一定のため）。
+利用者の指定: **背面法と同じ振る舞い・基準距離は設けない**（太さはスライダーで合わせる）。
+- スクリーン輪郭の GS（`og_thick_px`）で交点ごとに `thickness / thickUnitPx(=SCRN_SCALE) × 物のスケール × px/単位`。
+  px/単位 = `0.5 × gScreen.y × gProj[1][1] / w`（w = 交点のクリップ座標の w。透視=距離・正投影=1 なので両方この式）。
+  物のスケール = WorldView の各軸の長さの平均（ビューは回転だけ）。共有交点は同じ w なので継ぎ目で途切れない。
+  **3D の長さ = UI 太さ × 倍率 × スケール＝背面法の textureDeformer.offset と同じ値**（同じ太さなら同じ幅。実測一致）。
+  よれ・二重線も同じ太さから。画面の 1/4 で頭打ち（カメラに接したとき画面を覆わない）。
+- uniform `thickWorld`（int、既定 1）。ライン属性 `LN_THICK_WORLD`（`toonThickWorld`、bool 既定 ON）から接続＝
+  Render Setup でレイヤーごとに上書きできる。UI はライン詳細設定 → 見え方 →「太さ: 引くと細く（背面法と同じ）」。
+  OFF で v0.1.54 までの画面 px 一定。隠れ線パスは `_hidden_set_shader_params` で同じ値を渡す。
+- フレネル: PS で同じ換算（VS からクリップの w とスケールを渡す）。ライン属性は無く uniform 既定 1。
+  **フレネルのファイル名にも版を入れた**（`OG_ToonFresnel_v<ver>`）。既存のフレネル線は `_prepare_scrn_lines` →
+  `_upgrade_scrn_shader`（フレネルにも対応）で差し替え、入力接続（maxWidthPx/threshold）と色を戻す。
+  ※ 球のような滑らかな面ではフレネルの帯は maxWidthPx よりかなり細く出る（面の粗さで facing が 0 になる前に縁が来る）。
+- 交差線: `_scrn_intersect_world_thickness`（一番太い SCRN ラインの mB.output × スケール。そのラインが OFF なら 0）を
+  `_EDGE_PARAMS["thick_world"]` に入れ、オーバーライドの PS で画素の深さから px に直す。Projection[1][1] は
+  `_edge_camera_proj_yy`（om2 `MFnCamera.getPortFieldOfView(w, h)`＝フィルムフィット込み。正投影は幅と縦横比）。
+- 既存シーンは**ツールのウィンドウを開いたとき**（refresh_tree → `_prepare_scrn_lines`）に新しいシェーダへ切り替わる。
+  開くまでは前の版のシェーダ（画面 px 一定）のまま。開いた時点でシーンを書き換えないため（開いただけで「変更あり」に
+  なるのを避ける）、シーンを開いたイベントでは差し替えない。
+- 交差線の判定は `t`（太さ）先の 4 方向だけでなく `t/2`・`t/4` でも前後の反転を調べる（v0.1.55）。太い線で `t` が
+  重なりの半分を超えると、`t` 先が重なりの外（片方の物しか無い）に出て線が消えていた（小さな物＋3D の長さの太さで発覚）。
+- 旧「遠景で細くする」（v0.1.32、基準距離 `DIST_ATTEN_REF` で Python が `camDistAtten` を書く）は画面から外した
+  （重ねると二重に細くなる・基準距離方式は利用者が不要とした）。値が入っている既存シーンでは今までどおり効く。
+- 検証: `gui_thk55_check.py`（距離 60/120 の幅・背面法との比較・スケール 2 倍・OFF・Undo・レイヤー上書き・フレネル・交差線・
+  書き出し/読み込み）、`gui_up55_check.py`（OG_PART=save を v0.1.54 のコピーで → open を現行で。ツールを開く前後）。
 
 ### 見た目の検証方法
 
