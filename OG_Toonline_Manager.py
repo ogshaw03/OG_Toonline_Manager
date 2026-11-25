@@ -22,6 +22,7 @@ inverted hull 方式（押し出し → 法線反転 → バックフェース�
 使い方の概要は README.md を参照。
 """
 import os
+import gc as _gc      # 関数内で gc（コントローラー名）というローカル変数を多用しているので別名にする
 import math
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
@@ -51,12 +52,27 @@ def _qt_valid(obj):
         return False
 
 
+def _top_level_widgets():
+    """QApplication.topLevelWidgets() を、GC を止めて Python のリストにする。
+    v0.1.56: 一覧を Python のリストに変える途中で GC が走ると、まだ変換していないトップレベルの
+    ウィジェットを GC が消すことがある（親の無いまま Python が持っていて、閉じたウィンドウと参照の輪に
+    なっていた部品。他のツールの物も同じ）。消えたポインタを変換して Maya ごと落ちていた（0xc0000374）。
+    リストになったあとは、リストが参照を持つので GC に消されない。"""
+    was = _gc.isenabled()
+    _gc.disable()
+    try:
+        return list(QtWidgets.QApplication.topLevelWidgets())
+    finally:
+        if was:
+            _gc.enable()
+
+
 def _find_tool_windows(names):
     """このツールのウィンドウ（objectName が names のもの）を集める。
     v0.1.54: 集めてから閉じる（閉じる処理の途中で描画が回り、一覧の後ろのウィンドウが破棄されたあとに
     触ると Maya ごと落ちることがあった）。"""
     out = []
-    for w in QtWidgets.QApplication.topLevelWidgets():
+    for w in _top_level_widgets():
         try:
             if _qt_valid(w) and w.objectName() in names:
                 out.append(w)
@@ -318,7 +334,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.55"
+__version__ = "0.1.56"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -5883,20 +5899,23 @@ class ToonOutlineUI(QtWidgets.QDialog):
         #  _on_toggle_occlude/_on_toggle_hide_handles/_on_toggle_lock_select/
         #  chk_edge/chk_edge_debug/spn_edge_thr/spn_edge_w は後方互換で属性だけ生成)。
         # 既定値を適用する最低限のステートを属性として保持する:
-        self.chk_hide_handles = QtWidgets.QCheckBox(); self.chk_hide_handles.setChecked(True)
+        # v0.1.56: 親（このウィンドウ）を付けて作る。親が無いとトップレベルのウィジェットになり、
+        # ウィンドウを閉じたあとも Python が持ったまま参照の輪に残って GC で消える。開き直しで
+        # トップレベルの一覧を作っている最中にそれが起きると Maya ごと落ちた（_top_level_widgets）。
+        self.chk_hide_handles = QtWidgets.QCheckBox(self); self.chk_hide_handles.setChecked(True)
         self.chk_hide_handles.hide()
-        self.chk_lock_select = QtWidgets.QCheckBox(); self.chk_lock_select.setChecked(True)
+        self.chk_lock_select = QtWidgets.QCheckBox(self); self.chk_lock_select.setChecked(True)
         self.chk_lock_select.hide()
-        self.chk_occlude = QtWidgets.QCheckBox(); self.chk_occlude.setChecked(False)
+        self.chk_occlude = QtWidgets.QCheckBox(self); self.chk_occlude.setChecked(False)
         self.chk_occlude.hide()
-        self.chk_edge = QtWidgets.QCheckBox(); self.chk_edge.setChecked(False)
+        self.chk_edge = QtWidgets.QCheckBox(self); self.chk_edge.setChecked(False)
         self.chk_edge.hide()
-        self.chk_edge_debug = QtWidgets.QCheckBox(); self.chk_edge_debug.setChecked(False)
+        self.chk_edge_debug = QtWidgets.QCheckBox(self); self.chk_edge_debug.setChecked(False)
         self.chk_edge_debug.hide()
-        self.spn_edge_thr = QtWidgets.QDoubleSpinBox()
+        self.spn_edge_thr = QtWidgets.QDoubleSpinBox(self)
         self.spn_edge_thr.setRange(0.001, 0.5); self.spn_edge_thr.setValue(_EDGE_PARAMS["threshold"])
         self.spn_edge_thr.hide()
-        self.spn_edge_w = QtWidgets.QDoubleSpinBox()
+        self.spn_edge_w = QtWidgets.QDoubleSpinBox(self)
         self.spn_edge_w.setRange(0.5, 8.0); self.spn_edge_w.setValue(_EDGE_PARAMS["thickness"])
         self.spn_edge_w.hide()
 
@@ -9901,7 +9920,7 @@ def open_version_dialog(*_args):
     """UI ボタンのコールバック: バージョン選択ダイアログを表示 → 選択バージョンをインストール。"""
     try:
         parent = None
-        for w in QtWidgets.QApplication.topLevelWidgets():
+        for w in _top_level_widgets():
             if w.objectName() == WINDOW_OBJ:
                 parent = w; break
         dlg = _VersionDialog(parent=parent)
