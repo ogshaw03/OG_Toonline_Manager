@@ -67,6 +67,26 @@ def _top_level_widgets():
             _gc.enable()
 
 
+def _set_shader_file(shd, path):
+    """v0.1.57: dx11Shader / GLSLShader にシェーダファイルを読み込む（Undo に記録しない）。
+    読み込むと uniform の属性がシェーダ側で作り直される。記録すると、線の生成を Undo して Redo したときに
+    読み込みがもう一度走って属性が作り直され、そのあとの uniform への setAttr の記録が消えた属性を指して
+    Maya ごと落ちた（作る → 別の操作 → Undo 2 回 → Redo。v0.1.56 以前から。最小の手順で再現：
+    dx11Shader を作って読み込み → uniform へ setAttr を同じ Undo のまとまりで → 落ちる。記録しなければ落ちない）。
+    Undo でノードごと消えるので、読み込みを記録しなくても戻し損ねはない。"""
+    was = cmds.undoInfo(q=True, state=True)
+    if was:
+        cmds.undoInfo(stateWithoutFlush=False)
+    try:
+        cmds.setAttr(shd + ".shader", path, type="string")
+        return True
+    except Exception:
+        return False
+    finally:
+        if was:
+            cmds.undoInfo(stateWithoutFlush=True)
+
+
 def _find_tool_windows(names):
     """このツールのウィンドウ（objectName が names のもの）を集める。
     v0.1.54: 集めてから閉じる（閉じる処理の途中で描画が回り、一覧の後ろのウィンドウが破棄されたあとに
@@ -206,6 +226,9 @@ TRACE_DARK_DEF = 0.45
 # 3D の長さ = UI 太さ × 倍率（＝背面法の textureDeformer.offset と同じ値）× 物の大きさ（スケール）。
 LN_THICK_WORLD   = "toonThickWorld"    # ライン属性 → shd.thickWorld へ接続（レイヤーごとに上書き可）
 SCRN_THICK_WORLD = "thickWorld"        # SCRN/フレネルのシェーダの uniform（int 0/1、既定 1）
+# v0.1.57: 線用メッシュの法線を形どおりにするノード（元メッシュの法線を編集していても輪郭は形で出す）
+GEO_NRM_MARK = "ogGeoNormals"          # ロック解除・全辺なめらかのノードに付ける目印（bool）
+GEO_NRM_LINK = "ogGeoNormalsNode"      # ライン → deformer の入力につないだノード（message）
 ROOT_HIDDEN_ON = "toonHiddenOn"        # シーン全体で隠れ線を描くか（ROOT の属性、既定 ON）
 HIDDEN_DEPTH_TOL = 0.002               # 隠れ線の前後判定に使う相対深度の許容差
 # v0.1.49: ブラシ（SCRN シェーダの uniform 名と、ラインごと・レイヤーごとの属性名）
@@ -334,7 +357,7 @@ WINDOW_OBJ  = "OG_Toonline_ManagerWin"  # ウィンドウ識別名（重複起�
 # ---- バージョン & GitHub ホットアップデート設定 ----
 # install.py が __version__ を before/after ダイアログとバージョン表示に使う。
 # 値を上げてから push すると「GitHub から更新」で previous → current が変わる。
-__version__ = "0.1.56"
+__version__ = "0.1.57"
 
 # 「GitHub から更新」の取得元（開発ブランチ。安定運用に移す際は main へ）
 _GITHUB_OWNER  = "ogshaw03"
@@ -676,9 +699,7 @@ def _build_fresnel_network(line, shape, color):
         cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
     except Exception:
         pass
-    try:
-        cmds.setAttr(shd + ".shader", fx, type="string")   # .fx/.ogsfx をロード → uniform が attr 化
-    except Exception:
+    if not _set_shader_file(shd, fx):   # .fx/.ogsfx をロード → uniform が attr 化
         cmds.warning("フレネル用シェーダの読み込みに失敗しました（{0} をご確認ください）".format(plug))
     # 線色 uniform を設定
     if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
@@ -1522,9 +1543,7 @@ def _upgrade_scrn_shader(line):
                 keep[an] = cmds.getAttr(shd + "." + an)
             except Exception:
                 pass
-    try:
-        cmds.setAttr(shd + ".shader", path, type="string")
-    except Exception:
+    if not _set_shader_file(shd, path):
         return False
     for an, v in keep.items():
         if not _attr_exists(shd, an):
@@ -1559,10 +1578,18 @@ def _prepare_scrn_lines():
             _ensure_line_render_attrs(ln)
         except Exception:
             pass
+        try:
+            _ensure_geo_normals(ln)   # v0.1.57: 前の版の線も形どおりの法線へ（一度だけ）
+        except Exception:
+            pass
     # v0.1.55: フレネル線もシェーダを現行版へ（ファイル名に版を入れたため）
     for ln in _all_fresnel_lines():
         try:
             _upgrade_scrn_shader(ln)
+        except Exception:
+            pass
+        try:
+            _ensure_geo_normals(ln)
         except Exception:
             pass
     # エッジ/クリース線は、詳細設定を使ったもの（見え方属性がある）だけ接続を直す。
@@ -2886,9 +2913,7 @@ def _build_screen_network(line, shape, color):
         cmds.connectAttr(shd + ".outColor", sg + ".surfaceShader", f=True)
     except Exception:
         pass
-    try:
-        cmds.setAttr(shd + ".shader", fx, type="string")
-    except Exception:
+    if not _set_shader_file(shd, fx):
         cmds.warning("スクリーン輪郭用シェーダの読み込みに失敗（{0} をご確認ください）".format(plug))
     if cmds.attributeQuery(FRES_COLOR, node=shd, exists=True):
         try:
@@ -3035,6 +3060,113 @@ def _line_src_shape(line):
             return conn[0]
     sh = cmds.listRelatives(line, shapes=True, type="mesh", ni=True, f=True)
     return sh[0] if sh else None
+
+
+def _geo_nrm_nodes(line):
+    """v0.1.57: このラインの形どおりの法線用ノード [polySoftEdge, polyNormalPerVertex]（無ければ []）。"""
+    if not _attr_exists(line, GEO_NRM_LINK):
+        return []
+    out = []
+    c = cmds.listConnections(line + "." + GEO_NRM_LINK, s=True, d=False) or []
+    while c and _attr_exists(c[0], GEO_NRM_MARK) and c[0] not in out and len(out) < 4:
+        out.append(c[0])
+        c = cmds.listConnections(c[0] + ".inputPolymesh", s=True, d=False) or []
+    return out
+
+
+def _geo_nrm_node(line):
+    """v0.1.57: 形どおりの法線用ノードの出口（polySoftEdge）。無ければ None。"""
+    ns = _geo_nrm_nodes(line)
+    return ns[0] if ns else None
+
+
+_GEO_NRM_SKIP = set()   # 形どおりの法線にできなかったライン（_ukey）。ツリー更新のたびに調べ直さない
+
+
+def _ensure_geo_normals(line):
+    """v0.1.57: スクリーン輪郭・フレネルの線用メッシュの法線を、元メッシュの形どおりのなめらかな法線にする
+    （前の版で作った線をツールを開いたときに切り替える入り口。作ったら True）。
+    リファレンス等の線（別 ROOT）・変形追従の無い静的な線には触らない。"""
+    if not line or not cmds.objExists(line):
+        return False
+    if not (_attr_exists(line, SCRN_TAG) or _attr_exists(line, FRES_TAG)):
+        return False
+    if _geo_nrm_node(line):
+        return False
+    key = _ukey(line)
+    if key in _GEO_NRM_SKIP or _is_foreign(line):
+        return False
+    defm = _line_deformer(line)
+    src = _line_src_shape(line) if defm else None
+    line_l = (cmds.ls(line, long=True) or [line])[0]
+    src_tr = (cmds.listRelatives(src, parent=True, f=True) or [None])[0] if src else None
+    if not src_tr or src_tr == line_l or cmds.nodeType(src) != "mesh":
+        _GEO_NRM_SKIP.add(key)      # 変形追従の無い静的な線（入力が自分の中間シェイプ）など
+        return False
+    if not _insert_geo_normals(line, defm):
+        _GEO_NRM_SKIP.add(key)
+        return False
+    return True
+
+
+def _insert_geo_normals(line, defm):
+    """v0.1.57: 線用メッシュは元メッシュの outMesh を deformer の入力にして変形に追従するため、元メッシュの
+    法線を編集していると（顔の陰用に球から転写した等）その法線がそのまま流れ、編集した法線が横を向く所
+    （顔の内側など）に輪郭が出ていた。deformer の出口のすぐ後ろに「法線のロック解除（polyNormalPerVertex）→
+    全辺なめらか（polySoftEdge 180°）」を挟む（元メッシュの法線は変えない・変形には今までどおり追従）。
+    線の生成の中（Undo 1 回で生成ごと戻る）と、前の版の線をツールを開いたときに切り替える所から呼ぶ。"""
+    out_plug = defm + ".outputGeometry[0]"
+    dst = (cmds.listConnections(out_plug, s=False, d=True, p=True) or [None])[0]
+    if not dst:
+        return False
+    cmds.undoInfo(openChunk=True)     # ツールを開いたときの切り替えも Undo 1 回にまとめる
+    try:
+        # polyNormalPerVertex / polySoftEdge はメッシュの部品に対するコマンドなので、deformer の出口を受ける
+        # 一時的な中間シェイプに掛けて作り、できたノードを線のシェイプ側へつなぎ替えてから一時シェイプを消す
+        tr = cmds.createNode("transform", name=_base(line) + "_OG_geoTmp")
+        tmp = cmds.createNode("mesh", name=_base(line) + "_OG_geoTmpShape", parent=tr)
+        cmds.setAttr(tmp + ".intermediateObject", 1)
+        cmds.connectAttr(out_plug, tmp + ".inMesh", f=True)
+        cmds.polyNormalPerVertex(tmp + ".vtx[*]", unFreezeNormal=True)
+        cmds.polySoftEdge(tmp + ".e[*]", angle=180)
+        up = (cmds.listConnections(tmp + ".inMesh", s=True, d=False, p=True) or [None])[0]
+        nodes = []
+        n = up.split(".")[0] if up else None
+        while n and cmds.nodeType(n) in ("polySoftEdge", "polyNormalPerVertex") and len(nodes) < 4:
+            nodes.append(n)
+            n = (cmds.listConnections(n + ".inputPolymesh", s=True, d=False) or [None])[0]
+        if len(nodes) != 2:
+            cmds.delete(tr)
+            return False
+        soft, unlock = nodes
+        for nd in nodes:
+            cmds.addAttr(nd, ln=GEO_NRM_MARK, at="bool", dv=True)
+        cmds.connectAttr(soft + ".output", dst, f=True)
+        cmds.disconnectAttr(soft + ".output", tmp + ".inMesh")
+        cmds.delete(tr)
+        soft = cmds.rename(soft, _base(line) + "_OG_geoSoft")
+        cmds.rename(unlock, _base(line) + "_OG_geoUnlock")
+        if not _attr_exists(line, GEO_NRM_LINK):
+            cmds.addAttr(line, ln=GEO_NRM_LINK, at="message")
+        cmds.connectAttr(soft + ".message", line + "." + GEO_NRM_LINK, f=True)
+        return True
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+def _cleanup_orphan_geo_nrm():
+    """v0.1.57: 線が消えて行き先の無くなった形どおりの法線用ノードを片付ける。無ければ何もしない。"""
+    for t in ("polySoftEdge", "polyNormalPerVertex"):
+        for n in cmds.ls(type=t) or []:
+            if not cmds.objExists(n) or not _attr_exists(n, GEO_NRM_MARK):
+                continue
+            if cmds.referenceQuery(n, isNodeReferenced=True):
+                continue
+            if not (cmds.listConnections(n + ".output", s=False, d=True) or []):
+                try:
+                    cmds.delete(n)
+                except Exception:
+                    pass
 
 
 def _mesh_vertex_count(node):
@@ -7891,6 +8023,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.setAttr(defm + ".offset", FRES_ZOFFSET, lock=True)
                 except Exception:
                     pass
+                # v0.1.57: 元の法線を編集していても形どおりの法線で線を出す（deformer の出口の後ろ）
+                if cmds.listConnections(defm + ".input[0].inputGeometry", s=True, d=False):
+                    _insert_geo_normals(dup, defm)
 
                 # フレネルシェーダ（dx11Shader + HLSL、VP2 ハードウェア）を割り当て
                 _build_fresnel_network(dup, dshape, self._color)
@@ -7977,6 +8112,9 @@ class ToonOutlineUI(QtWidgets.QDialog):
                     cmds.setAttr(defm + ".offset", 0.0, lock=True)
                 except Exception:
                     pass
+                # v0.1.57: 元の法線を編集していても形どおりの法線で線を出す（deformer の出口の後ろ）
+                if cmds.listConnections(defm + ".input[0].inputGeometry", s=True, d=False):
+                    _insert_geo_normals(dup, defm)
 
                 # 曲率用カラーセット（頂点カラー R = 太さ倍率）を deformer より下流に用意。
                 # ★シェーダ割り当ての「前」に作る: dx11Shader は割り当て時に頂点入力レイアウトを
@@ -8700,6 +8838,8 @@ class ToonOutlineUI(QtWidgets.QDialog):
                 victims.add(shd)
                 for sg in cmds.listConnections(shd, type="shadingEngine") or []:
                     victims.add(sg)
+            for gn in _geo_nrm_nodes(line):   # v0.1.57: 形どおりの法線用ノード
+                victims.add(gn)
             # 重なりマスク本体（別ホルダー）と膨らみ乗算ノードもラインと一緒に削除する
             m = _mask_of(line)
             if m:
@@ -8735,6 +8875,7 @@ class ToonOutlineUI(QtWidgets.QDialog):
             # 孤立したハンドル／コントローラー／空ホルダーを掃除
             self._cleanup_orphan_handles()
             self._cleanup_orphan_ctrls()
+            _cleanup_orphan_geo_nrm()
             if cmds.objExists(LINE_HOLDER) and not (cmds.listRelatives(LINE_HOLDER, c=True) or []):
                 cmds.delete(LINE_HOLDER)
             if cmds.objExists(MASK_HOLDER) and not (cmds.listRelatives(MASK_HOLDER, c=True) or []):
